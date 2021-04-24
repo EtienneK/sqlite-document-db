@@ -1,4 +1,4 @@
-const util = require('./util.js')
+import * as util from './util'
 
 // These are the simple operators.
 // Note that "is distinct from" needs to be used to ensure nulls are returned as expected, see https://modern-sql.com/feature/is-distinct-from
@@ -15,14 +15,8 @@ const OTHER_OPS = {
   $all: true, $in: true, $nin: true, $not: true, $or: true, $and: true, $elemMatch: true, $regex: true, $type: true, $size: true, $exists: true, $mod: true, $text: true
 }
 
-function getMatchingArrayPath (op, arrayPaths) {
-  if (arrayPaths === true) {
-    // always assume array path if true is passed
-    return true
-  }
-  if (!arrayPaths || !Array.isArray(arrayPaths)) {
-    return false
-  }
+function getMatchingArrayPath (op: string, arrayPaths: string[] | undefined): string | undefined {
+  if (arrayPaths === undefined) return
   return arrayPaths.find(path => op.startsWith(path))
 }
 
@@ -34,7 +28,7 @@ function getMatchingArrayPath (op, arrayPaths) {
  * @param arrayPathStr
  * @returns {string|string|*}
  */
-function createElementOrArrayQuery (path, op, value, parent, arrayPathStr) {
+function createElementOrArrayQuery (path: string[], op: string, value: any, parent: object, arrayPathStr: string): string {
   const arrayPath = arrayPathStr.split('.')
   const deeperPath = op.split('.').slice(arrayPath.length)
   const innerPath = ['value', ...deeperPath]
@@ -59,8 +53,8 @@ function createElementOrArrayQuery (path, op, value, parent, arrayPathStr) {
       const sub = convert(innerPath, value, [], true)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
     } else if (value.$all) {
-      const cleanedValue = value.$all.filter((v) => (v !== null && typeof v !== 'undefined'))
-      arrayQuery = '(' + cleanedValue.map(function (subquery) {
+      const cleanedValue = value.$all.filter((v: any) => (v !== null && typeof v !== 'undefined'))
+      arrayQuery = '(' + cleanedValue.map(function (subquery: any) {
         const sub = convert(innerPath, subquery, [], false)
         return `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       }).join(' AND ') + ')'
@@ -91,7 +85,7 @@ function createElementOrArrayQuery (path, op, value, parent, arrayPathStr) {
  * @param parent {mixed} parent[path] = value
  * @param arrayPaths {Array} List of dotted paths that possibly need to be handled as arrays.
  */
-function convertOp (path, op, value, parent, arrayPaths) {
+function convertOp (path: string[], op: string, value: any, parent: any, arrayPaths: string[] | undefined): string {
   const arrayPath = getMatchingArrayPath(op, arrayPaths)
   if (arrayPath) {
     return createElementOrArrayQuery(path, op, value, parent, arrayPath)
@@ -105,7 +99,7 @@ function convertOp (path, op, value, parent, arrayPaths) {
           throw new Error('$or/$and/$nor entries need to be full objects')
         }
       }
-      const notted = value.map((e) => ({ $not: e }))
+      const notted = value.map((e: any) => ({ $not: e }))
       return convertOp(path, '$and', notted, value, arrayPaths)
     }
     case '$or':
@@ -135,7 +129,7 @@ function convertOp (path, op, value, parent, arrayPaths) {
       if (value.length === 1) {
         return convert(path, value[0], arrayPaths)
       }
-      const cleanedValue = value.filter((v) => (v !== null && typeof v !== 'undefined'))
+      const cleanedValue = value.filter((v: any) => (v !== null && typeof v !== 'undefined'))
       const partial = util.pathToText(path, typeof value[0] === 'string') + (op === '$nin' ? ' NOT' : '') + ' IN (' + cleanedValue.map(util.quote).join(', ') + ')'
       if (value.length !== cleanedValue.length) {
         return (op === '$in' ? '(' + partial + ' OR IS NULL)' : '(' + partial + ' AND IS NOT NULL)')
@@ -213,7 +207,7 @@ function convertOp (path, op, value, parent, arrayPaths) {
   }
 }
 
-function getSpecialKeys (path, query, forceExact) {
+function getSpecialKeys (path: string[], query: object, forceExact: boolean) {
   return Object.keys(query).filter(function (key) {
     return (path.length === 1 && !forceExact) || key in OPS || key in OTHER_OPS
   })
@@ -227,7 +221,7 @@ function getSpecialKeys (path, query, forceExact) {
  * @param forceExact {Boolean} When true, an exact match will be required.
  * @returns The corresponding PSQL expression
  */
-var convert = function (path, query, arrayPaths, forceExact = false) {
+function convert (path: string[], query: any, arrayPaths: string[] | undefined = undefined, forceExact = false): string {
   if (typeof query === 'string' || typeof query === 'boolean' || typeof query === 'number' || Array.isArray(query)) {
     return convertOp(path, '$eq', query, {}, arrayPaths)
   }
@@ -260,11 +254,9 @@ var convert = function (path, query, arrayPaths, forceExact = false) {
         }).join(' and ') + ')'
     }
   }
+  throw Error('could not convert')
 }
 
-module.exports = function (fieldName, query, arrays) {
-  return convert([fieldName], query, arrays || [])
+export default function (sqlColumnName: string, query: any, arrays?: []): string {
+  return convert([sqlColumnName], query, arrays ?? [])
 }
-module.exports.convertDotNotation = util.convertDotNotation
-module.exports.pathToText = util.pathToText
-module.exports.countUpdateSpecialKeys = util.countUpdateSpecialKeys

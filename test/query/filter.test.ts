@@ -1,5 +1,5 @@
 import { assert } from 'chai'
-const convert = require('../../src/query/filter')
+import convert from '../../src/query/filter'
 
 describe('string equality', function () {
   it('should work with single', function () {
