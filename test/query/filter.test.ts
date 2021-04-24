@@ -1,38 +1,38 @@
-var assert = require('chai').assert
-var convert = require('../../src/query/filter')
+import { assert } from 'chai'
+const convert = require('../../src/query/filter')
 
 describe('string equality', function () {
   it('should work with single', function () {
-    assert.equal(convert('data', {name: 'thomas'}), `json_extract("data", '$.name') = 'thomas'`)
-		assert.equal(convert('data', {count: 5}), `json_extract("data", '$.count') = 5`)
-		assert.equal(convert('da"ta', {"na'me": 'th\'omas'}), `json_extract("da""ta", '$.na''me') = 'th''omas'`)
+    assert.equal(convert('data', { name: 'thomas' }), 'json_extract("data", \'$.name\') = \'thomas\'')
+    assert.equal(convert('data', { count: 5 }), 'json_extract("data", \'$.count\') = 5')
+    assert.equal(convert('da"ta', { "na'me": 'th\'omas' }), 'json_extract("da""ta", \'$.na\'\'me\') = \'th\'\'omas\'')
   })
   it('should work with multiple', function () {
-    assert.equal(convert('data', {a: 'a', b: 8}), `(json_extract("data", '$.a') = 'a' and json_extract("data", '$.b') = 8)`)
-		assert.equal(convert('dat"a', {"'a": 'a\'', "b'": '\'b'}), `(json_extract("dat""a", '$.''a') = 'a''' and json_extract("dat""a", '$.b''') = '''b')`)
+    assert.equal(convert('data', { a: 'a', b: 8 }), '(json_extract("data", \'$.a\') = \'a\' and json_extract("data", \'$.b\') = 8)')
+    assert.equal(convert('dat"a', { "'a": 'a\'', "b'": '\'b' }), '(json_extract("dat""a", \'$.\'\'a\') = \'a\'\'\' and json_extract("dat""a", \'$.b\'\'\') = \'\'\'b\')')
   })
-  it('nesting does exact document matching', function() {
-    assert.equal(convert('data', {test: {cat: {name: 'oscar'}} }), `json_extract("data", '$.test') = json('{"cat":{"name":"oscar"}}')`)
-		assert.equal(convert('data', {test: {cat: {age: 10}} }), `json_extract("data", '$.test') = json('{"cat":{"age":10}}')`)
-		assert.equal(convert('dat"a', {"t''est": {"cat'": {name: 'o\'scar'}} }), `json_extract("dat""a", '$.t''''est') = json('{"cat''":{"name":"o''scar"}}')`)
+  it('nesting does exact document matching', function () {
+    assert.equal(convert('data', { test: { cat: { name: 'oscar' } } }), 'json_extract("data", \'$.test\') = json(\'{"cat":{"name":"oscar"}}\')')
+    assert.equal(convert('data', { test: { cat: { age: 10 } } }), 'json_extract("data", \'$.test\') = json(\'{"cat":{"age":10}}\')')
+    assert.equal(convert('dat"a', { "t''est": { "cat'": { name: 'o\'scar' } } }), 'json_extract("dat""a", \'$.t\'\'\'\'est\') = json(\'{"cat\'\'":{"name":"o\'\'scar"}}\')')
   })
-  it('should support nesting using the dot operator', function() {
-    assert.equal(convert('data', {'test.cat.name': 'oscar'}), `json_extract("data", '$.test.cat.name') = 'oscar'`)
-		assert.equal(convert('d"ata', {'test\'.c\'at.\'name': 'osca\'\'r'}), `json_extract("d""ata", '$.test''.c''at.''name') = 'osca''''r'`)
+  it('should support nesting using the dot operator', function () {
+    assert.equal(convert('data', { 'test.cat.name': 'oscar' }), 'json_extract("data", \'$.test.cat.name\') = \'oscar\'')
+    assert.equal(convert('d"ata', { 'test\'.c\'at.\'name': 'osca\'\'r' }), 'json_extract("d""ata", \'$.test\'\'.c\'\'at.\'\'name\') = \'osca\'\'\'\'r\'')
   })
 })
 
 describe('array equality', function () {
   it('should use =', function () {
-    assert.equal(convert('data', {'roles': ['Admin']}), `json_extract("data", '$.roles') = json('["Admin"]')`)
-		assert.equal(convert('data', {'levels': [7]}), `json_extract("data", '$.levels') = json('[7]')`)
+    assert.equal(convert('data', { roles: ['Admin'] }), 'json_extract("data", \'$.roles\') = json(\'["Admin"]\')')
+    assert.equal(convert('data', { levels: [7] }), 'json_extract("data", \'$.levels\') = json(\'[7]\')')
   })
-  it('should matching numeric indexes', function() {
+  it('should matching numeric indexes', function () {
     // assert.equal('data->\'roles\'->>0=\'Admin\'', convert('data', {'roles.0': 'Admin'}))
-		assert.equal(convert('data', {'roles.0': 'Admin'}), `json_extract("data", '$.roles[0]') = 'Admin'`)
+    assert.equal(convert('data', { 'roles.0': 'Admin' }), 'json_extract("data", \'$.roles[0]\') = \'Admin\'')
   })
-  it('support element matching', function() {
-    assert.equal('data @> \'{ "roles": "Admin" }\'', convert('data', {'roles': {$elemMatch: 'Admin'}}))
+  it('support element matching', function () {
+    assert.equal('data @> \'{ "roles": "Admin" }\'', convert('data', { roles: { $elemMatch: 'Admin' } }))
   })
 })
 
@@ -227,7 +227,7 @@ describe('Match a Field Without Specifying Array Index', function () {
 })
 */
 describe('special cases', function () {
-  it('should return true when passed no parameters', function() {
+  it('should return true when passed no parameters', function () {
     assert.equal('TRUE', convert('data', {}))
   })
 })
