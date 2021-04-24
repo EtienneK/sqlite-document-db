@@ -1,4 +1,4 @@
-import Db from './index'
+import Db from '../src/index'
 
 describe('Db', () => {
   let db: Db
