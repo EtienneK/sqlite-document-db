@@ -1,22 +1,21 @@
-import Json1Client, { Db } from './index'
+import Db from './index'
 
-describe('Json1Client', () => {
+describe('Db', () => {
   let db: Db
 
   beforeEach(async () => {
-    db = await Json1Client.connect(':memory:')
+    db = await Db.fromUrl(':memory:')
   })
 
   afterEach(async () => {
     await db.close()
   })
 
-  it('should create a new database', async () => {
+  it('should create a new database from a URL', async () => {
     expect(db).toBeDefined()
   })
 
   describe('Collection', () => {
-
     describe('find', () => {
       it('should return a Cursor that iterates through all results if no filter is specified', async () => {
         const one = await db.collection('col').insertOne({ one: 1 })
@@ -114,5 +113,4 @@ describe('Json1Client', () => {
       })
     })
   })
-
 })
