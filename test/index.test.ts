@@ -1,14 +1,24 @@
+import { MongoClient, Db as Mdb } from 'mongodb';
+import MongoMemoryServer from 'mongodb-memory-server-core';
 import Db from '../src/index'
 
 describe('Db', () => {
+  const mongod = new MongoMemoryServer();
+  let mongoClient: MongoClient
+
+  let mdb: Mdb
   let db: Db
 
   beforeEach(async () => {
+    mongoClient = await MongoClient.connect(await mongod.getUri(), { useUnifiedTopology: true })
+    mdb = mongoClient.db(await mongod.getDbName())
     db = await Db.fromUrl(':memory:')
   })
 
   afterEach(async () => {
     await db.close()
+    await mongoClient.close()
+    await mongod.stop()
   })
 
   it('should create a new database from a URL', async () => {
@@ -18,19 +28,20 @@ describe('Db', () => {
   describe('Collection', () => {
     describe('find', () => {
       it('should return a Cursor that iterates through all results if no filter is specified', async () => {
-        const one = await db.collection('col').insertOne({ one: 1 })
-        const two = await db.collection('col').insertOne({ two: 2 })
-        const three = await db.collection('col').insertOne({ three: 3 })
-        const four = await db.collection('col').insertOne({ four: 4 })
+        for (const toTest of [db, mdb]) {
+          const one = await toTest.collection('col').insertOne({ one: 1 })
+          const two = await toTest.collection('col').insertOne({ two: 2 })
+          const three = await toTest.collection('col').insertOne({ three: 3 })
+          const four = await toTest.collection('col').insertOne({ four: 4 })
 
-        await db.collection('col').deleteOne(three.insertedId)
+          const cursor = toTest.collection('col').find()
 
-        const cursor = db.collection('col').find()
-
-        expect(await cursor.next()).toStrictEqual({ _id: one.insertedId, one: 1 })
-        expect(await cursor.next()).toStrictEqual({ _id: two.insertedId, two: 2 })
-        expect(await cursor.next()).toStrictEqual({ _id: four.insertedId, four: 4 })
-        expect(await cursor.next()).toStrictEqual(null)
+          expect(await cursor.next()).toStrictEqual({ _id: one.insertedId, one: 1 })
+          expect(await cursor.next()).toStrictEqual({ _id: two.insertedId, two: 2 })
+          expect(await cursor.next()).toStrictEqual({ _id: three.insertedId, three: 3 })
+          expect(await cursor.next()).toStrictEqual({ _id: four.insertedId, four: 4 })
+          expect(await cursor.next()).toStrictEqual(null)
+        }
       })
     })
 
@@ -74,19 +85,21 @@ describe('Db', () => {
 
     describe('insertMany', () => {
       it('should insert many documents', async () => {
-        const expectedDocs = [
-          { username: 'Etiko', email: 'test@example.com' },
-          { username: 'JJ', email: 'test1@example.com' },
-          { username: 'Pablo', email: 'test2@example.com' },
-          { username: 'EtienneK', email: 'test3@example.com' },
-          { username: 'anon', email: 'test4@example.org' }
-        ]
-        const res = await db.collection('users').insertMany(expectedDocs)
-        const actualDocs = await db.collection('users').find().toArray()
+        for (const toTest of [db, mdb]) {
+          const expectedDocs = [
+            { username: 'Etiko', email: 'test@example.com' },
+            { username: 'JJ', email: 'test1@example.com' },
+            { username: 'Pablo', email: 'test2@example.com' },
+            { username: 'EtienneK', email: 'test3@example.com' },
+            { username: 'anon', email: 'test4@example.org' }
+          ]
+          const res = await toTest.collection('users').insertMany(expectedDocs)
+          const actualDocs = await toTest.collection('users').find().toArray()
 
-        expect(actualDocs)
-          .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
-        expect(res.insertedCount).toEqual(5)
+          expect(actualDocs)
+            .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
+          expect(res.insertedCount).toEqual(5)
+        }
       })
 
       it('should insert many documents - some with own ids', async () => {
@@ -98,7 +111,7 @@ describe('Db', () => {
           { _id: 'custom_id1', username: 'anon', email: 'test4@example.org' }
         ]
         const res = await db.collection('users').insertMany(expectedDocs)
-        const actualDocs = await (await db.collection('users').find()).toArray()
+        const actualDocs = await db.collection('users').find().toArray()
 
         expect(actualDocs)
           .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
@@ -114,7 +127,7 @@ describe('Db', () => {
           { _id: 'custom_id0', username: 'anon', email: 'test4@example.org' }
         ]
         const res = await db.collection('users').insertMany(expectedDocs)
-        const actualDocs = await (await db.collection('users').find()).toArray()
+        const actualDocs = await db.collection('users').find().toArray()
 
         expect(actualDocs)
           .toStrictEqual([
