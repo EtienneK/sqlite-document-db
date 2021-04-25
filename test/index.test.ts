@@ -35,7 +35,7 @@ describe('Db', () => {
     })
 
     describe('deleteOne', () => {
-      it('should delete a single document using `_id` as filter', async () => {
+      it('should delete a single document using _id as filter', async () => {
         await db.collection('col').insertOne({ one: 1 })
         const two = await db.collection('col').insertOne({ two: 2 })
         await db.collection('col').insertOne({ three: 3 })
@@ -45,7 +45,7 @@ describe('Db', () => {
         expect(actual).toStrictEqual({ deletedCount: 1 })
       })
 
-      it('should delete no documents if `_id` cannot be found', async () => {
+      it('should delete no documents if _id cannot be found', async () => {
         await db.collection('col').insertOne({ one: 1 })
         const two = await db.collection('col').insertOne({ two: 2 })
         await db.collection('col').insertOne({ three: 3 })
@@ -57,14 +57,14 @@ describe('Db', () => {
     })
 
     describe('insertOne', () => {
-      it('should insert a single document with no `_id` supplied', async () => {
+      it('should insert a single document with no _id supplied', async () => {
         const expectedDoc = { username: 'Etiko', email: 'test@example.com' }
         const res = await db.collection('users').insertOne(expectedDoc)
         const actualDoc = await db.collection('users').findOne(res.insertedId)
         expect(actualDoc).toStrictEqual({ _id: res.insertedId, ...expectedDoc })
       })
 
-      it('should insert a single document with `_id` supplied', async () => {
+      it('should insert a single document with _id supplied', async () => {
         const expectedDoc = { _id: '123456', username: 'Etiko', email: 'test@example.com' }
         const res = await db.collection('users').insertOne(expectedDoc)
         const actualDoc = await db.collection('users').findOne(res.insertedId)
@@ -73,7 +73,7 @@ describe('Db', () => {
     })
 
     describe('replaceOne', () => {
-      it('should replace a single document using `id` as filter', async () => {
+      it('should replace a single document using id as filter', async () => {
         await db.collection('col').insertOne({ one: 1 })
         const two = await db.collection('col').insertOne({ two: 2 })
         await db.collection('col').insertOne({ three: 3 })
@@ -87,7 +87,7 @@ describe('Db', () => {
         expect(four).toStrictEqual({ _id: two.insertedId, four: 4 })
       })
 
-      it('should replace a single document using `id` as filter ignoring new document `_id`', async () => {
+      it('should replace a single document using id as filter ignoring new document _id', async () => {
         await db.collection('col').insertOne({ one: 1 })
         const two = await db.collection('col').insertOne({ two: 2 })
         await db.collection('col').insertOne({ three: 3 })
@@ -101,7 +101,7 @@ describe('Db', () => {
         expect(four).toStrictEqual({ _id: two.insertedId, four: 4 })
       })
 
-      it('should replace no documents if `id` cannot be found', async () => {
+      it('should replace no documents if id cannot be found', async () => {
         await db.collection('col').insertOne({ one: 1 })
         const two = await db.collection('col').insertOne({ two: 2 })
         await db.collection('col').insertOne({ three: 3 })

@@ -1,6 +1,6 @@
 import convert from './query/filter'
 import sqlite3 from 'sqlite3'
-import { open, Database } from 'sqlite'
+import { open, Database, ISqlite } from 'sqlite'
 import ObjectID from 'bson-objectid'
 
 export type Document = Record<string, any> & {
@@ -9,6 +9,11 @@ export type Document = Record<string, any> & {
 
 export interface DeleteOneResult {
   deletedCount: number
+}
+
+export interface InsertManyResult {
+  insertedCount: number
+  insertedIds: Record<number, string>
 }
 
 export interface InsertOneResult {
@@ -99,10 +104,39 @@ export class Collection {
 
   async insertOne (doc: Document): Promise<InsertOneResult> {
     await this.init
-    const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id
-    await this.db.run(`INSERT INTO ${this.name} VALUES(?, json(?))`, id, JSON.stringify({ _id: id, ...doc }))
     return {
-      insertedId: id
+      insertedId: (await this.insertMany([ doc ])).insertedIds[0]
+    }
+  }
+
+  async insertMany (docs: Document[]): Promise<InsertManyResult> {
+    await this.init
+
+    const stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(?, json(?))`)
+    const resultPromises: { id: string, index: string, promise: Promise<ISqlite.RunResult<sqlite3.Statement>> }[] = []
+    for (let index = 0; index < docs.length; index++) {
+      const doc = docs[index]
+      const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
+      resultPromises.push({
+        id,
+        index: `${index}`,
+        promise: stmt.run(id, JSON.stringify({ _id: id, ...doc }))
+      })
+    }
+    const results = await Promise.all(resultPromises.map(r => r.promise))
+    await stmt.finalize()
+
+    const insertedIds = resultPromises.reduce(
+      (prev, current) => {
+        prev[current.index] = current.id
+        return prev
+      },
+      {} as Record<string, string>
+    )
+
+    return {
+      insertedIds,
+      insertedCount: results.length
     }
   }
 }
