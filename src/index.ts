@@ -26,7 +26,7 @@ export interface ReplaceOneResult {
 
 export interface Cursor {
   next: () => Promise<Document | null>
-  toArray: () => Promise<{ documents: Document[] }>
+  toArray: () => Promise<Document[]>
 }
 
 export class Collection {
@@ -62,7 +62,7 @@ export class Collection {
         return JSON.parse(result.data)
       }
 
-      async toArray (): Promise<{ documents: Document[] }> {
+      async toArray (): Promise<Document[]> {
         const documents: Document[] = []
 
         let document: Document | null
@@ -70,9 +70,7 @@ export class Collection {
           documents.push(document)
         }
 
-        return {
-          documents
-        }
+        return documents
       }
     }(this)
   }
@@ -125,10 +123,7 @@ export class Collection {
           index: `${index}`,
           promise: stmt.run(id, JSON.stringify({ _id: id, ...doc }))
             .then(_ => 'success')
-            .catch(error => {
-              console.error(error)
-              return 'error'
-            })
+            .catch(error => 'error')
         })
       }
       results = await Promise.all(resultPromises.map(r => r.promise))

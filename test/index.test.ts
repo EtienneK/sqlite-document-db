@@ -84,7 +84,7 @@ describe('Db', () => {
         const res = await db.collection('users').insertMany(expectedDocs)
         const actualDocs = await db.collection('users').find().toArray()
 
-        expect(actualDocs.documents)
+        expect(actualDocs)
           .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
         expect(res.insertedCount).toEqual(5)
       })
@@ -100,7 +100,7 @@ describe('Db', () => {
         const res = await db.collection('users').insertMany(expectedDocs)
         const actualDocs = await (await db.collection('users').find()).toArray()
 
-        expect(actualDocs.documents)
+        expect(actualDocs)
           .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
         expect(res.insertedCount).toEqual(5)
       })
@@ -116,7 +116,7 @@ describe('Db', () => {
         const res = await db.collection('users').insertMany(expectedDocs)
         const actualDocs = await (await db.collection('users').find()).toArray()
 
-        expect(actualDocs.documents)
+        expect(actualDocs)
           .toStrictEqual([
             { _id: res.insertedIds[0], ...expectedDocs[0] },
             { _id: res.insertedIds[1], ...expectedDocs[1] },
