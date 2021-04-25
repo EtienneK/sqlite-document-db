@@ -1,3 +1,4 @@
+import convert from './query/filter'
 import sqlite3 from 'sqlite3'
 import { open, Database } from 'sqlite'
 import ObjectID from 'bson-objectid'
@@ -20,6 +21,7 @@ export interface ReplaceOneResult {
 
 export interface Cursor {
   next: () => Promise<Document | null>
+  toArray: () => Promise<{ documents: Document[] }>
 }
 
 export class Collection {
@@ -38,7 +40,7 @@ export class Collection {
     `).then(r => undefined)
   }
 
-  find (): Cursor {
+  find (query: object = {}): Cursor {
     return new class implements Cursor {
       private currentRowId = -1
 
@@ -47,21 +49,40 @@ export class Collection {
       async next (): Promise<Document | null> {
         await this.outer.init
         const result = await this.outer.db.get(
-          `SELECT rowid, id, data FROM ${this.outer.name} WHERE rowid > ? ORDER BY rowid LIMIT 1`,
+          `SELECT rowid, id, data FROM ${this.outer.name} WHERE rowid > ? AND (${convert('data', query)}) ORDER BY rowid LIMIT 1`,
           this.currentRowId
         )
         if (result === undefined) return null
         this.currentRowId = result.rowid
-        return { _id: result.id, ...JSON.parse(result.data) }
+        return JSON.parse(result.data)
+      }
+
+      async toArray (): Promise<{ documents: Document[] }> {
+        const documents: Document[] = []
+
+        let document: Document | null
+        while ((document = await this.next()) !== null) {
+          documents.push(document)
+        }
+
+        return {
+          documents
+        }
       }
     }(this)
   }
 
-  async findOne (filter: string): Promise<Document | null> {
+  async findOne (query: string | object): Promise<Document | null> {
     await this.init
-    const result = await this.db.get(`SELECT id, data FROM ${this.name} WHERE id = ?`, filter)
+    let result: Document | undefined
+
+    if (typeof query === 'string')
+      result = await this.db.get(`SELECT id, data FROM ${this.name} WHERE id = ?`, query)
+    else
+      result = await this.db.get(`SELECT id, data FROM ${this.name} WHERE (${convert('data', query)})`)
+
     if (result === undefined) return null
-    else return { _id: result.id, ...JSON.parse(result.data) }
+    else return JSON.parse(result.data)
   }
 
   async deleteOne (filter: string): Promise<DeleteOneResult> {
@@ -72,14 +93,14 @@ export class Collection {
 
   async replaceOne (filter: string, doc: Document): Promise<ReplaceOneResult> {
     await this.init
-    const result = await this.db.run(`UPDATE ${this.name} SET data = json(?) WHERE id = ?`, JSON.stringify({ ...doc, _id: undefined }), filter)
+    const result = await this.db.run(`UPDATE ${this.name} SET data = json(?) WHERE id = ?`, JSON.stringify({ ...doc, _id: filter }), filter)
     return { modifiedCount: result?.changes ?? 0 }
   }
 
   async insertOne (doc: Document): Promise<InsertOneResult> {
     await this.init
     const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id
-    await this.db.run(`INSERT INTO ${this.name} VALUES(?, json(?))`, id, JSON.stringify(doc))
+    await this.db.run(`INSERT INTO ${this.name} VALUES(?, json(?))`, id, JSON.stringify({ _id: id, ...doc }))
     return {
       insertedId: id
     }

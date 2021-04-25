@@ -32,7 +32,10 @@ describe('array equality', function () {
     assert.equal(convert('data', { 'roles.0': 'Admin' }), 'json_extract("data", \'$.roles[0]\') = \'Admin\'')
   })
   it('support element matching', function () {
-    assert.equal('data @> \'{ "roles": "Admin" }\'', convert('data', { roles: { $elemMatch: 'Admin' } }))
+    assert.equal(
+      convert('data', { roles: { $elemMatch: 'Admin' } }),
+      `EXISTS (select "id" from json_each(json_extract("data", '$.roles')) where value = 'Admin')`
+    )
   })
 })
 

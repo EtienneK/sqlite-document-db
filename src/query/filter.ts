@@ -119,7 +119,9 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
       }
     // TODO (make sure this handles multiple elements correctly)
     case '$elemMatch':
-      return convert(path, value, arrayPaths)
+      const [col, ...pathArr] = path
+      return `EXISTS (select "id" from json_each(${util.toJson1Extract(col, pathArr)}) where value = ${util.quote(value)})`
+      // return convert(path, value, arrayPaths)
       // return util.pathToText(path, false) + ' @> \'' + util.stringEscape(JSON.stringify(value)) + '\'::jsonb'
     case '$in':
     case '$nin': {
