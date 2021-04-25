@@ -4,7 +4,7 @@ import convert from '../../src/query/filter'
 describe('filter integration tests', () => {
   let db: Db
 
-  const data = [
+  const items = [
     { _id: '123', item: "journal", qty: 25, size: { h: 14, w: 21, uom: "cm" }, status: "A" },
     { _id: '124',item: "notebook", qty: 50, size: { h: 8.5, w: 11, uom: "in" }, status: "A" },
     { _id: '126',item: "paper", qty: 100, size: { h: 8.5, w: 11, uom: "in" }, status: "D" },
@@ -15,10 +15,7 @@ describe('filter integration tests', () => {
 
   beforeAll(async () => {
     db = await Db.fromUrl(':memory:')
-
-    for (const d of data) {
-      await db.collection('items').insertOne(d)
-    }
+    await db.collection('items').insertMany(items)
   })
 
   afterAll(async () => {
@@ -27,7 +24,7 @@ describe('filter integration tests', () => {
 
   describe('string equality', () => {
     it('should work with single', async () => {
-      const expected = data[4]
+      const expected = items[4]
       const actual = { ...(await db.collection('items').find({ status: "C" }).toArray()).documents[0] }
       expect(actual).toStrictEqual(expected)
     })
