@@ -28,7 +28,6 @@ describe('array equality', function () {
     assert.equal(convert('data', { levels: [7] }), 'json_extract("data", \'$.levels\') = json(\'[7]\')')
   })
   it('should matching numeric indexes', function () {
-    // assert.equal('data->\'roles\'->>0=\'Admin\'', convert('data', {'roles.0': 'Admin'}))
     assert.equal(convert('data', { 'roles.0': 'Admin' }), 'json_extract("data", \'$.roles[0]\') = \'Admin\'')
   })
   it('support element matching', function () {
