@@ -36,19 +36,34 @@ describe('filter integration tests', () => {
   describe('string equality', () => {
     it('should work with single', async () => {
       for (const toTest of [db, mdb]) {
-        const expected = items[4]
-        const actual = { ...(await toTest.collection('items').find({ status: 'C' }).toArray())[0] }
+        const expected = [ items[2], items[3] ]
+        const actual = await toTest.collection('items').find({ status: 'D' }).toArray()
         expect(actual).toStrictEqual(expected)
       }
     })
 
-    it('should work with multiple', function () {
+    it('should work with multiple', async () => {
+      for (const toTest of [db, mdb]) {
+        const expected = [ items[1] ]
+        const actual = await toTest.collection('items').find({ status: 'A', item: 'notebook' }).toArray()
+        expect(actual).toStrictEqual(expected)
+      }
     })
 
-    it('nesting does exact document matching', function () {
+    it('nesting does exact document matching', async () => {
+      for (const toTest of [db, mdb]) {
+        const expected = [ items[5] ]
+        const actual = await toTest.collection('items').find({ size: { h: 10, w: 15.25, uom: 'cm' } }).toArray()
+        expect(actual).toStrictEqual(expected)
+      }
     })
 
-    it('should support nesting using the dot operator', function () {
+    it('should support nesting using the dot operator', async () => {
+      for (const toTest of [db, mdb]) {
+        const expected = [ items[0], items[3], items[4], items[5] ]
+        const actual = await toTest.collection('items').find({ 'size.uom': 'cm' }).toArray()
+        expect(actual).toStrictEqual(expected)
+      }
     })
   })
 })
