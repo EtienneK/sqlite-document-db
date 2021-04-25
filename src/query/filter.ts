@@ -45,19 +45,19 @@ function createElementOrArrayQuery (path: string[], op: string, value: any, pare
   if (typeof value === 'object' && !Array.isArray(value) && value !== null) {
     if (typeof value.$size !== 'undefined') {
       // size does not support array element based matching
-    } else if (value.$elemMatch) {
+    } else if (value.$elemMatch !== undefined) {
       const sub = convert(innerPath, value.$elemMatch, [], false)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       return arrayQuery
-    } else if (value.$in) {
+    } else if (value.$in !== undefined) {
       const sub = convert(innerPath, value, [], true)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
-    } else if (value.$all) {
+    } else if (value.$all !== undefined) {
       const cleanedValue = value.$all.filter((v: any) => (v !== null && typeof v !== 'undefined'))
-      arrayQuery = '(' + cleanedValue.map(function (subquery: any) {
+      arrayQuery = `(${cleanedValue.map(function (subquery: any) {
         const sub = convert(innerPath, subquery, [], false)
         return `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
-      }).join(' AND ') + ')'
+      }).join(' AND ') as string})`
     } else if (specialKeys.length === 0) {
       const sub = convert(innerPath, value, [], true)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
@@ -72,7 +72,7 @@ function createElementOrArrayQuery (path: string[], op: string, value: any, pare
     const sub = convert(innerPath, value, [], true)
     arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
   }
-  if (!arrayQuery || arrayQuery === '()') {
+  if (arrayQuery === null || arrayQuery === undefined || arrayQuery === '()') {
     return singleElementQuery
   }
   return `(${singleElementQuery} OR ${arrayQuery})`
@@ -87,7 +87,7 @@ function createElementOrArrayQuery (path: string[], op: string, value: any, pare
  */
 function convertOp (path: string[], op: string, value: any, parent: any, arrayPaths: string[] | undefined): string {
   const arrayPath = getMatchingArrayPath(op, arrayPaths)
-  if (arrayPath) {
+  if (arrayPath !== undefined) {
     return createElementOrArrayQuery(path, op, value, parent, arrayPath)
   }
   switch (op) {
@@ -118,11 +118,12 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
         return '(' + value.map((subquery) => convert(path, subquery, arrayPaths)).join(op === '$or' ? ' OR ' : ' AND ') + ')'
       }
     // TODO (make sure this handles multiple elements correctly)
-    case '$elemMatch':
+    case '$elemMatch': {
       const [col, ...pathArr] = path
       return `EXISTS (select "id" from json_each(${util.toJson1Extract(col, pathArr)}) where value = ${util.quote(value)})`
       // return convert(path, value, arrayPaths)
       // return util.pathToText(path, false) + ' @> \'' + util.stringEscape(JSON.stringify(value)) + '\'::jsonb'
+    }
     case '$in':
     case '$nin': {
       if (value.length === 0) {

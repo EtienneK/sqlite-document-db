@@ -1,6 +1,6 @@
 import convert from './query/filter'
 import sqlite3 from 'sqlite3'
-import { open, Database, ISqlite } from 'sqlite'
+import { open, Database } from 'sqlite'
 import ObjectID from 'bson-objectid'
 
 export type Document = Record<string, any> & {
@@ -40,8 +40,8 @@ export class Collection {
     this.name = 'collection_' + name
 
     this.init = this.db.run(`CREATE TABLE IF NOT EXISTS ${this.name} (data JSON)`)
-    .then(_ => this.db.run(`CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`))
-    .then(_ => undefined)
+      .then(async _ => await this.db.run(`CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`))
+      .then(_ => undefined)
   }
 
   find (query: Filter = {}): Cursor {
@@ -76,10 +76,9 @@ export class Collection {
 
   async findOne (query: string | Filter): Promise<Document | null> {
     await this.init
-    let result: Document | undefined
 
     if (typeof query === 'string') query = { _id: query }
-    result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${convert('data', query)})`)
+    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${convert('data', query)})`)
 
     if (result === undefined) return null
     else return JSON.parse(result.data)
@@ -107,7 +106,7 @@ export class Collection {
   async insertOne (doc: Document): Promise<InsertOneResult> {
     await this.init
     return {
-      insertedId: (await this.insertMany([ doc ])).insertedIds[0]
+      insertedId: (await this.insertMany([doc])).insertedIds[0]
     }
   }
 
@@ -115,33 +114,32 @@ export class Collection {
     await this.init
 
     let results: string[] = []
-    const resultPromises: { id: string, index: string, promise: Promise<string> }[] = []
+    const resultPromises: Array<{ id: string, index: string, promise: Promise<string> }> = []
     let stmt
     try {
       stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(json(?))`)
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
-        const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
+        const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id
         resultPromises.push({
           id,
           index: `${index}`,
           promise: stmt.run(JSON.stringify({ _id: id, ...doc }))
             .then(_ => 'success')
-            .catch(error => 'error')
+            .catch(_ => 'error')
         })
       }
-      results = await Promise.all(resultPromises.map(r => r.promise))
+      results = await Promise.all(resultPromises.map(async r => await r.promise))
     } finally {
       if (stmt !== undefined) await stmt.finalize()
     }
 
-    const insertedIds = resultPromises.reduce(
+    const insertedIds = resultPromises.reduce<Record<string, string>>(
       (prev, current) => {
-        if (results[parseInt(current.index)] === 'success')
-          prev[current.index] = current.id
+        if (results[parseInt(current.index)] === 'success') { prev[current.index] = current.id }
         return prev
       },
-      {} as Record<string, string>
+      {}
     )
 
     return {

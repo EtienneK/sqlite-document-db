@@ -33,7 +33,7 @@ describe('array equality', function () {
   it('support element matching', function () {
     assert.equal(
       convert('data', { roles: { $elemMatch: 'Admin' } }),
-      `EXISTS (select "id" from json_each(json_extract("data", '$.roles')) where value = 'Admin')`
+      'EXISTS (select "id" from json_each(json_extract("data", \'$.roles\')) where value = \'Admin\')'
     )
   })
 })

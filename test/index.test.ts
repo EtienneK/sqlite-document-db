@@ -1,9 +1,9 @@
-import { MongoClient, Db as Mdb } from 'mongodb';
-import MongoMemoryServer from 'mongodb-memory-server-core';
+import { MongoClient, Db as Mdb } from 'mongodb'
+import MongoMemoryServer from 'mongodb-memory-server-core'
 import Db from '../src/index'
 
 describe('Db', () => {
-  const mongod = new MongoMemoryServer();
+  const mongod = new MongoMemoryServer()
   let mongoClient: MongoClient
 
   let mdb: Mdb
@@ -149,7 +149,7 @@ describe('Db', () => {
           .toStrictEqual([
             { _id: res.insertedIds[0], ...expectedDocs[0] },
             { _id: res.insertedIds[1], ...expectedDocs[1] },
-            { _id: res.insertedIds[3], ...expectedDocs[3] },
+            { _id: res.insertedIds[3], ...expectedDocs[3] }
           ])
         expect(res.insertedCount).toEqual(3)
       })
