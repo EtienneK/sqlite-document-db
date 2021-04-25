@@ -112,23 +112,34 @@ export class Collection {
   async insertMany (docs: Document[]): Promise<InsertManyResult> {
     await this.init
 
-    const stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(?, json(?))`)
-    const resultPromises: { id: string, index: string, promise: Promise<ISqlite.RunResult<sqlite3.Statement>> }[] = []
-    for (let index = 0; index < docs.length; index++) {
-      const doc = docs[index]
-      const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
-      resultPromises.push({
-        id,
-        index: `${index}`,
-        promise: stmt.run(id, JSON.stringify({ _id: id, ...doc }))
-      })
+    let results: string[] = []
+    const resultPromises: { id: string, index: string, promise: Promise<string> }[] = []
+    let stmt
+    try {
+      stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(?, json(?))`)
+      for (let index = 0; index < docs.length; index++) {
+        const doc = docs[index]
+        const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
+        resultPromises.push({
+          id,
+          index: `${index}`,
+          promise: stmt.run(id, JSON.stringify({ _id: id, ...doc }))
+            .then(_ => 'success')
+            .catch(error => {
+              console.error(error)
+              return 'error'
+            })
+        })
+      }
+      results = await Promise.all(resultPromises.map(r => r.promise))
+    } finally {
+      if (stmt !== undefined) await stmt.finalize()
     }
-    const results = await Promise.all(resultPromises.map(r => r.promise))
-    await stmt.finalize()
 
     const insertedIds = resultPromises.reduce(
       (prev, current) => {
-        prev[current.index] = current.id
+        if (results[parseInt(current.index)] === 'success')
+          prev[current.index] = current.id
         return prev
       },
       {} as Record<string, string>
@@ -136,7 +147,7 @@ export class Collection {
 
     return {
       insertedIds,
-      insertedCount: results.length
+      insertedCount: results.filter(r => r === 'success').length
     }
   }
 }

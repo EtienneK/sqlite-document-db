@@ -72,6 +72,60 @@ describe('Db', () => {
       })
     })
 
+    describe('insertMany', () => {
+      it('should insert many documents', async () => {
+        const expectedDocs = [
+          { username: 'Etiko', email: 'test@example.com' },
+          { username: 'JJ', email: 'test1@example.com' },
+          { username: 'Pablo', email: 'test2@example.com' },
+          { username: 'EtienneK', email: 'test3@example.com' },
+          { username: 'anon', email: 'test4@example.org' }
+        ]
+        const res = await db.collection('users').insertMany(expectedDocs)
+        const actualDocs = await db.collection('users').find().toArray()
+
+        expect(actualDocs.documents)
+          .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
+        expect(res.insertedCount).toEqual(5)
+      })
+
+      it('should insert many documents - some with own ids', async () => {
+        const expectedDocs = [
+          { username: 'Etiko', email: 'test@example.com' },
+          { username: 'JJ', email: 'test1@example.com' },
+          { _id: 'custom_id0', username: 'Pablo', email: 'test2@example.com' },
+          { username: 'EtienneK', email: 'test3@example.com' },
+          { _id: 'custom_id1', username: 'anon', email: 'test4@example.org' }
+        ]
+        const res = await db.collection('users').insertMany(expectedDocs)
+        const actualDocs = await (await db.collection('users').find()).toArray()
+
+        expect(actualDocs.documents)
+          .toStrictEqual(expectedDocs.map((doc, index) => ({ _id: res.insertedIds[index], ...doc })))
+        expect(res.insertedCount).toEqual(5)
+      })
+
+      it('should insert and handle errors', async () => {
+        const expectedDocs = [
+          { username: 'Etiko', email: 'test@example.com' },
+          { _id: 'custom_id0', username: 'JJ', email: 'test1@example.com' },
+          { _id: 'custom_id0', username: 'Pablo', email: 'test2@example.com' },
+          { username: 'EtienneK', email: 'test3@example.com' },
+          { _id: 'custom_id0', username: 'anon', email: 'test4@example.org' }
+        ]
+        const res = await db.collection('users').insertMany(expectedDocs)
+        const actualDocs = await (await db.collection('users').find()).toArray()
+
+        expect(actualDocs.documents)
+          .toStrictEqual([
+            { _id: res.insertedIds[0], ...expectedDocs[0] },
+            { _id: res.insertedIds[1], ...expectedDocs[1] },
+            { _id: res.insertedIds[3], ...expectedDocs[3] },
+          ])
+        expect(res.insertedCount).toEqual(3)
+      })
+    })
+
     describe('replaceOne', () => {
       it('should replace a single document using id as filter', async () => {
         await db.collection('col').insertOne({ one: 1 })
