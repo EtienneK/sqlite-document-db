@@ -7,6 +7,8 @@ export type Document = Record<string, any> & {
   _id?: string
 }
 
+export type Filter = Record<string, any>
+
 export interface DeleteOneResult {
   deletedCount: number
 }
@@ -37,15 +39,12 @@ export class Collection {
 
     this.name = 'collection_' + name
 
-    this.init = this.db.run(`
-      CREATE TABLE IF NOT EXISTS ${this.name} (
-        id TEXT NOT NULL PRIMARY KEY,
-        data JSON
-      )
-    `).then(r => undefined)
+    this.init = this.db.run(`CREATE TABLE IF NOT EXISTS ${this.name} (data JSON)`)
+    .then(_ => this.db.run(`CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`))
+    .then(_ => undefined)
   }
 
-  find (query: object = {}): Cursor {
+  find (query: Filter = {}): Cursor {
     return new class implements Cursor {
       private currentRowId = -1
 
@@ -54,7 +53,7 @@ export class Collection {
       async next (): Promise<Document | null> {
         await this.outer.init
         const result = await this.outer.db.get(
-          `SELECT rowid, id, data FROM ${this.outer.name} WHERE rowid > ? AND (${convert('data', query)}) ORDER BY rowid LIMIT 1`,
+          `SELECT rowid, data FROM ${this.outer.name} WHERE rowid > ? AND (${convert('data', query)}) ORDER BY rowid LIMIT 1`,
           this.currentRowId
         )
         if (result === undefined) return null
@@ -75,28 +74,33 @@ export class Collection {
     }(this)
   }
 
-  async findOne (query: string | object): Promise<Document | null> {
+  async findOne (query: string | Filter): Promise<Document | null> {
     await this.init
     let result: Document | undefined
 
-    if (typeof query === 'string')
-      result = await this.db.get(`SELECT id, data FROM ${this.name} WHERE id = ?`, query)
-    else
-      result = await this.db.get(`SELECT id, data FROM ${this.name} WHERE (${convert('data', query)})`)
+    if (typeof query === 'string') query = { _id: query }
+    result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${convert('data', query)})`)
 
     if (result === undefined) return null
     else return JSON.parse(result.data)
   }
 
-  async deleteOne (filter: string): Promise<DeleteOneResult> {
+  async deleteOne (filter: Filter): Promise<DeleteOneResult> {
     await this.init
-    const result = await this.db.run(`DELETE FROM ${this.name} WHERE id = ?`, filter)
+    const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${convert('data', filter)})`)
     return { deletedCount: result?.changes ?? 0 }
   }
 
-  async replaceOne (filter: string, doc: Document): Promise<ReplaceOneResult> {
+  async replaceOne (filter: Filter, doc: Document): Promise<ReplaceOneResult> {
     await this.init
-    const result = await this.db.run(`UPDATE ${this.name} SET data = json(?) WHERE id = ?`, JSON.stringify({ ...doc, _id: filter }), filter)
+    const found = await this.findOne(filter)
+    let result
+    if (found !== null) {
+      result = await this.db.run(
+        `UPDATE ${this.name} SET data = json(?) WHERE ${convert('data', { _id: found._id })}`,
+        JSON.stringify({ ...doc, _id: found._id })
+      )
+    }
     return { modifiedCount: result?.changes ?? 0 }
   }
 
@@ -114,14 +118,14 @@ export class Collection {
     const resultPromises: { id: string, index: string, promise: Promise<string> }[] = []
     let stmt
     try {
-      stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(?, json(?))`)
+      stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(json(?))`)
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
         const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
         resultPromises.push({
           id,
           index: `${index}`,
-          promise: stmt.run(id, JSON.stringify({ _id: id, ...doc }))
+          promise: stmt.run(JSON.stringify({ _id: id, ...doc }))
             .then(_ => 'success')
             .catch(error => 'error')
         })

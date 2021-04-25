@@ -47,39 +47,55 @@ describe('Db', () => {
 
     describe('deleteOne', () => {
       it('should delete a single document using _id as filter', async () => {
-        await db.collection('col').insertOne({ one: 1 })
-        const two = await db.collection('col').insertOne({ two: 2 })
-        await db.collection('col').insertOne({ three: 3 })
+        for (const toTest of [db, mdb]) {
+          await toTest.collection('col').insertOne({ one: 1 })
+          const two = await toTest.collection('col').insertOne({ two: 2 })
+          await toTest.collection('col').insertOne({ three: 3 })
 
-        const actual = await db.collection('col').deleteOne(two.insertedId)
+          let actual: any = await toTest.collection('col').deleteOne({ _id: two.insertedId })
 
-        expect(actual).toStrictEqual({ deletedCount: 1 })
+          if (mdb instanceof Mdb) {
+            actual = { deletedCount: actual.deletedCount }
+          }
+
+          expect(actual).toStrictEqual({ deletedCount: 1 })
+        }
       })
 
       it('should delete no documents if _id cannot be found', async () => {
-        await db.collection('col').insertOne({ one: 1 })
-        const two = await db.collection('col').insertOne({ two: 2 })
-        await db.collection('col').insertOne({ three: 3 })
+        for (const toTest of [db, mdb]) {
+          await toTest.collection('col').insertOne({ one: 1 })
+          const two = await toTest.collection('col').insertOne({ two: 2 })
+          await toTest.collection('col').insertOne({ three: 3 })
 
-        const actual = await db.collection('col').deleteOne(two.insertedId + 'NOT_FOUND')
+          let actual: any = await toTest.collection('col').deleteOne({ _id: two.insertedId + 'NOT_FOUND' })
 
-        expect(actual).toStrictEqual({ deletedCount: 0 })
+          if (mdb instanceof Mdb) {
+            actual = { deletedCount: actual.deletedCount }
+          }
+
+          expect(actual).toStrictEqual({ deletedCount: 0 })
+        }
       })
     })
 
     describe('insertOne', () => {
       it('should insert a single document with no _id supplied', async () => {
-        const expectedDoc = { username: 'Etiko', email: 'test@example.com' }
-        const res = await db.collection('users').insertOne(expectedDoc)
-        const actualDoc = await db.collection('users').findOne(res.insertedId)
-        expect(actualDoc).toStrictEqual({ _id: res.insertedId, ...expectedDoc })
+        for (const toTest of [db, mdb]) {
+          const expectedDoc = { username: 'Etiko', email: 'test@example.com' }
+          const res = await toTest.collection('users').insertOne(expectedDoc)
+          const actualDoc = await toTest.collection('users').findOne({ _id: res.insertedId })
+          expect(actualDoc).toStrictEqual({ _id: res.insertedId, ...expectedDoc })
+        }
       })
 
       it('should insert a single document with _id supplied', async () => {
-        const expectedDoc = { _id: '123456', username: 'Etiko', email: 'test@example.com' }
-        const res = await db.collection('users').insertOne(expectedDoc)
-        const actualDoc = await db.collection('users').findOne(res.insertedId)
-        expect(actualDoc).toStrictEqual(expectedDoc)
+        for (const toTest of [db, mdb]) {
+          const expectedDoc = { _id: '123456', username: 'Etiko', email: 'test@example.com' }
+          const res = await toTest.collection('users').insertOne(expectedDoc)
+          const actualDoc = await toTest.collection('users').findOne({ _id: res.insertedId })
+          expect(actualDoc).toStrictEqual(expectedDoc)
+        }
       })
     })
 
@@ -146,7 +162,7 @@ describe('Db', () => {
         await db.collection('col').insertOne({ three: 3 })
 
         const actual = await db.collection('col')
-          .replaceOne(two.insertedId, { four: 4 })
+          .replaceOne({ _id: two.insertedId }, { four: 4 })
 
         expect(actual).toStrictEqual({ modifiedCount: 1 })
 
@@ -160,7 +176,7 @@ describe('Db', () => {
         await db.collection('col').insertOne({ three: 3 })
 
         const actual = await db.collection('col')
-          .replaceOne(two.insertedId, { _id: 'ThisIsANewId123', four: 4 })
+          .replaceOne({ _id: two.insertedId }, { _id: 'ThisIsANewId123', four: 4 })
 
         expect(actual).toStrictEqual({ modifiedCount: 1 })
 
@@ -174,7 +190,7 @@ describe('Db', () => {
         await db.collection('col').insertOne({ three: 3 })
 
         const actual = await db.collection('col')
-          .replaceOne(two.insertedId + 'invalid', { four: 4 })
+          .replaceOne({ _id: two.insertedId + 'invalid' }, { four: 4 })
 
         expect(actual).toStrictEqual({ modifiedCount: 0 })
       })
