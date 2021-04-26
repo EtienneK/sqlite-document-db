@@ -92,9 +92,11 @@ export class Collection {
 
   async replaceOne (filter: Filter, doc: Document): Promise<ReplaceOneResult> {
     await this.init
+
     const found = await this.findOne(filter)
     let result
     if (found !== null) {
+      if (doc._id !== undefined && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
       result = await this.db.run(
         `UPDATE ${this.name} SET data = json(?) WHERE ${convert('data', { _id: found._id })}`,
         JSON.stringify({ ...doc, _id: found._id })

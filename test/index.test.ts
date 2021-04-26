@@ -165,13 +165,28 @@ describe('Api', () => {
             expect(four).toStrictEqual({ _id: two.insertedId, four: 4 })
           })
 
-          it('should replace a single document using id as filter ignoring new document _id', async () => {
+          it('should not replace a single document when no document can be found', async () => {
             await db().collection('col').insertOne({ one: 1 })
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
             let actual = await db().collection('col')
-              .replaceOne({ _id: two.insertedId }, { _id: 'ThisIsANewId123', four: 4 })
+              .replaceOne({ value: 'does not exist' }, { four: 4 })
+
+            if (db() instanceof Mdb) {
+              actual = { modifiedCount: actual.modifiedCount }
+            }
+
+            expect(actual).toStrictEqual({ modifiedCount: 0 })
+          })
+
+          it('should replace a single document using id as filter and doc _id is equal', async () => {
+            await db().collection('col').insertOne({ one: 1 })
+            const two = await db().collection('col').insertOne({ two: 2 })
+            await db().collection('col').insertOne({ three: 3 })
+
+            let actual = await db().collection('col')
+              .replaceOne({ _id: two.insertedId }, { _id: two.insertedId as string, four: 4 })
 
             if (db() instanceof Mdb) {
               actual = { modifiedCount: actual.modifiedCount }
@@ -181,6 +196,21 @@ describe('Api', () => {
 
             const four = await db().collection('col').findOne(two.insertedId)
             expect(four).toStrictEqual({ _id: two.insertedId, four: 4 })
+          })
+
+          it('should throw Error when replacing a single document and using id as filter not equal to doc _id', async () => {
+            await db().collection('col').insertOne({ one: 1 })
+            const two = await db().collection('col').insertOne({ two: 2 })
+            await db().collection('col').insertOne({ three: 3 })
+
+            let error
+            try {
+              let actual = await db().collection('col')
+                .replaceOne({ _id: two.insertedId }, { _id: two.insertedId + 'invalid', four: 4 })
+            } catch (e) {
+              error = e
+            }
+            expect(error).toBeDefined()
           })
 
           it('should replace no documents if id cannot be found', async () => {
