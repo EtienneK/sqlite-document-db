@@ -19,7 +19,7 @@ describe('filter integration tests', () => {
   ]
 
   beforeAll(async () => {
-    mongoClient = await MongoClient.connect(await mongod.getUri(), { useUnifiedTopology: true })
+    mongoClient = await MongoClient.connect(await mongod.getUri())
     mdb = mongoClient.db(await mongod.getDbName())
     db = await Db.fromUrl(':memory:')
 

@@ -10,7 +10,7 @@ describe('Api', () => {
   let sqldb: Db
 
   beforeEach(async () => {
-    mongoClient = await MongoClient.connect(await mongod.getUri(), { useUnifiedTopology: true })
+    mongoClient = await MongoClient.connect(await mongod.getUri())
     mongodb = mongoClient.db(await mongod.getDbName())
     sqldb = await Db.fromUrl(':memory:')
   })
