@@ -6,8 +6,8 @@ describe('filter integration tests', () => {
   const mongod = new MongoMemoryServer()
   let mongoClient: MongoClient
 
-  let mdb: Mdb
-  let db: Db
+  let mongodb: Mdb
+  let sqldb: Db
 
   const items = [
     { _id: '123', item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
@@ -20,50 +20,54 @@ describe('filter integration tests', () => {
 
   beforeAll(async () => {
     mongoClient = await MongoClient.connect(await mongod.getUri())
-    mdb = mongoClient.db(await mongod.getDbName())
-    db = await Db.fromUrl(':memory:')
+    mongodb = mongoClient.db(await mongod.getDbName())
+    sqldb = await Db.fromUrl(':memory:')
 
-    await mdb.collection('items').insertMany(items)
-    await db.collection('items').insertMany(items)
+    await mongodb.collection('items').insertMany(items)
+    await sqldb.collection('items').insertMany(items)
   })
 
   afterAll(async () => {
-    await db.close()
+    await sqldb.close()
     await mongoClient.close()
     await mongod.stop()
   })
 
-  describe('string equality', () => {
-    it('should work with single', async () => {
-      for (const toTest of [db, mdb]) {
+  for (const dbName of ['Sqlite', 'Mongodb']) {
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+
+    describe(dbName + '> string equality', () => {
+      it('should work with single', async () => {
         const expected = [items[2], items[3]]
-        const actual = await toTest.collection('items').find({ status: 'D' }).toArray()
+        const actual = await db().collection('items').find({ status: 'D' }).toArray()
         expect(actual).toStrictEqual(expected)
-      }
-    })
+      })
 
-    it('should work with multiple', async () => {
-      for (const toTest of [db, mdb]) {
+      it('should work with multiple', async () => {
         const expected = [items[1]]
-        const actual = await toTest.collection('items').find({ status: 'A', item: 'notebook' }).toArray()
+        const actual = await db().collection('items').find({ status: 'A', item: 'notebook' }).toArray()
         expect(actual).toStrictEqual(expected)
-      }
-    })
+      })
 
-    it('nesting does exact document matching', async () => {
-      for (const toTest of [db, mdb]) {
+      it('nesting does exact document matching', async () => {
         const expected = [items[5]]
-        const actual = await toTest.collection('items').find({ size: { h: 10, w: 15.25, uom: 'cm' } }).toArray()
+        const actual = await db().collection('items').find({ size: { h: 10, w: 15.25, uom: 'cm' } }).toArray()
         expect(actual).toStrictEqual(expected)
-      }
+      })
+
+      it('should support nesting using the dot operator', async () => {
+        const expected = [items[0], items[3], items[4], items[5]]
+        const actual = await db().collection('items').find({ 'size.uom': 'cm' }).toArray()
+        expect(actual).toStrictEqual(expected)
+      })
     })
 
-    it('should support nesting using the dot operator', async () => {
-      for (const toTest of [db, mdb]) {
-        const expected = [items[0], items[3], items[4], items[5]]
-        const actual = await toTest.collection('items').find({ 'size.uom': 'cm' }).toArray()
+    describe('special cases', function () {
+      it('should return all items when passed no parameters', async () => {
+        const expected = items
+        const actual = await db().collection('items').find().toArray()
         expect(actual).toStrictEqual(expected)
-      }
+      })
     })
-  })
+  }
 })

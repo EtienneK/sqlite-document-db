@@ -35,6 +35,10 @@ describe('array equality', function () {
       convert('data', { roles: { $elemMatch: 'Admin' } }),
       'EXISTS (select "id" from json_each(json_extract("data", \'$.roles\')) where value = \'Admin\')'
     )
+    assert.equal(
+      convert('dat"a', { 'ro\'les': { $elemMatch: 'Admi\'\'n' } }),
+      'EXISTS (select "id" from json_each(json_extract("dat""a", \'$.ro\'\'les\')) where value = \'Admi\'\'\'\'n\')'
+    )
   })
 })
 
