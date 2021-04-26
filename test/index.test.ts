@@ -27,7 +27,7 @@ describe('Api', () => {
 
   describe('Db', () => {
     for (const dbName of ['Sqlite', 'Mongodb']) {
-      const db = () => dbName === 'Sqlite' ? sqldb : mongodb
+      const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
       describe(`${dbName} › Collection`, () => {
         describe('find', () => {
           it('should return a Cursor that iterates through all results if no filter is specified', async () => {
@@ -66,7 +66,7 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual: any = await db().collection('col').deleteOne({ _id: two.insertedId + 'NOT_FOUND' })
+            let actual: any = await db().collection('col').deleteOne({ _id: `${two.insertedId as string}` + 'NOT_FOUND' })
 
             if (db() instanceof Mdb) {
               actual = { deletedCount: actual.deletedCount }
@@ -142,7 +142,7 @@ describe('Api', () => {
             }
             expect(error).toBeDefined()
             const actualDocs = await db().collection('users').find().toArray()
-            expect(actualDocs).toStrictEqual([ expectedDocs[0], expectedDocs[1]])
+            expect(actualDocs).toStrictEqual([expectedDocs[0], expectedDocs[1]])
           })
         })
 
@@ -167,7 +167,7 @@ describe('Api', () => {
 
           it('should not replace a single document when no document can be found', async () => {
             await db().collection('col').insertOne({ one: 1 })
-            const two = await db().collection('col').insertOne({ two: 2 })
+            await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
             let actual = await db().collection('col')
@@ -205,8 +205,8 @@ describe('Api', () => {
 
             let error
             try {
-              let actual = await db().collection('col')
-                .replaceOne({ _id: two.insertedId }, { _id: two.insertedId + 'invalid', four: 4 })
+              await db().collection('col')
+                .replaceOne({ _id: two.insertedId }, { _id: `${two.insertedId as string}invalid`, four: 4 })
             } catch (e) {
               error = e
             }
@@ -219,7 +219,7 @@ describe('Api', () => {
             await db().collection('col').insertOne({ three: 3 })
 
             let actual = await db().collection('col')
-              .replaceOne({ _id: two.insertedId + 'invalid' }, { four: 4 })
+              .replaceOne({ _id: `${two.insertedId as string}invalid` }, { four: 4 })
 
             if (db() instanceof Mdb) {
               actual = { modifiedCount: actual.modifiedCount }

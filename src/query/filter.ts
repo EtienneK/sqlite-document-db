@@ -133,23 +133,23 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
         return convert(path, value[0], arrayPaths)
       }
       const cleanedValue = value.filter((v: any) => (v !== null && typeof v !== 'undefined'))
-      const partial = util.pathToText(path, typeof value[0] === 'string') + (op === '$nin' ? ' NOT' : '') + ' IN (' + cleanedValue.map(util.quote).join(', ') + ')'
+      const partial = `${util.pathToText(path, typeof value[0] === 'string')}${(op === '$nin' ? ' NOT' : '')} IN (${cleanedValue.map(util.quote).join(', ') as string})'`
       if (value.length !== cleanedValue.length) {
         return (op === '$in' ? '(' + partial + ' OR IS NULL)' : '(' + partial + ' AND IS NOT NULL)')
       }
       return partial
     }
     case '$text': {
-      const newOp = '~' + (!value.$caseSensitive ? '*' : '')
+      const newOp = '~' + (value.$caseSensitive === undefined ? '*' : '')
       return util.pathToText(path, true) + ' ' + newOp + ' \'' + util.stringEscape(value.$search) + '\''
     }
     case '$regex': {
       var regexOp = '~'
       var op2 = ''
-      if (parent.$options && parent.$options.includes('i')) {
+      if (parent?.$options?.includes('i') as boolean) {
         regexOp += '*'
       }
-      if (!parent.$options || !parent.$options.includes('s')) {
+      if (!(parent?.$options?.includes('s') as boolean)) {
         // partial newline-sensitive matching
         op2 += '(?p)'
       }
@@ -168,34 +168,32 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
       const pathContainsArrayAccess = path.some((key) => /^\d+$/.test(key))
       const [head, ...tail] = path
       if (isSimpleComparision && !pathContainsArrayAccess) {
-        // create containment query since these can use GIN indexes
-        // See docs here, https://www.postgresql.org/docs/9.4/datatype-json.html#JSON-INDEXING
         return `${op === '$ne' ? 'NOT ' : ''}${util.toJson1Extract(head, tail)} = ${util.quote(value)}`
       } else {
         var text = util.toJson1Extract(head, tail)
-        return text + ' ' + OPS[op] + ' ' + util.quote(value)
+        return `${text} ${OPS[op]} ${util.quote(value)}`
       }
     }
     case '$type': {
       const text = util.pathToText(path, false)
       const type = util.getPostgresTypeName(value)
-      return 'jsonb_typeof(' + text + ')=' + util.quote(type)
+      return `jsonb_typeof(${text})=${util.quote(type)}`
     }
     case '$size': {
       if (typeof value !== 'number' || value < 0 || !Number.isInteger(value)) {
         throw new Error('$size only supports positive integer')
       }
       const text = util.pathToText(path, false)
-      return 'jsonb_array_length(' + text + ')=' + value
+      return `jsonb_array_length(${text})=${value}`
     }
     case '$exists': {
       if (path.length > 1) {
         const key = path.pop()
         const text = util.pathToText(path, false)
-        return (value ? '' : ' NOT ') + text + ' ? ' + util.quote(key)
+        return `${(value !== undefined ? '' : ' NOT ')}${text} ? ${util.quote(key)}`
       } else {
         const text = util.pathToText(path, false)
-        return text + ' IS ' + (value ? 'NOT ' : '') + 'NULL'
+        return text + ' IS ' + (value !== undefined ? 'NOT ' : '') + 'NULL'
       }
     }
     case '$mod': {
@@ -203,14 +201,14 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
       if (typeof value[0] !== 'number' || typeof value[1] !== 'number') {
         throw new Error('$mod requires numeric inputs')
       }
-      return 'cast(' + text + ' AS numeric) % ' + value[0] + '=' + value[1]
+      return `cast(${text} AS numeric) % ${value[0]} = ${value[1]}`
     }
     default:
       return convert(path.concat(op.split('.')), value)
   }
 }
 
-function getSpecialKeys (path: string[], query: object, forceExact: boolean) {
+function getSpecialKeys (path: string[], query: object, forceExact: boolean): string[] {
   return Object.keys(query).filter(function (key) {
     return (path.length === 1 && !forceExact) || key in OPS || key in OTHER_OPS
   })
@@ -245,7 +243,7 @@ function convert (path: string[], query: any, arrayPaths: string[] | undefined =
     switch (specialKeys.length) {
       case 0: {
         const [col, ...pathArr] = path
-        return util.toJson1Extract(col, pathArr) + ' = ' + util.quote(query)
+        return `${util.toJson1Extract(col, pathArr)} = ${util.quote(query)}`
       }
       case 1: {
         const key = specialKeys[0]
@@ -260,6 +258,6 @@ function convert (path: string[], query: any, arrayPaths: string[] | undefined =
   throw Error('could not convert')
 }
 
-export default function (sqlColumnName: string, query: any, arrays?: []): string {
+export default function (sqlColumnName: string, query: Record<string, any>, arrays?: []): string {
   return convert([sqlColumnName], query, arrays ?? [])
 }
