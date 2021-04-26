@@ -122,6 +122,7 @@ export class Collection {
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
         const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id
+        doc._id = id
         results.push({
           id,
           index: `${index}`,

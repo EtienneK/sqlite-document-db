@@ -18,13 +18,22 @@ describe('filter integration tests', () => {
     { _id: '132', item: 'postcard', qty: 45, size: { h: 10, w: 15.25, uom: 'cm' }, status: 'A' }
   ]
 
+  const users = [
+    { username: 'su', roles: ['admin'] },
+    { username: 'etiko', roles: ['admin', 'user'] },
+    { username: 'sys', roles: ['system'] }
+  ]
+
   beforeAll(async () => {
     mongoClient = await MongoClient.connect(await mongod.getUri())
     mongodb = mongoClient.db(await mongod.getDbName())
     sqldb = await Db.fromUrl(':memory:')
 
-    await mongodb.collection('items').insertMany(items)
     await sqldb.collection('items').insertMany(items)
+    await mongodb.collection('items').insertMany(items)
+
+    await sqldb.collection('users').insertMany(users)
+    await mongodb.collection('users').insertMany(users)
   })
 
   afterAll(async () => {
@@ -62,7 +71,25 @@ describe('filter integration tests', () => {
       })
     })
 
-    describe('special cases', function () {
+    describe(dbName + '> array equality', function () {
+      it('should use =', async () => {
+        const expected = [users[0]]
+        const actual = await db().collection('users').find({ roles: ['admin'] }).toArray()
+        expect(actual).toStrictEqual(expected)
+      })
+      it('should matching numeric indexes', async () => {
+        const expected = [users[0], users[1]]
+        const actual = await db().collection('users').find({ 'roles.0': 'admin' }).toArray()
+        expect(actual).toStrictEqual(expected)
+      })
+      it('support element matching', async () => {
+        const expected = [users[0], users[1]]
+        const actual = await db().collection('users').find({ roles: { $elemMatch: { $eq: 'admin' } } }).toArray()
+        expect(actual).toStrictEqual(expected)
+      })
+    })
+
+    describe(dbName + '> special cases', function () {
       it('should return all items when passed no parameters', async () => {
         const expected = items
         const actual = await db().collection('items').find().toArray()

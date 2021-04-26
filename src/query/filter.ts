@@ -226,29 +226,35 @@ function convert (path: string[], query: any, arrayPaths: string[] | undefined =
   if (typeof query === 'string' || typeof query === 'boolean' || typeof query === 'number' || Array.isArray(query)) {
     return convertOp(path, '$eq', query, {}, arrayPaths)
   }
+
   if (query === null) {
     const text = util.pathToText(path, false)
     return '(' + text + ' IS NULL OR ' + text + ' = \'null\'::jsonb)'
   }
+
   if (query instanceof RegExp) {
     var op = query.ignoreCase ? '~*' : '~'
     return util.pathToText(path, true) + ' ' + op + ' \'' + util.stringEscape(query.source) + '\''
   }
+
   if (typeof query === 'object') {
     // Check for an empty object
     if (Object.keys(query).length === 0) {
       return 'TRUE'
     }
+
     const specialKeys = getSpecialKeys(path, query, forceExact)
     switch (specialKeys.length) {
       case 0: {
         const [col, ...pathArr] = path
         return `${util.toJson1Extract(col, pathArr)} = ${util.quote(query)}`
       }
+
       case 1: {
         const key = specialKeys[0]
         return convertOp(path, key, query[key], query, arrayPaths)
       }
+
       default:
         return '(' + specialKeys.map(function (key) {
           return convertOp(path, key, query[key], query, arrayPaths)
