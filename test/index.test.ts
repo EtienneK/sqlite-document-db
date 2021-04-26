@@ -125,24 +125,24 @@ describe('Api', () => {
             expect(res.insertedCount).toEqual(5)
           })
 
-          it('should insert and handle errors', async () => {
+          it('should insert throw error on duplicate _id', async () => {
             const expectedDocs = [
-              { username: 'Etiko', email: 'test@example.com' },
+              { _id: 'x', username: 'Etiko', email: 'test@example.com' },
               { _id: 'custom_id0', username: 'JJ', email: 'test1@example.com' },
               { _id: 'custom_id0', username: 'Pablo', email: 'test2@example.com' },
               { username: 'EtienneK', email: 'test3@example.com' },
               { _id: 'custom_id0', username: 'anon', email: 'test4@example.org' }
             ]
-            const res = await db().collection('users').insertMany(expectedDocs)
-            const actualDocs = await db().collection('users').find().toArray()
 
-            expect(actualDocs)
-              .toStrictEqual([
-                { _id: res.insertedIds[0], ...expectedDocs[0] },
-                { _id: res.insertedIds[1], ...expectedDocs[1] },
-                { _id: res.insertedIds[3], ...expectedDocs[3] }
-              ])
-            expect(res.insertedCount).toEqual(3)
+            let error
+            try {
+              await db().collection('users').insertMany(expectedDocs)
+            } catch (e) {
+              error = e
+            }
+            expect(error).toBeDefined()
+            const actualDocs = await db().collection('users').find().toArray()
+            expect(actualDocs).toStrictEqual([ expectedDocs[0], expectedDocs[1]])
           })
         })
 

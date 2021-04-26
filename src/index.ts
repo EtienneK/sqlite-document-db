@@ -1,6 +1,6 @@
 import convert from './query/filter'
 import sqlite3 from 'sqlite3'
-import { open, Database } from 'sqlite'
+import { open, Database, ISqlite } from 'sqlite'
 import ObjectID from 'bson-objectid'
 
 export type Document = Record<string, any> & {
@@ -113,30 +113,26 @@ export class Collection {
   async insertMany (docs: Document[]): Promise<InsertManyResult> {
     await this.init
 
-    let results: string[] = []
-    const resultPromises: Array<{ id: string, index: string, promise: Promise<string> }> = []
+    const results: Array<{ id: string, index: string, result: ISqlite.RunResult }> = []
     let stmt
     try {
       stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(json(?))`)
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
         const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id
-        resultPromises.push({
+        results.push({
           id,
           index: `${index}`,
-          promise: stmt.run(JSON.stringify({ _id: id, ...doc }))
-            .then(_ => 'success')
-            .catch(_ => 'error')
+          result: await stmt.run(JSON.stringify({ _id: id, ...doc }))
         })
       }
-      results = await Promise.all(resultPromises.map(async r => await r.promise))
     } finally {
       if (stmt !== undefined) await stmt.finalize()
     }
 
-    const insertedIds = resultPromises.reduce<Record<string, string>>(
+    const insertedIds = results.reduce<Record<string, string>>(
       (prev, current) => {
-        if (results[parseInt(current.index)] === 'success') { prev[current.index] = current.id }
+        prev[current.index] = current.id
         return prev
       },
       {}
@@ -144,7 +140,7 @@ export class Collection {
 
     return {
       insertedIds,
-      insertedCount: results.filter(r => r === 'success').length
+      insertedCount: results.length
     }
   }
 }
