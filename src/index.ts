@@ -159,6 +159,9 @@ export default class Db {
       filename: url,
       driver: sqlite3.Database
     })
+
+    await db.run('PRAGMA journal_mode=WAL')
+
     return new Db(db)
   }
 
