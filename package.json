@@ -1,5 +1,5 @@
 {
-  "name": "sqlite-json-interface",
+  "name": "sqlite-document-db",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
