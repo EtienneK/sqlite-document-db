@@ -64,6 +64,13 @@ function convert (columnName: string, query: QueryFilterDocument): string {
   if (entries.length === 1) {
     const [field, valueOrOp] = entries[0]
 
+    if (field === '$or') {
+      if (!Array.isArray(valueOrOp)) throw Error('$or expects value to be an array')
+      return `(${valueOrOp
+        .map(q => convert(columnName, q))
+        .join(') OR (')})`
+    }
+
     let op = '$eq'
     let value = valueOrOp
     if (typeof valueOrOp === 'object' && valueOrOp !== null) {
@@ -74,7 +81,7 @@ function convert (columnName: string, query: QueryFilterDocument): string {
   }
 
   return `(${entries.map(([key, value]) => ({ [key]: value }))
-    .map(entry => convert(columnName, entry))
+    .map(q => convert(columnName, q))
     .join(') AND (')})`
 }
 

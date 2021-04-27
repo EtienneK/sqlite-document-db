@@ -142,6 +142,16 @@ describe('Query Documents', () => {
         const expected = [data.items[0]]
         expect(actual).toStrictEqual(expected)
       })
+
+      it('Should be able to specify OR conditions', async () => {
+        // Arrange
+        const query = { $or: [{ status: 'A' }, { qty: { $lt: 30 } }] }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0], data.items[1], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
     })
   }
 })
