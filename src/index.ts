@@ -1,4 +1,4 @@
-import convert from './query/filter'
+import toSql from './query/query'
 import sqlite3 from 'sqlite3'
 import { open, Database, ISqlite } from 'sqlite'
 import ObjectID from 'bson-objectid'
@@ -53,7 +53,7 @@ export class Collection {
       async next (): Promise<Document | null> {
         await this.outer.init
         const result = await this.outer.db.get(
-          `SELECT rowid, data FROM ${this.outer.name} WHERE rowid > ? AND (${convert('data', query)}) ORDER BY rowid LIMIT 1`,
+          `SELECT rowid, data FROM ${this.outer.name} WHERE rowid > ? AND (${toSql('data', query)}) ORDER BY rowid LIMIT 1`,
           this.currentRowId
         )
         if (result === undefined) return null
@@ -78,7 +78,7 @@ export class Collection {
     await this.init
 
     if (typeof query === 'string') query = { _id: query }
-    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${convert('data', query)})`)
+    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${toSql('data', query)})`)
 
     if (result === undefined) return null
     else return JSON.parse(result.data)
@@ -86,7 +86,7 @@ export class Collection {
 
   async deleteOne (filter: Filter): Promise<DeleteOneResult> {
     await this.init
-    const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${convert('data', filter)})`)
+    const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${toSql('data', filter)})`)
     return { deletedCount: result?.changes ?? 0 }
   }
 
@@ -98,7 +98,7 @@ export class Collection {
     if (found !== null) {
       if (doc._id !== undefined && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
       result = await this.db.run(
-        `UPDATE ${this.name} SET data = json(?) WHERE ${convert('data', { _id: found._id })}`,
+        `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id })}`,
         JSON.stringify({ ...doc, _id: found._id })
       )
     }
