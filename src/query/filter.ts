@@ -28,14 +28,14 @@ function getMatchingArrayPath (op: string, arrayPaths: string[] | undefined): st
  * @param arrayPathStr
  * @returns {string|string|*}
  */
-function createElementOrArrayQuery (path: string[], op: string, value: any, parent: object, arrayPathStr: string): string {
+function createElementOrArrayQuery (path: string[], op: string, value: any, parent: object, arrayPathStr: string, recursed: number): string {
   const arrayPath = arrayPathStr.split('.')
   const deeperPath = op.split('.').slice(arrayPath.length)
   const innerPath = ['value', ...deeperPath]
   const pathToMaybeArray = path.concat(arrayPath)
 
   // TODO: nested array paths are not yet supported.
-  const singleElementQuery = convertOp(path, op, value, parent, [])
+  const singleElementQuery = convertOp(path, op, value, parent, [], recursed)
 
   const text = util.pathToText(pathToMaybeArray, false)
   const safeArray = `jsonb_typeof(${text})='array' AND`
@@ -46,30 +46,30 @@ function createElementOrArrayQuery (path: string[], op: string, value: any, pare
     if (typeof value.$size !== 'undefined') {
       // size does not support array element based matching
     } else if (value.$elemMatch !== undefined) {
-      const sub = convert(innerPath, value.$elemMatch, [], false)
+      const sub = convert(innerPath, value.$elemMatch, [], recursed, false)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       return arrayQuery
     } else if (value.$in !== undefined) {
-      const sub = convert(innerPath, value, [], true)
+      const sub = convert(innerPath, value, [], recursed, true)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
     } else if (value.$all !== undefined) {
       const cleanedValue = value.$all.filter((v: any) => (v !== null && typeof v !== 'undefined'))
       arrayQuery = `(${cleanedValue.map(function (subquery: any) {
-        const sub = convert(innerPath, subquery, [], false)
+        const sub = convert(innerPath, subquery, [], recursed, false)
         return `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       }).join(' AND ') as string})`
     } else if (specialKeys.length === 0) {
-      const sub = convert(innerPath, value, [], true)
+      const sub = convert(innerPath, value, [], recursed, true)
       arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
     } else {
       const params = value
       arrayQuery = '(' + Object.keys(params).map(function (subKey) {
-        const sub = convert(innerPath, { [subKey]: params[subKey] }, [], true)
+        const sub = convert(innerPath, { [subKey]: params[subKey] }, [], recursed, true)
         return `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
       }).join(' AND ') + ')'
     }
   } else {
-    const sub = convert(innerPath, value, [], true)
+    const sub = convert(innerPath, value, [], recursed, true)
     arrayQuery = `EXISTS (SELECT * FROM jsonb_array_elements(${text}) WHERE ${safeArray} ${sub})`
   }
   if (arrayQuery === null || arrayQuery === undefined || arrayQuery === '()') {
@@ -85,10 +85,10 @@ function createElementOrArrayQuery (path: string[], op: string, value: any, pare
  * @param parent {mixed} parent[path] = value
  * @param arrayPaths {Array} List of dotted paths that possibly need to be handled as arrays.
  */
-function convertOp (path: string[], op: string, value: any, parent: any, arrayPaths: string[] | undefined): string {
+function convertOp (path: string[], op: string, value: any, parent: any, arrayPaths: string[], recursed: number): string {
   const arrayPath = getMatchingArrayPath(op, arrayPaths)
   if (arrayPath !== undefined) {
-    return createElementOrArrayQuery(path, op, value, parent, arrayPath)
+    return createElementOrArrayQuery(path, op, value, parent, arrayPath, recursed)
   }
   switch (op) {
     case '$not':
@@ -100,7 +100,7 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
         }
       }
       const notted = value.map((e: any) => ({ $not: e }))
-      return convertOp(path, '$and', notted, value, arrayPaths)
+      return convertOp(path, '$and', notted, value, arrayPaths, recursed)
     }
     case '$or':
     case '$and':
@@ -122,7 +122,7 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
       if (typeof value !== 'object' || value === null) throw Error('$elemMatch expects an object as value')
 
       // TODO (make sure this handles multiple elements correctly)
-      return `EXISTS (select "value" as "value_1" from json_each(${util.toJson1Extract(col, pathArr)}) where ${convert(['value_1'], value, [])})`
+      return `EXISTS (select "value" as "value_${recursed}" from json_each(${util.toJson1Extract(col, pathArr)}) where ${convert(['value_' + recursed], value, [])})`
     }
     case '$in':
     case '$nin': {
@@ -222,11 +222,11 @@ function getSpecialKeys (path: string[], query: object, forceExact: boolean): st
  * @param forceExact {Boolean} When true, an exact match will be required.
  * @returns The corresponding PSQL expression
  */
-function convert (path: string[], query: any, arrayPaths: string[] = [], forceExact = false, recursed = -1): string {
+function convert (path: string[], query: any, arrayPaths: string[] = [], recursed = -1, forceExact = false): string {
   recursed++
 
   if (typeof query === 'string' || typeof query === 'boolean' || typeof query === 'number' || Array.isArray(query)) {
-    return convertOp(path, '$eq', query, {}, arrayPaths)
+    return convertOp(path, '$eq', query, {}, arrayPaths, recursed)
   }
 
   if (query === null) {
@@ -254,18 +254,18 @@ function convert (path: string[], query: any, arrayPaths: string[] = [], forceEx
 
       case 1: {
         const key = specialKeys[0]
-        return convertOp(path, key, query[key], query, arrayPaths)
+        return convertOp(path, key, query[key], query, arrayPaths, recursed)
       }
 
       default:
         return '(' + specialKeys.map(function (key) {
-          return convertOp(path, key, query[key], query, arrayPaths)
+          return convertOp(path, key, query[key], query, arrayPaths, recursed)
         }).join(' and ') + ')'
     }
   }
   throw Error('could not convert')
 }
 
-export default function (sqlColumnName: string, query: Record<string, any>, arrays?: []): string {
-  return convert([sqlColumnName], query, arrays ?? [])
+export default function (sqlColumnName: string, query: Record<string, any>, arrays: string[] = []): string {
+  return convert([sqlColumnName], query, arrays, 1)
 }
