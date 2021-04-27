@@ -117,12 +117,12 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
         }
         return '(' + value.map((subquery) => convert(path, subquery, arrayPaths)).join(op === '$or' ? ' OR ' : ' AND ') + ')'
       }
-    // TODO (make sure this handles multiple elements correctly)
     case '$elemMatch': {
       const [col, ...pathArr] = path
-      return `EXISTS (select "id" from json_each(${util.toJson1Extract(col, pathArr)}) where value = ${util.quote(value)})`
-      // return convert(path, value, arrayPaths)
-      // return util.pathToText(path, false) + ' @> \'' + util.stringEscape(JSON.stringify(value)) + '\'::jsonb'
+      if (typeof value !== 'object' || value === null) throw Error('$elemMatch expects an object as value')
+
+      // TODO (make sure this handles multiple elements correctly)
+      return `EXISTS (select "value" as "value_1" from json_each(${util.toJson1Extract(col, pathArr)}) where ${convert(['value_1'], value, [])})`
     }
     case '$in':
     case '$nin': {
@@ -222,7 +222,9 @@ function getSpecialKeys (path: string[], query: object, forceExact: boolean): st
  * @param forceExact {Boolean} When true, an exact match will be required.
  * @returns The corresponding PSQL expression
  */
-function convert (path: string[], query: any, arrayPaths: string[] | undefined = undefined, forceExact = false): string {
+function convert (path: string[], query: any, arrayPaths: string[] = [], forceExact = false, recursed = -1): string {
+  recursed++
+
   if (typeof query === 'string' || typeof query === 'boolean' || typeof query === 'number' || Array.isArray(query)) {
     return convertOp(path, '$eq', query, {}, arrayPaths)
   }

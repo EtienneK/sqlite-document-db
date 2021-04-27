@@ -1,6 +1,7 @@
 export const updateSpecialKeys = ['$currentDate', '$inc', '$min', '$max', '$mul', '$rename', '$set', '$setOnInsert', '$unset', '$push', '$pull', '$pullAll', '$addToSet']
 
 export function toJson1Extract (col: string, pathArr: string[]): string {
+  if (pathArr === undefined || pathArr.length === 0) return quote2(col)
   return `json_extract(${quote2(col)}, ${toJson1PathString(pathArr)})`
 }
 

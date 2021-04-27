@@ -32,12 +32,12 @@ describe('array equality', function () {
   })
   it('support element matching', function () {
     assert.equal(
-      convert('data', { roles: { $elemMatch: 'Admin' } }),
-      'EXISTS (select "id" from json_each(json_extract("data", \'$.roles\')) where value = \'Admin\')'
+      convert('data', { roles: { $elemMatch: { $eq: 'Admin' } } }),
+      'EXISTS (select "value" as "value_1" from json_each(json_extract("data", \'$.roles\')) where "value_1" = \'Admin\')'
     )
     assert.equal(
-      convert('dat"a', { 'ro\'les': { $elemMatch: 'Admi\'\'n' } }),
-      'EXISTS (select "id" from json_each(json_extract("dat""a", \'$.ro\'\'les\')) where value = \'Admi\'\'\'\'n\')'
+      convert('dat"a', { 'r\'oles': { $elemMatch: { $eq: 'Admi\'\'n' } } }),
+      'EXISTS (select "value" as "value_1" from json_each(json_extract("dat""a", \'$.r\'\'oles\')) where "value_1" = \'Admi\'\'\'\'n\')'
     )
   })
 })
