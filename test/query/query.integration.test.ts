@@ -15,6 +15,7 @@ describe('Query Documents', () => {
       { item: "journal", qty: 25, size: { h: 14, w: 21, uom: "cm" }, status: "A" },
       { item: "notebook", qty: 50, size: { h: 8.5, w: 11, uom: "in" }, status: "A" },
       { item: "paper", qty: 100, size: { h: 8.5, w: 11, uom: "in" }, status: "D" },
+      { item: "postcard", qty: 45, size: { h: 10, w: 15.25, uom: "cm" }, status: "C" },
       { item: "planner", qty: 75, size: { h: 22.85, w: 30, uom: "cm" }, status: "D" },
       { item: "postcard", qty: 45, size: { h: 10, w: 15.25, uom: "cm" }, status: "A" }
     ]
@@ -51,14 +52,24 @@ describe('Query Documents', () => {
       })
     })
 
-    describe(dbName + ' > Basic', () => {
-      it('Should be able to specify equality condition', async () => {
+    describe(dbName + ' > Equality Conditions', () => {
+      it('Should be able to specify equality condition using no explicit operator', async () => {
         // Arrange
         const query = { status: 'D' }
         // Act
         const actual = await db().collection('items').find(query).toArray()
         // Assert
-        const expected = [ data.items[2], data.items[3] ]
+        const expected = [ data.items[2], data.items[4] ]
+        expect(actual).toStrictEqual(expected)
+      })
+
+      it('Should be able to query using $in operator', async () => {
+        // Arrange
+        const query = { status: { $in: [ "A", "D" ] } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [ data.items[0], data.items[1], data.items[2], data.items[4], data.items[5] ]
         expect(actual).toStrictEqual(expected)
       })
     })
