@@ -73,7 +73,9 @@ function convert (columnName: string, query: QueryFilterDocument): string {
     return convertOp(columnName, field, op, value)
   }
 
-  throw Error('could not convert to SQL string')
+  return `(${entries.map(([key, value]) => ({ [key]: value }))
+    .map(entry => convert(columnName, entry))
+    .join(') AND (')})`
 }
 
 export default function toSql (columnName: string, query: QueryFilterDocument): string {
