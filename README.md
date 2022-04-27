@@ -94,6 +94,8 @@ db.collection('items').find({ $or: [{ status: 'A' }, { qty: { $lt: 30 } }] })
 
 ## Missing Features
 
+Many; example:
+
 ### Query operators
 
 - Regular expressions - `$regex` or using `/pattern/` syntax
