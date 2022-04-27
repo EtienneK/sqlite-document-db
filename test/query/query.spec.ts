@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
-import Db from '../../src/index'
+import { Db } from '../../src/index'
 
 describe('Query Documents', () => {
   let mongod: MongoMemoryServer

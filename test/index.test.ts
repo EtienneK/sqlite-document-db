@@ -1,6 +1,6 @@
 import { MongoClient, Db as Mdb } from 'mongodb'
 import MongoMemoryServer from 'mongodb-memory-server-core'
-import Db from '../src/index'
+import { Db } from '../src/index'
 
 describe('Api', () => {
   let mongod: MongoMemoryServer
