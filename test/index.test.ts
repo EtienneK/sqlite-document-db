@@ -3,15 +3,16 @@ import MongoMemoryServer from 'mongodb-memory-server-core'
 import Db from '../src/index'
 
 describe('Api', () => {
-  const mongod = new MongoMemoryServer()
+  let mongod: MongoMemoryServer
   let mongoClient: MongoClient
 
   let mongodb: Mdb
   let sqldb: Db
 
   beforeEach(async () => {
-    mongoClient = await MongoClient.connect(await mongod.getUri())
-    mongodb = mongoClient.db(await mongod.getDbName())
+    mongod = await MongoMemoryServer.create()
+    mongoClient = await MongoClient.connect(mongod.getUri())
+    mongodb = mongoClient.db('testdb')
     sqldb = await Db.fromUrl(':memory:')
   })
 
@@ -85,7 +86,7 @@ describe('Api', () => {
           })
 
           it('should insert a single document with _id supplied', async () => {
-            const expectedDoc = { _id: '123456', username: 'Etiko', email: 'test@example.com' }
+            const expectedDoc = { _id: '123456' as any, username: 'Etiko', email: 'test@example.com' }
             const res = await db().collection('users').insertOne(expectedDoc)
             const actualDoc = await db().collection('users').findOne({ _id: res.insertedId })
             expect(actualDoc).toStrictEqual(expectedDoc)
@@ -113,9 +114,9 @@ describe('Api', () => {
             const expectedDocs = [
               { username: 'Etiko', email: 'test@example.com' },
               { username: 'JJ', email: 'test1@example.com' },
-              { _id: 'custom_id0', username: 'Pablo', email: 'test2@example.com' },
+              { _id: 'custom_id0' as any, username: 'Pablo', email: 'test2@example.com' },
               { username: 'EtienneK', email: 'test3@example.com' },
-              { _id: 'custom_id1', username: 'anon', email: 'test4@example.org' }
+              { _id: 'custom_id1' as any, username: 'anon', email: 'test4@example.org' }
             ]
             const res = await db().collection('users').insertMany(expectedDocs)
             const actualDocs = await db().collection('users').find().toArray()
@@ -127,11 +128,11 @@ describe('Api', () => {
 
           it('should insert throw error on duplicate _id', async () => {
             const expectedDocs = [
-              { _id: 'x', username: 'Etiko', email: 'test@example.com' },
-              { _id: 'custom_id0', username: 'JJ', email: 'test1@example.com' },
-              { _id: 'custom_id0', username: 'Pablo', email: 'test2@example.com' },
+              { _id: 'x' as any, username: 'Etiko', email: 'test@example.com' },
+              { _id: 'custom_id0' as any, username: 'JJ', email: 'test1@example.com' },
+              { _id: 'custom_id0' as any, username: 'Pablo', email: 'test2@example.com' },
               { username: 'EtienneK', email: 'test3@example.com' },
-              { _id: 'custom_id0', username: 'anon', email: 'test4@example.org' }
+              { _id: 'custom_id0' as any, username: 'anon', email: 'test4@example.org' }
             ]
 
             let error

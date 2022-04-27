@@ -4,7 +4,7 @@ import { MongoClient, Db as Mdb } from 'mongodb'
 import Db from '../../src/index'
 
 describe('Query Documents', () => {
-  const mongod = new MongoMemoryServer()
+  let mongod: MongoMemoryServer
   let mongoClient: MongoClient
 
   let mongodb: Mdb
@@ -22,8 +22,9 @@ describe('Query Documents', () => {
   }
 
   beforeAll(async () => {
-    mongoClient = await MongoClient.connect(await mongod.getUri())
-    mongodb = mongoClient.db(await mongod.getDbName())
+    mongod = await MongoMemoryServer.create()
+    mongoClient = await MongoClient.connect(mongod.getUri())
+    mongodb = mongoClient.db('testdb')
     sqldb = await Db.fromUrl(':memory:')
 
     for (const [key, value] of Object.entries(data)) {
