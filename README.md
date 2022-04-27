@@ -96,7 +96,7 @@ db.collection('items').find({ $or: [{ status: 'A' }, { qty: { $lt: 30 } }] })
 
 ### Query operators
 
-- Regular expressions
+- Regular expressions - `$regex` or using `/pattern/` syntax
 
 ## Thanks
 
