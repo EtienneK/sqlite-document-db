@@ -71,7 +71,10 @@ const items = [
   { item: 'postcard', qty: 45, size: { h: 10, w: 15.25, uom: 'cm' }, status: 'A' }
 ]
 
-await sqldb.collection('items').insertMany(items)
+await db.collection('items').insertMany(items)
+
+// Select a single document
+db.collection('items').findOne({ item: 'paper' })
 
 // Select all documents in a collection
 const allItemsArray = await db.collection('items').find().toArray()

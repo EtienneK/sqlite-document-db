@@ -42,6 +42,15 @@ describe('Query Documents - https://www.mongodb.com/docs/manual/tutorial/query-d
   for (const dbName of ['Sqlite', 'Mongodb']) {
     const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
 
+    it('Should be able to select a single document', async () => {
+      // Arrange
+      const query = { item: 'paper' }
+      // Act
+      const actual = await db().collection('items').findOne(query)
+      // Assert
+      expect(actual).toStrictEqual(data.items[2])
+    })
+
     it('Should select all documents in a collection', async () => {
       // Arrange
       const query = undefined
