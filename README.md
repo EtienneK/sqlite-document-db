@@ -43,9 +43,57 @@ Console output of the above:
 }
 ```
 
-## Examples
+## Features and examples
+
+### Insert documents
+
+```javascript
+// Insert a single document
+db.collection('inventory').insertOne({ item: 'canvas', qty: 100, tags: ['cotton'], size: { h: 28, w: 35.5, uom: 'cm' } })
+
+// Insert multiple documents
+db.collection('inventory').insertOne([
+  { _id: undefined, item: 'journal', qty: 25, tags: ['blank', 'red'], size: { h: 14, w: 21, uom: 'cm' } },
+  { item: 'mat', qty: 85, tags: ['gray'], size: { h: 27.9, w: 35.5, uom: 'cm' } },
+  { item: 'mousepad', qty: 25, tags: ['gel', 'blue'], size: { h: 19, w: 22.85, uom: 'cm' } }
+])
+```
+
+### Query documents
+
+```javascript
+const items = [
+  { item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
+  { item: 'notebook', qty: 50, size: { h: 8.5, w: 11, uom: 'in' }, status: 'A' },
+  { item: 'paper', qty: 100, size: { h: 8.5, w: 11, uom: 'in' }, status: 'D' },
+  { item: 'postcard', qty: 45, size: { h: 10, w: 15.25, uom: 'cm' }, status: 'C' },
+  { item: 'planner', qty: 75, size: { h: 22.85, w: 30, uom: 'cm' }, status: 'D' },
+  { item: 'postcard', qty: 45, size: { h: 10, w: 15.25, uom: 'cm' }, status: 'A' }
+]
+
+await sqldb.collection('items').insertMany(items)
+
+// Select all documents in a collection
+const allItemsArray = await db.collection('items').find().toArray()
+
+// Query using equality conditions
+db.collection('items').find({ status: 'D' })
+db.collection('items').find({ status: { $in: ['A', 'D'] } })
+db.collection('items').find({ qty: { $lt: 30 } })
+db.collection('items').find({ qty: { $gt: 30 } })
+db.collection('items').find({ qty: { $lte: 45 } })
+db.collection('items').find({ qty: { $gte: 45 } })
+db.collection('items').find({ qty: { $eq: 45 } })
+db.collection('items').find({ qty: { $ne: 45 } })
+db.collection('items').find({ status: 'A', qty: { $lt: 30 } })
+db.collection('items').find({ $or: [{ status: 'A' }, { qty: { $lt: 30 } }] })
+```
 
 ## Missing Features
+
+### Query operators
+
+- Regular expressions
 
 ## Thanks
 
