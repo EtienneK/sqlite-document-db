@@ -42,122 +42,124 @@ describe('Query Documents - https://www.mongodb.com/docs/manual/tutorial/query-d
   for (const dbName of ['Sqlite', 'Mongodb']) {
     const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
 
-    it('Should be able to select a single document', async () => {
+    describe(dbName, () => {
+      it('Should be able to select a single document', async () => {
       // Arrange
-      const query = { item: 'paper' }
-      // Act
-      const actual = await db().collection('items').findOne(query)
-      // Assert
-      expect(actual).toStrictEqual(data.items[2])
-    })
+        const query = { item: 'paper' }
+        // Act
+        const actual = await db().collection('items').findOne(query)
+        // Assert
+        expect(actual).toStrictEqual(data.items[2])
+      })
 
-    it('Should select all documents in a collection', async () => {
+      it('Should select all documents in a collection', async () => {
       // Arrange
-      const query = undefined
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      expect(actual).toStrictEqual(data.items)
-    })
+        const query = undefined
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        expect(actual).toStrictEqual(data.items)
+      })
 
-    it('Should be able to specify equality condition using no explicit operator', async () => {
+      it('Should be able to specify equality condition using no explicit operator', async () => {
       // Arrange
-      const query = { status: 'D' }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[2], data.items[4]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { status: 'D' }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[2], data.items[4]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $in operator', async () => {
+      it('Should be able to query using $in operator', async () => {
       // Arrange
-      const query = { status: { $in: ['A', 'D'] } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[0], data.items[1], data.items[2], data.items[4], data.items[5]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { status: { $in: ['A', 'D'] } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0], data.items[1], data.items[2], data.items[4], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $lt operator', async () => {
+      it('Should be able to query using $lt operator', async () => {
       // Arrange
-      const query = { qty: { $lt: 30 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[0]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { qty: { $lt: 30 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $gt operator', async () => {
+      it('Should be able to query using $gt operator', async () => {
       // Arrange
-      const query = { qty: { $gt: 30 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[1], data.items[2], data.items[3], data.items[4], data.items[5]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { qty: { $gt: 30 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[1], data.items[2], data.items[3], data.items[4], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $lte operator', async () => {
+      it('Should be able to query using $lte operator', async () => {
       // Arrange
-      const query = { qty: { $lte: 45 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[0], data.items[3], data.items[5]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { qty: { $lte: 45 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0], data.items[3], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $gte operator', async () => {
+      it('Should be able to query using $gte operator', async () => {
       // Arrange
-      const query = { qty: { $gte: 45 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[1], data.items[2], data.items[3], data.items[4], data.items[5]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { qty: { $gte: 45 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[1], data.items[2], data.items[3], data.items[4], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $eq operator', async () => {
+      it('Should be able to query using $eq operator', async () => {
       // Arrange
-      const query = { qty: { $eq: 45 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[3], data.items[5]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { qty: { $eq: 45 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[3], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to query using $ne operator', async () => {
+      it('Should be able to query using $ne operator', async () => {
       // Arrange
-      const query = { qty: { $ne: 45 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[0], data.items[1], data.items[2], data.items[4]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { qty: { $ne: 45 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0], data.items[1], data.items[2], data.items[4]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to specify AND conditions', async () => {
+      it('Should be able to specify AND conditions', async () => {
       // Arrange
-      const query = { status: 'A', qty: { $lt: 30 } }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[0]]
-      expect(actual).toStrictEqual(expected)
-    })
+        const query = { status: 'A', qty: { $lt: 30 } }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0]]
+        expect(actual).toStrictEqual(expected)
+      })
 
-    it('Should be able to specify OR conditions', async () => {
+      it('Should be able to specify OR conditions', async () => {
       // Arrange
-      const query = { $or: [{ status: 'A' }, { qty: { $lt: 30 } }] }
-      // Act
-      const actual = await db().collection('items').find(query).toArray()
-      // Assert
-      const expected = [data.items[0], data.items[1], data.items[5]]
-      expect(actual).toStrictEqual(expected)
+        const query = { $or: [{ status: 'A' }, { qty: { $lt: 30 } }] }
+        // Act
+        const actual = await db().collection('items').find(query).toArray()
+        // Assert
+        const expected = [data.items[0], data.items[1], data.items[5]]
+        expect(actual).toStrictEqual(expected)
+      })
     })
   }
 })

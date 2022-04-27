@@ -33,8 +33,10 @@ const OPS = {
   $gte: '>=',
   $lt: '<',
   $lte: '<=',
-  $ne: ' <> '
+  $ne: '<>',
+  $in: 'IN'
 }
+const OPS_KEYS = Object.keys(OPS)
 
 function convertOp (columnName: string, field: string, op: string, value: string | number | any[]): string {
   switch (op) {
@@ -44,16 +46,18 @@ function convertOp (columnName: string, field: string, op: string, value: string
     case '$lte':
     case '$ne':
     case '$eq': {
-      if (typeof value !== 'string' && typeof value !== 'number') { throw Error(`${op} expects value to be a number or a string`) }
+      if (typeof value !== 'string' && typeof value !== 'number' && (typeof value !== 'object' || value == null)) {
+        throw Error(`${op} expects value to be a number, string or object`)
+      }
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)}`
     }
     case '$in': {
       if (!Array.isArray(value)) throw Error('$in expects value to be an array')
-      return `${toJson1Extract(columnName, [field])} IN (${value.map(quote).join(',')})`
+      return `${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')})`
     }
   }
 
-  throw Error('could not convert to SQL string')
+  throw Error('could not convert to SQL string - invalid op: ' + op)
 }
 
 function convert (columnName: string, query: QueryFilterDocument): string {
@@ -74,8 +78,11 @@ function convert (columnName: string, query: QueryFilterDocument): string {
     let op = '$eq'
     let value = valueOrOp
     if (typeof valueOrOp === 'object' && valueOrOp !== null) {
-      op = Object.keys(value)[0]
-      value = value[op]
+      const valueOrOpKeys = Object.keys(valueOrOp)
+      if (valueOrOpKeys.length !== 0 && OPS_KEYS.includes(valueOrOpKeys[0])) {
+        op = valueOrOpKeys[0]
+        value = value[op]
+      }
     }
     return convertOp(columnName, field, op, value)
   }
