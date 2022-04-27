@@ -3,14 +3,14 @@ import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
 describe('filter integration tests', () => {
-  const mongod = new MongoMemoryServer()
+  let mongod: MongoMemoryServer
   let mongoClient: MongoClient
 
   let mongodb: Mdb
   let sqldb: Db
 
   const items = [
-    { _id: '123', item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
+    { _id: '123' as any, item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
     { _id: '124', item: 'notebook', qty: 50, size: { h: 8.5, w: 11, uom: 'in' }, status: 'A' },
     { _id: '126', item: 'paper', qty: 100, size: { h: 8.5, w: 11, uom: 'in' }, status: 'D' },
     { _id: '128', item: 'planner', qty: 75, size: { h: 22.85, w: 30, uom: 'cm' }, status: 'D' },
@@ -25,8 +25,9 @@ describe('filter integration tests', () => {
   ]
 
   beforeAll(async () => {
-    mongoClient = await MongoClient.connect(await mongod.getUri())
-    mongodb = mongoClient.db(await mongod.getDbName())
+    mongod = await MongoMemoryServer.create()
+    mongoClient = await MongoClient.connect(mongod.getUri())
+    mongodb = mongoClient.db('testdb')
     sqldb = await Db.fromUrl(':memory:')
 
     await sqldb.collection('items').insertMany(items)

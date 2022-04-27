@@ -1,9 +1,14 @@
 {
   "name": "sqlite-document-db",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "description": "",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "/dist"
+  ],
   "scripts": {
+    "build": "rimraf ./dist && ./node_modules/typescript/bin/tsc",
     "test": "jest"
   },
   "keywords": [],
@@ -18,6 +23,7 @@
     "jest": "^27.5.1",
     "mongodb": "^4.5.0",
     "mongodb-memory-server": "^8.5.1",
+    "rimraf": "^3.0.2",
     "ts-jest": "^27.1.4",
     "ts-node": "^10.7.0",
     "ts-standard": "^11.0.0",

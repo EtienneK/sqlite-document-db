@@ -1,3 +1,5 @@
+# UNDER CONSTRUCTION
+
 # SQLite Document DB
 
 Use SQLite as a JSON Document Database.
@@ -17,14 +19,28 @@ npm i --save sqlite-document-db
 ```javascript
 import Db from 'sqlite-document-db'
 
-db = await Db.fromUrl(':memory:') // Can also be a path to your DB file
+const db = await Db.fromUrl(':memory:') // Can also be a path to your DB file
 
 // Insert some users into a collection
-db.collections('users').insertOne({ username: 'test_user', email: 'test@example.com' })
+await db.collection('users').insertOne({ username: 'test_user', email: 'test@example.com' })
+await db.collection('users').insertMany([
+  { username: 'test_user2', email: 'test2@example.com' },
+  { username: 'test_user3', email: 'test3@example.com' },
+])
 
-const user = db.collections('users').findAll({ username: 'test_user' })
+const user = await db.collection('users').findOne({ email: 'test3@example.com' })
 
 console.log(user)
+```
+
+Console output of the above:
+
+```javascript
+{
+  _id: '626964400e547e782d04d7f1',
+  username: 'test_user2',
+  email: 'test2@example.com'
+}
 ```
 
 ## Examples

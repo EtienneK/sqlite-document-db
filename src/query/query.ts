@@ -85,6 +85,6 @@ function convert (columnName: string, query: QueryFilterDocument): string {
     .join(') AND (')})`
 }
 
-export default function toSql (columnName: string, query: QueryFilterDocument): string {
+export function toSql (columnName: string, query: QueryFilterDocument): string {
   return convert(columnName, query)
 }

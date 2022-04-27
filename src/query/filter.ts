@@ -144,8 +144,8 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
       return util.pathToText(path, true) + ' ' + newOp + ' \'' + util.stringEscape(value.$search) + '\''
     }
     case '$regex': {
-      var regexOp = '~'
-      var op2 = ''
+      let regexOp = '~'
+      let op2 = ''
       if (parent?.$options?.includes('i') as boolean) {
         regexOp += '*'
       }
@@ -170,7 +170,7 @@ function convertOp (path: string[], op: string, value: any, parent: any, arrayPa
       if (isSimpleComparision && !pathContainsArrayAccess) {
         return `${op === '$ne' ? 'NOT ' : ''}${util.toJson1Extract(head, tail)} = ${util.quote(value)}`
       } else {
-        var text = util.toJson1Extract(head, tail)
+        const text = util.toJson1Extract(head, tail)
         return `${text} ${OPS[op]} ${util.quote(value)}`
       }
     }
@@ -235,7 +235,7 @@ function convert (path: string[], query: any, recursed: number, arrayPaths: stri
   }
 
   if (query instanceof RegExp) {
-    var op = query.ignoreCase ? '~*' : '~'
+    const op = query.ignoreCase ? '~*' : '~'
     return util.pathToText(path, true) + ' ' + op + ' \'' + util.stringEscape(query.source) + '\''
   }
 
@@ -266,6 +266,6 @@ function convert (path: string[], query: any, recursed: number, arrayPaths: stri
   throw Error('could not convert')
 }
 
-export default function (sqlColumnName: string, query: Record<string, any>, arrays: string[] = []): string {
+export function def (sqlColumnName: string, query: Record<string, any>, arrays: string[] = []): string {
   return convert([sqlColumnName], query, -1, arrays)
 }

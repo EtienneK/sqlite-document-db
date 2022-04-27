@@ -1,4 +1,4 @@
-import toSql from './query/query'
+import { toSql } from './query/query'
 import sqlite3 from 'sqlite3'
 import { open, Database, ISqlite } from 'sqlite'
 import ObjectID from 'bson-objectid'
@@ -40,8 +40,8 @@ export class Collection {
     this.name = 'collection_' + name
 
     this.init = this.db.run(`CREATE TABLE IF NOT EXISTS ${this.name} (data JSON)`)
-      .then(async _ => await this.db.run(`CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`))
-      .then(_ => undefined)
+      .then(async () => await this.db.run(`CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`))
+      .then(() => undefined)
   }
 
   find (query: Filter = {}): Cursor {
@@ -148,7 +148,7 @@ export class Collection {
   }
 }
 
-export default class Db {
+export class Db {
   private collections: { [key: string]: Collection } = {}
 
   private constructor (private readonly db: Database) { }
@@ -166,7 +166,7 @@ export default class Db {
 
   collection (name: string): Collection {
     name = name.toLowerCase()
-    if (this.collections[name] === undefined) { this.collections[name] = new Collection(name, this.db) }
+    if (this.collections[name] == null) { this.collections[name] = new Collection(name, this.db) }
     return this.collections[name]
   }
 
