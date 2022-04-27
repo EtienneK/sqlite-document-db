@@ -4,14 +4,14 @@
     "module": "commonjs",
     "lib": [ "ES2015" ],
     "outDir": "./dist",
-    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "declaration": true
   },
-  "include": [
-    "src/**/*"
+  "exclude": [
+    "node_modules",
+    "backup"
   ]
 }

@@ -222,7 +222,7 @@ function getSpecialKeys (path: string[], query: object, forceExact: boolean): st
  * @param forceExact {Boolean} When true, an exact match will be required.
  * @returns The corresponding PSQL expression
  */
-function convert (path: string[], query: any, recursed: number, arrayPaths: string[] = [], forceExact = false): string {
+function convertPrivate (path: string[], query: any, recursed: number, arrayPaths: string[] = [], forceExact = false): string {
   recursed++
 
   if (typeof query === 'string' || typeof query === 'boolean' || typeof query === 'number' || Array.isArray(query)) {
@@ -266,6 +266,6 @@ function convert (path: string[], query: any, recursed: number, arrayPaths: stri
   throw Error('could not convert')
 }
 
-export function def (sqlColumnName: string, query: Record<string, any>, arrays: string[] = []): string {
-  return convert([sqlColumnName], query, -1, arrays)
+export function convert (sqlColumnName: string, query: Record<string, any>, arrays: string[] = []): string {
+  return convertPrivate([sqlColumnName], query, -1, arrays)
 }

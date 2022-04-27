@@ -1,4 +1,4 @@
-import { Db } from '../../src/index'
+import { Db } from '../src/index'
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 

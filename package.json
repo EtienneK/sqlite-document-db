@@ -1,14 +1,14 @@
 {
   "name": "sqlite-document-db",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "files": [
-    "/dist"
+    "/dist/src"
   ],
   "scripts": {
-    "build": "rimraf ./dist && ./node_modules/typescript/bin/tsc",
+    "build": "rimraf ./dist/ && ./node_modules/typescript/bin/tsc",
     "test": "jest"
   },
   "keywords": [],

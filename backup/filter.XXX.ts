@@ -1,5 +1,5 @@
 import { assert } from 'chai'
-import convert from '../../src/query/filter'
+import { convert } from '../../backup/filter'
 
 describe('string equality', function () {
   it('should work with single', function () {
