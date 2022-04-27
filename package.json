@@ -9,7 +9,8 @@
   ],
   "scripts": {
     "build": "rimraf ./dist/ && ./node_modules/typescript/bin/tsc",
-    "test": "jest"
+    "test": "jest",
+    "test:watch": "jest --watch"
   },
   "keywords": [],
   "author": "",
