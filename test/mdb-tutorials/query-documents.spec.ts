@@ -12,7 +12,7 @@ describe('Query Documents - https://www.mongodb.com/docs/manual/tutorial/query-d
 
   const data = {
     items: [
-      { item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
+      { _id: undefined, item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
       { item: 'notebook', qty: 50, size: { h: 8.5, w: 11, uom: 'in' }, status: 'A' },
       { item: 'paper', qty: 100, size: { h: 8.5, w: 11, uom: 'in' }, status: 'D' },
       { item: 'postcard', qty: 45, size: { h: 10, w: 15.25, uom: 'cm' }, status: 'C' },
