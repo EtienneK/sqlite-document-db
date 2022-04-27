@@ -31,6 +31,16 @@ describe('Api', () => {
       const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
       describe(`${dbName} › Collection`, () => {
         describe('find', () => {
+          it('should be case sensitive', async () => {
+            const users = [
+              { name: 'user' }, { name: 'usEr' }, { name: 'USER' }
+            ]
+            await db().collection('col').insertMany(users)
+            expect(await db().collection('col').findOne({ name: 'user' })).toStrictEqual(users[0])
+            expect(await db().collection('col').findOne({ name: 'usEr' })).toStrictEqual(users[1])
+            expect(await db().collection('col').findOne({ name: 'USER' })).toStrictEqual(users[2])
+          })
+
           it('should return a Cursor that iterates through all results if no filter is specified', async () => {
             const one = await db().collection('col').insertOne({ one: 1 })
             const two = await db().collection('col').insertOne({ two: 2 })
