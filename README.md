@@ -102,6 +102,7 @@ Many. From the top of my head:
 - [Query an Array for an Element](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element)
 - [Query an Array with Compound Filter Conditions on the Array Elements](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element)
 - [Query for an Array Element that Meets Multiple Criteria using `$elemMatch`](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-for-an-array-element-that-meets-multiple-criteria)
+- [Query an Array of Embedded Documents](https://www.mongodb.com/docs/manual/tutorial/query-array-of-documents/#query-an-array-of-embedded-documents)
 
 ## Thanks
 
