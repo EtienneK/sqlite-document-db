@@ -3,8 +3,12 @@ import sqlite3 from 'sqlite3'
 import { open, Database, ISqlite } from 'sqlite'
 import ObjectID from 'bson-objectid'
 
-export type Document = Record<string, any> & {
-  _id?: string
+export declare interface Document {
+  [key: string]: any
+}
+
+export declare type WithId<TSchema extends Document = Document> = Omit<TSchema, '_id'> & {
+  _id: string
 }
 
 export type Filter = Record<string, any>
@@ -26,12 +30,12 @@ export interface ReplaceOneResult {
   modifiedCount: number
 }
 
-export interface Cursor {
-  next: () => Promise<Document | null>
-  toArray: () => Promise<Document[]>
+export interface Cursor<TSchema extends Document = Document> {
+  next: () => Promise<WithId<TSchema> | null>
+  toArray: () => Promise<Array<WithId<TSchema>>>
 }
 
-export class Collection {
+export class Collection<TSchema extends Document = Document> {
   private readonly init: Promise<void>
 
   constructor (private readonly name: string, private readonly db: Database) {
@@ -44,13 +48,13 @@ export class Collection {
       .then(() => undefined)
   }
 
-  find (query: Filter = {}): Cursor {
+  find (query: Filter = {}): Cursor<TSchema> {
     return new class implements Cursor {
       private currentRowId = -1
 
       constructor (private readonly outer: Collection) { }
 
-      async next (): Promise<Document | null> {
+      async next (): Promise<WithId<TSchema> | null> {
         await this.outer.init
         const result = await this.outer.db.get(
           `SELECT rowid, data FROM ${this.outer.name} WHERE rowid > ? AND (${toSql('data', query)}) ORDER BY rowid LIMIT 1`,
@@ -61,10 +65,10 @@ export class Collection {
         return JSON.parse(result.data)
       }
 
-      async toArray (): Promise<Document[]> {
-        const documents: Document[] = []
+      async toArray (): Promise<Array<WithId<TSchema>>> {
+        const documents: Array<WithId<TSchema>> = []
 
-        let document: Document | null
+        let document: WithId<TSchema> | null
         while ((document = await this.next()) !== null) {
           documents.push(document)
         }
@@ -74,7 +78,7 @@ export class Collection {
     }(this)
   }
 
-  async findOne (query: string | Filter): Promise<Document | null> {
+  async findOne (query: string | Filter): Promise<WithId<TSchema> | null> {
     await this.init
 
     if (typeof query === 'string') query = { _id: query }
@@ -90,7 +94,7 @@ export class Collection {
     return { deletedCount: result?.changes ?? 0 }
   }
 
-  async replaceOne (filter: Filter, doc: Document): Promise<ReplaceOneResult> {
+  async replaceOne (filter: Filter, doc: TSchema): Promise<ReplaceOneResult> {
     await this.init
 
     const found = await this.findOne(filter)
@@ -105,14 +109,14 @@ export class Collection {
     return { modifiedCount: result?.changes ?? 0 }
   }
 
-  async insertOne (doc: Document): Promise<InsertOneResult> {
+  async insertOne (doc: TSchema): Promise<InsertOneResult> {
     await this.init
     return {
       insertedId: (await this.insertMany([doc])).insertedIds[0]
     }
   }
 
-  async insertMany (docs: Document[]): Promise<InsertManyResult> {
+  async insertMany (docs: TSchema[]): Promise<InsertManyResult> {
     await this.init
 
     const results: Array<{ id: string, index: string, result: ISqlite.RunResult }> = []
@@ -121,8 +125,8 @@ export class Collection {
       stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(json(?))`)
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
-        const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id
-        doc._id = id
+        const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
+        (doc as unknown as WithId<TSchema>)._id = id
         results.push({
           id,
           index: `${index}`,
