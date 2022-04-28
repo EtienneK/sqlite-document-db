@@ -51,24 +51,24 @@ function convertOp (columnName: string, field: string, op: string, value: string
     case '$ne':
     case '$eq': {
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object') {
-        throw Error(`${op} expects value to be a number, string, object or null`)
+        throw Error(`${op} expects value to be of type: number | string | object | null`)
       }
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)}`
     }
     case '$in': {
-      if (!Array.isArray(value)) throw Error('$in expects value to be an array')
+      if (!Array.isArray(value)) throw Error('$in expects value to be of type: array')
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')})`
     }
     case '$all': {
-      if (!Array.isArray(value)) throw Error('$all expects value to be an array')
+      if (!Array.isArray(value)) throw Error('$all expects value to be of type: array')
       return `(select count(*) from json_each(${toJson1Extract(columnName, [field])}) where value in (select value from json_each(${quote(value)}))) = ${quote(new Set(value).size)}`
     }
     case '$size': {
-      if (typeof value !== 'number') throw Error('$size expects value to be a number')
+      if (typeof value !== 'number') throw Error('$size expects value to be of type: number')
       return `json_array_length(${quote2(columnName)}, ${toJson1PathString([field])}) = ${quote(value)}`
     }
     case '$exists': {
-      if (typeof value !== 'boolean') throw Error('$exists expects value to be a boolean')
+      if (typeof value !== 'boolean') throw Error('$exists expects value to be of type: boolean')
       return `select count(*) ${value ? '>' : '='} 0 from json_each(${quote2(columnName)}, ${toJson1PathString([field])})`
     }
   }
