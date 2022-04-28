@@ -34,7 +34,9 @@ const OPS = {
   $lt: '<',
   $lte: '<=',
   $ne: '<>',
-  $in: 'IN'
+  $in: 'IN',
+  $all: null,
+  $size: null
 }
 const OPS_KEYS = Object.keys(OPS)
 
@@ -54,6 +56,14 @@ function convertOp (columnName: string, field: string, op: string, value: string
     case '$in': {
       if (!Array.isArray(value)) throw Error('$in expects value to be an array')
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')})`
+    }
+    case '$all': {
+      if (!Array.isArray(value)) throw Error('$all expects value to be an array')
+      return `(select count(*) from json_each(${toJson1Extract(columnName, [field])}) where value in (select value from json_each(${quote(value)}))) = ${quote(new Set(value).size)}`
+    }
+    case '$size': {
+      if (typeof value !== 'number') throw Error('$size expects value to be a number')
+      return `json_array_length(${quote2(columnName)}, ${toJson1PathString([field])} ) = ${quote(value)}`
     }
   }
 

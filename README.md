@@ -94,11 +94,14 @@ db.collection('items').find({ $or: [{ status: 'A' }, { qty: { $lt: 30 } }] })
 
 ## Missing Features
 
-Many; example:
+Many. From the top of my head:
 
-### Query operators
+### Missing query operators
 
 - Regular expressions - `$regex` or using `/pattern/` syntax
+- [Query an Array for an Element](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element)
+- [Query an Array with Compound Filter Conditions on the Array Elements](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element)
+- [Query for an Array Element that Meets Multiple Criteria using `$elemMatch`](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-for-an-array-element-that-meets-multiple-criteria)
 
 ## Thanks
 
