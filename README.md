@@ -94,15 +94,19 @@ db.collection('items').find({ $or: [{ status: 'A' }, { qty: { $lt: 30 } }] })
 
 ## Missing Features
 
-Many. From the top of my head:
+Many MongoDB features are missing - either because I have not gotten time to implement them (feel free to help out!) or SQLite can't support them.
 
-### Missing query operators
+Need me to me more specific on missing features? Can't list them all, but from the top of my head:
 
-- Regular expressions - `$regex` or using `/pattern/` syntax
+### Querying documents
+
+- Can't query using regular expressions - no support for `$regex` operator or `/pattern/` syntax
 - [Query an Array for an Element](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element)
 - [Query an Array with Compound Filter Conditions on the Array Elements](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element)
 - [Query for an Array Element that Meets Multiple Criteria using `$elemMatch`](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-for-an-array-element-that-meets-multiple-criteria)
-- [Query an Array of Embedded Documents](https://www.mongodb.com/docs/manual/tutorial/query-array-of-documents/#query-an-array-of-embedded-documents)
+- [Query an Array of Embedded Documents](https://www.mongodb.com/docs/manual/tutorial/query-array-of-documents/)
+- [Project Fields to Return from Query](https://www.mongodb.com/docs/manual/tutorial/project-fields-from-query-results/)
+- [Type check using `$type`](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/#type-check)
 
 ## Thanks
 

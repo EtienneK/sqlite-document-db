@@ -11,6 +11,7 @@ function stringEscape2 (str: string): string {
 function quote (data: any): string | number {
   if (typeof data === 'string') return "'" + stringEscape(data) + "'"
   if (typeof data === 'number') return data
+  if (data === null) return 'null'
   return `json(${quote(JSON.stringify(data))})`
 }
 
@@ -28,7 +29,7 @@ function toJson1Extract (col: string, pathArr: string[]): string {
 }
 
 const OPS = {
-  $eq: '=',
+  $eq: 'is',
   $gt: '>',
   $gte: '>=',
   $lt: '<',
@@ -36,7 +37,8 @@ const OPS = {
   $ne: '<>',
   $in: 'IN',
   $all: null,
-  $size: null
+  $size: null,
+  $exists: null
 }
 const OPS_KEYS = Object.keys(OPS)
 
@@ -48,8 +50,8 @@ function convertOp (columnName: string, field: string, op: string, value: string
     case '$lte':
     case '$ne':
     case '$eq': {
-      if (typeof value !== 'string' && typeof value !== 'number' && (typeof value !== 'object' || value == null)) {
-        throw Error(`${op} expects value to be a number, string or object`)
+      if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object') {
+        throw Error(`${op} expects value to be a number, string, object or null`)
       }
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)}`
     }
@@ -63,7 +65,11 @@ function convertOp (columnName: string, field: string, op: string, value: string
     }
     case '$size': {
       if (typeof value !== 'number') throw Error('$size expects value to be a number')
-      return `json_array_length(${quote2(columnName)}, ${toJson1PathString([field])} ) = ${quote(value)}`
+      return `json_array_length(${quote2(columnName)}, ${toJson1PathString([field])}) = ${quote(value)}`
+    }
+    case '$exists': {
+      if (typeof value !== 'boolean') throw Error('$exists expects value to be a boolean')
+      return `select count(*) ${value ? '>' : '='} 0 from json_each(${quote2(columnName)}, ${toJson1PathString([field])})`
     }
   }
 
