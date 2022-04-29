@@ -15,7 +15,7 @@ export declare type WithId<TSchema extends Document = Document> = WithoutId<TSch
 
 export type Filter = Record<string, any>
 
-export interface DeleteOneResult {
+export interface DeleteResult {
   deletedCount: number
 }
 
@@ -28,11 +28,11 @@ export interface InsertOneResult {
   insertedId: string
 }
 
-export interface ReplaceOneResult {
+export interface UpdateResult {
   modifiedCount: number
 }
 
-export interface Cursor<TSchema extends Document = Document> {
+export interface FindCursor<TSchema extends Document = Document> {
   next: () => Promise<WithId<TSchema> | null>
   toArray: () => Promise<Array<WithId<TSchema>>>
 }
@@ -50,8 +50,8 @@ export class Collection<TSchema extends Document = Document> {
       .then(() => undefined)
   }
 
-  find (query: Filter = {}): Cursor<TSchema> {
-    return new class implements Cursor {
+  find (query: Filter = {}): FindCursor<TSchema> {
+    return new class implements FindCursor {
       private currentRowId = -1
 
       constructor (private readonly outer: Collection) { }
@@ -80,29 +80,45 @@ export class Collection<TSchema extends Document = Document> {
     }(this)
   }
 
-  async findOne (query: string | Filter): Promise<WithId<TSchema> | null> {
+  async findOne (filter: string | Filter): Promise<WithId<TSchema> | null> {
     await this.init
 
-    if (typeof query === 'string') query = { _id: query }
-    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${toSql('data', query)}) LIMIT 1`)
+    if (typeof filter === 'string') filter = { _id: filter }
+    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${toSql('data', filter)}) LIMIT 1`)
 
-    if (result === undefined) return null
+    if (result == null) return null
     else return JSON.parse(result.data)
   }
 
-  async deleteMany (filter: Filter): Promise<DeleteOneResult> {
+  async countDocuments (filter?: Filter): Promise<number> {
+    await this.init
+    const result = await this.db.get(`SELECT COUNT(*) AS count FROM ${this.name} WHERE (${toSql('data', filter ?? {})})`)
+    return JSON.parse(result.count)
+  }
+
+  async deleteOne (filter: Filter): Promise<DeleteResult> {
+    await this.init
+
+    const found = await this.findOne(filter)
+    if (found == null) return { deletedCount: 0 }
+
+    const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id })})`)
+    return { deletedCount: result?.changes ?? 0 }
+  }
+
+  async deleteMany (filter: Filter): Promise<DeleteResult> {
     await this.init
     const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${toSql('data', filter)})`)
     return { deletedCount: result?.changes ?? 0 }
   }
 
-  async replaceOne (filter: Filter, doc: WithoutId<TSchema>): Promise<ReplaceOneResult> {
+  async replaceOne (filter: Filter, doc: WithoutId<TSchema>): Promise<UpdateResult> {
     await this.init
 
     const found = await this.findOne(filter)
     let result
-    if (found !== null) {
-      if (doc._id !== undefined && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
+    if (found != null) {
+      if (doc._id != null && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
       result = await this.db.run(
         `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id })}`,
         JSON.stringify({ ...doc, _id: found._id })
@@ -127,7 +143,7 @@ export class Collection<TSchema extends Document = Document> {
       stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(json(?))`)
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
-        const id = (doc._id === undefined) ? new ObjectID().toHexString() : doc._id;
+        const id = (doc._id == null) ? new ObjectID().toHexString() : doc._id;
         (doc as unknown as WithId<TSchema>)._id = id
         results.push({
           id,
@@ -136,7 +152,7 @@ export class Collection<TSchema extends Document = Document> {
         })
       }
     } finally {
-      if (stmt !== undefined) await stmt.finalize()
+      if (stmt != null) await stmt.finalize()
     }
 
     const insertedIds = results.reduce<Record<string, string>>(

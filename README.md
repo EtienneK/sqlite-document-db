@@ -108,6 +108,10 @@ Need me to me more specific on missing features? Can't list them all, but from t
 - [Project Fields to Return from Query](https://www.mongodb.com/docs/manual/tutorial/project-fields-from-query-results/)
 - [Type check using `$type`](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/#type-check)
 
+### Updating documents
+
+- [`updateOne()` and `updateMany()`](https://www.mongodb.com/docs/manual/tutorial/update-documents/)
+
 ## Thanks
 
 Thanks to <https://github.com/thomas4019/mongo-query-to-postgres-jsonb> for being a huge inspiration for this project.
