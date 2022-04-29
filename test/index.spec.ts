@@ -63,7 +63,7 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual: any = await db().collection('col').deleteOne({ _id: two.insertedId })
+            let actual: any = await db().collection('col').deleteMany({ _id: two.insertedId })
 
             if (db() instanceof Mdb) {
               actual = { deletedCount: actual.deletedCount }
@@ -77,7 +77,7 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual: any = await db().collection('col').deleteOne({ _id: `${two.insertedId as string}` + 'NOT_FOUND' })
+            let actual: any = await db().collection('col').deleteMany({ _id: `${two.insertedId as string}` + 'NOT_FOUND' })
 
             if (db() instanceof Mdb) {
               actual = { deletedCount: actual.deletedCount }

@@ -7,7 +7,9 @@ export declare interface Document {
   [key: string]: any
 }
 
-export declare type WithId<TSchema extends Document = Document> = Omit<TSchema, '_id'> & {
+export declare type WithoutId<TSchema extends Document = Document> = Omit<TSchema, '_id'>
+
+export declare type WithId<TSchema extends Document = Document> = WithoutId<TSchema> & {
   _id: string
 }
 
@@ -82,19 +84,19 @@ export class Collection<TSchema extends Document = Document> {
     await this.init
 
     if (typeof query === 'string') query = { _id: query }
-    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${toSql('data', query)})`)
+    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${toSql('data', query)}) LIMIT 1`)
 
     if (result === undefined) return null
     else return JSON.parse(result.data)
   }
 
-  async deleteOne (filter: Filter): Promise<DeleteOneResult> {
+  async deleteMany (filter: Filter): Promise<DeleteOneResult> {
     await this.init
     const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${toSql('data', filter)})`)
     return { deletedCount: result?.changes ?? 0 }
   }
 
-  async replaceOne (filter: Filter, doc: TSchema): Promise<ReplaceOneResult> {
+  async replaceOne (filter: Filter, doc: WithoutId<TSchema>): Promise<ReplaceOneResult> {
     await this.init
 
     const found = await this.findOne(filter)
