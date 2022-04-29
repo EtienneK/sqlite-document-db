@@ -34,8 +34,9 @@ const OPS = {
   $gte: '>=',
   $lt: '<',
   $lte: '<=',
-  $ne: '<>',
+  $ne: 'is not',
   $in: 'IN',
+  $nin: 'NOT IN',
   $all: null,
   $size: null,
   $exists: null
@@ -55,9 +56,11 @@ function convertOp (columnName: string, field: string, op: string, value: string
       }
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)}`
     }
-    case '$in': {
-      if (!Array.isArray(value)) throw Error('$in expects value to be of type: array')
-      return `${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')})`
+    case '$in':
+    case '$nin': {
+      if (!Array.isArray(value)) throw Error(`${op} expects value to be of type: array`)
+      const valueIncludesNull = value.includes(null) ? `OR ${toJson1Extract(columnName, [field])} ${op === '$in' ? 'IS' : 'IS NOT'} NULL` : ''
+      return `(${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')}) ${valueIncludesNull})`
     }
     case '$all': {
       if (!Array.isArray(value)) throw Error('$all expects value to be of type: array')

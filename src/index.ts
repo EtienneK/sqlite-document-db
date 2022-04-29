@@ -41,7 +41,7 @@ export class Collection<TSchema extends Document = Document> {
   private readonly init: Promise<void>
 
   constructor (private readonly name: string, private readonly db: Database) {
-    if (name.match(/^[a-z_]+[a-z0-9_].$/) == null) throw Error('invalid collection name')
+    if (name.match(/^[a-z_]+[a-z0-9_]*$/) == null) throw Error('invalid collection name: ' + name)
 
     this.name = 'collection_' + name
 
