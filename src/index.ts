@@ -40,13 +40,19 @@ export interface FindCursor<TSchema extends Document = Document> {
 export class Collection<TSchema extends Document = Document> {
   private readonly init: Promise<void>
 
-  constructor (private readonly name: string, private readonly db: Database) {
+  constructor (private readonly name: string, private readonly db: Database, private readonly dbOptions: DbOptions) {
     if (name.match(/^[a-z_]+[a-z0-9_]*$/) == null) throw Error('invalid collection name: ' + name)
 
     this.name = 'collection_' + name
 
+    const sql = `CREATE TABLE IF NOT EXISTS ${this.name} (data JSON)`
+    if (this.dbOptions.debug) console.log(sql)
     this.init = this.db.run(`CREATE TABLE IF NOT EXISTS ${this.name} (data JSON)`)
-      .then(async () => await this.db.run(`CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`))
+      .then(async () => {
+        const sql = `CREATE UNIQUE INDEX ux_${this.name}_doc_id ON ${this.name}(json_extract(data, '$._id'))`
+        if (this.dbOptions.debug) console.log(sql)
+        await this.db.run(sql)
+      })
       .then(() => undefined)
   }
 
@@ -58,10 +64,9 @@ export class Collection<TSchema extends Document = Document> {
 
       async next (): Promise<WithId<TSchema> | null> {
         await this.outer.init
-        const result = await this.outer.db.get(
-          `SELECT rowid, data FROM ${this.outer.name} WHERE rowid > ? AND (${toSql('data', query)}) ORDER BY rowid LIMIT 1`,
-          this.currentRowId
-        )
+        const sql = `SELECT rowid, data FROM ${this.outer.name} WHERE rowid > ? AND (${toSql('data', query)}) ORDER BY rowid LIMIT 1`
+        if (this.outer.dbOptions.debug) console.log(sql)
+        const result = await this.outer.db.get(sql, this.currentRowId)
         if (result === undefined) return null
         this.currentRowId = result.rowid
         return JSON.parse(result.data)
@@ -84,7 +89,9 @@ export class Collection<TSchema extends Document = Document> {
     await this.init
 
     if (typeof filter === 'string') filter = { _id: filter }
-    const result = await this.db.get(`SELECT data FROM ${this.name} WHERE (${toSql('data', filter)}) LIMIT 1`)
+    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', filter)}) LIMIT 1`
+    if (this.dbOptions.debug) console.log(sql)
+    const result = await this.db.get(sql)
 
     if (result == null) return null
     else return JSON.parse(result.data)
@@ -92,7 +99,9 @@ export class Collection<TSchema extends Document = Document> {
 
   async countDocuments (filter?: Filter): Promise<number> {
     await this.init
-    const result = await this.db.get(`SELECT COUNT(*) AS count FROM ${this.name} WHERE (${toSql('data', filter ?? {})})`)
+    const sql = `SELECT COUNT(*) AS count FROM ${this.name} WHERE (${toSql('data', filter ?? {})})`
+    if (this.dbOptions.debug) console.log(sql)
+    const result = await this.db.get(sql)
     return JSON.parse(result.count)
   }
 
@@ -102,13 +111,17 @@ export class Collection<TSchema extends Document = Document> {
     const found = await this.findOne(filter)
     if (found == null) return { deletedCount: 0 }
 
-    const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id })})`)
+    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id })})`
+    if (this.dbOptions.debug) console.log(sql)
+    const result = await this.db.run(sql)
     return { deletedCount: result?.changes ?? 0 }
   }
 
   async deleteMany (filter: Filter): Promise<DeleteResult> {
     await this.init
-    const result = await this.db.run(`DELETE FROM ${this.name} WHERE (${toSql('data', filter)})`)
+    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', filter)})`
+    if (this.dbOptions.debug) console.log(sql)
+    const result = await this.db.run(sql)
     return { deletedCount: result?.changes ?? 0 }
   }
 
@@ -119,10 +132,9 @@ export class Collection<TSchema extends Document = Document> {
     let result
     if (found != null) {
       if (doc._id != null && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
-      result = await this.db.run(
-        `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id })}`,
-        JSON.stringify({ ...doc, _id: found._id })
-      )
+      const sql = `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id })}`
+      if (this.dbOptions.debug) console.log(sql)
+      result = await this.db.run(sql, JSON.stringify({ ...doc, _id: found._id }))
     }
     return { modifiedCount: result?.changes ?? 0 }
   }
@@ -140,7 +152,9 @@ export class Collection<TSchema extends Document = Document> {
     const results: Array<{ id: string, index: string, result: ISqlite.RunResult }> = []
     let stmt
     try {
-      stmt = await this.db.prepare(`INSERT INTO ${this.name} VALUES(json(?))`)
+      const sql = `INSERT INTO ${this.name} VALUES(json(?))`
+      if (this.dbOptions.debug) console.log(sql)
+      stmt = await this.db.prepare(sql)
       for (let index = 0; index < docs.length; index++) {
         const doc = docs[index]
         const id = (doc._id == null) ? new ObjectID().toHexString() : doc._id;
@@ -170,25 +184,38 @@ export class Collection<TSchema extends Document = Document> {
   }
 }
 
+export interface DbOptions {
+  debug: boolean
+}
+
 export class Db {
   private collections: { [key: string]: Collection } = {}
 
-  private constructor (private readonly db: Database) { }
+  private constructor (private readonly db: Database, private readonly options: DbOptions) { }
 
-  static async fromUrl (url: string): Promise<Db> {
+  static async fromUrl (url: string, options: Partial<DbOptions> = {}): Promise<Db> {
+    const dbOptions: DbOptions = {
+      debug: false,
+      ...options
+    }
+
     const db = await open({
       filename: url,
       driver: sqlite3.Database
     })
 
-    await db.run('PRAGMA journal_mode=WAL')
+    const sql = 'PRAGMA journal_mode=WAL'
+    if (dbOptions.debug) {
+      console.log(sql)
+    }
+    await db.run(sql)
 
-    return new Db(db)
+    return new Db(db, dbOptions)
   }
 
   collection (name: string): Collection {
     name = name.toLowerCase()
-    if (this.collections[name] == null) { this.collections[name] = new Collection(name, this.db) }
+    if (this.collections[name] == null) { this.collections[name] = new Collection(name, this.db, this.options) }
     return this.collections[name]
   }
 
