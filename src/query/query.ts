@@ -63,10 +63,13 @@ function convertOp (columnName: string, field: string, op: string, value: string
     }
     case '$nin': {
       if (!Array.isArray(value)) throw Error('$nin expects value to be of type: array')
-      const valueIncludesNull = value.includes(null)
-        ? `OR ${toJson1Extract(columnName, [field])} IS NOT NULL`
-        : `OR ${toJson1Extract(columnName, [field])} IS NULL`
-      return `(${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')}) ${valueIncludesNull})`
+      let valueWithoutNull = value
+      let valueWithoutNullSql = `OR ${toJson1Extract(columnName, [field])} IS NULL`
+      if (valueWithoutNull.includes(null)) {
+        valueWithoutNull = valueWithoutNull.filter(v => v !== null)
+        valueWithoutNullSql = `AND ${toJson1Extract(columnName, [field])} IS NOT NULL`
+      }
+      return `(${toJson1Extract(columnName, [field])} ${OPS[op]} (${valueWithoutNull.map(quote).join(',')}) ${valueWithoutNullSql})`
     }
     case '$all': {
       if (!Array.isArray(value)) throw Error('$all expects value to be of type: array')

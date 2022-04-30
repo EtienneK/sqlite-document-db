@@ -14,7 +14,7 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
     mongod = await MongoMemoryServer.create()
     mongoClient = await MongoClient.connect(mongod.getUri())
     mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
+    sqldb = await Db.fromUrl(':memory:', { debug: true })
   })
 
   afterEach(async () => {
@@ -134,6 +134,7 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         // Other
         expect(await col.find({ quantity: { $in: [4, 16] } }).toArray()).toStrictEqual([])
         expect(await col.find({ quantity: { $in: [null] } }).toArray()).toStrictEqual([i[2]])
+        expect(await col.find({ quantity: { $in: [5, null, 15] } }).toArray()).toStrictEqual([i[1], i[2], i[3]])
 
         // $nin - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/nin/
         expect(await col.find({ quantity: { $nin: [5, 15] } }).toArray()).toStrictEqual([i[0], i[2]])
@@ -142,6 +143,7 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         // Other
         expect(await col.find({ quantity: { $nin: [4, 16] } }).toArray()).toStrictEqual([i[0], i[1], i[2], i[3]])
         expect(await col.find({ quantity: { $nin: [null] } }).toArray()).toStrictEqual([i[0], i[1], i[3]])
+        expect(await col.find({ quantity: { $nin: [5, null, 15] } }).toArray()).toStrictEqual([i[0]])
       })
     })
   }
