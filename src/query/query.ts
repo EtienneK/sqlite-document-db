@@ -12,6 +12,8 @@ function quote (data: any): string | number {
   if (typeof data === 'string') return "'" + stringEscape(data) + "'"
   if (typeof data === 'number') return data
   if (data === null) return 'null'
+  if (data === true) return 'TRUE'
+  if (data === false) return 'FALSE'
   return `json(${quote(JSON.stringify(data))})`
 }
 
@@ -43,6 +45,10 @@ const OPS = {
 }
 const OPS_KEYS = Object.keys(OPS)
 
+function countOps (keys: string[]): number {
+  return keys.filter(k => OPS_KEYS.includes(k)).length
+}
+
 function convertOp (columnName: string, field: string, op: string, value: string | number | any[]): string {
   switch (op) {
     case '$gt':
@@ -51,8 +57,8 @@ function convertOp (columnName: string, field: string, op: string, value: string
     case '$lte':
     case '$ne':
     case '$eq': {
-      if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object') {
-        throw Error(`${op} expects value to be of type: number | string | object | null`)
+      if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
+        throw Error(`${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
       return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)}`
     }
@@ -103,13 +109,24 @@ function convert (columnName: string, query: QueryFilterDocument): string {
         .join(') OR (')})`
     }
 
+    if (field === '$and') {
+      if (!Array.isArray(valueOrOp)) throw Error('$and expects value to be an array')
+      return `(${valueOrOp
+        .map(q => convert(columnName, q))
+        .join(') AND (')})`
+    }
+
     let op = '$eq'
     let value = valueOrOp
     if (typeof valueOrOp === 'object' && valueOrOp !== null) {
       const valueOrOpKeys = Object.keys(valueOrOp)
-      if (valueOrOpKeys.length !== 0 && OPS_KEYS.includes(valueOrOpKeys[0])) {
+      if (valueOrOpKeys.length === 1 && countOps(valueOrOpKeys) === 1) {
         op = valueOrOpKeys[0]
         value = value[op]
+      } else if (valueOrOpKeys.length > 1 && countOps(valueOrOpKeys) === valueOrOpKeys.length) {
+        return `(${valueOrOpKeys.map(opKey => ({ [field]: { [opKey]: value[opKey] } }))
+          .map(q => convert(columnName, q))
+          .join(') AND (')})`
       }
     }
     return convertOp(columnName, field, op, value)
