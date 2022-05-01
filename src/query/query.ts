@@ -121,9 +121,11 @@ function convert (columnName: string, query: QueryFilterDocument): string {
     if (typeof valueOrOp === 'object' && valueOrOp !== null) {
       const valueOrOpKeys = Object.keys(valueOrOp)
       if (valueOrOpKeys.length === 1 && countOps(valueOrOpKeys) === 1) {
+        // Queries in the form: { field: { $operator: value } }
         op = valueOrOpKeys[0]
         value = value[op]
       } else if (valueOrOpKeys.length > 1 && countOps(valueOrOpKeys) === valueOrOpKeys.length) {
+        // Queries in the form: { field: { $operator1: value, $operator2: value } }
         return `(${valueOrOpKeys.map(opKey => ({ [field]: { [opKey]: value[opKey] } }))
           .map(q => convert(columnName, q))
           .join(') AND (')})`
