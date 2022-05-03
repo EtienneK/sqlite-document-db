@@ -22,7 +22,8 @@ function quote2 (data: string): string {
 }
 
 function toJson1PathString (pathArr: string[]): string | number {
-  return quote(`$.${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
+  const firstDot = (pathArr.length === 1 && pathArr[0] === '') ? '' : '.'
+  return quote(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
 }
 
 function toJson1Extract (col: string, pathArr: string[]): string {
@@ -31,6 +32,7 @@ function toJson1Extract (col: string, pathArr: string[]): string {
 }
 
 const OPS = {
+  // Comparison Query Operators
   $eq: 'is',
   $gt: '>',
   $gte: '>=',
@@ -39,9 +41,17 @@ const OPS = {
   $ne: 'is not',
   $in: 'IN',
   $nin: 'NOT IN',
+  // Logical Query Operators
+  $and: 'AND',
+  $or: 'OR',
+  $not: 'NOT',
+  $nor: 'OR',
+  // Element Query Operators
+  $exists: null,
+  // Array Query Operators
   $all: null,
-  $size: null,
-  $exists: null
+  $elemMatch: null,
+  $size: null
 }
 const OPS_KEYS = Object.keys(OPS)
 
@@ -51,6 +61,7 @@ function countOps (keys: string[]): number {
 
 function convertOp (columnName: string, field: string, op: string, value: string | number | any[]): string {
   switch (op) {
+    // ---------------------- Comparison Query Operators ----------------------
     case '$gt':
     case '$gte':
     case '$lt':
@@ -58,17 +69,19 @@ function convertOp (columnName: string, field: string, op: string, value: string
     case '$ne':
     case '$eq': {
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
-        throw Error(`${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
+        throw Error(`$${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
-      return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)}`
+      // Have to put this in for $not operator, otherwise $not doesn't work for null/undefined fields
+      const notNull = op === '$eq' || op === '$ne' ? '' : `AND ${toJson1Extract(columnName, [field])} IS NOT NULL`
+      return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)} ${notNull}`
     }
     case '$in': {
-      if (!Array.isArray(value)) throw Error('$in expects value to be of type: array')
+      if (!Array.isArray(value)) throw Error(`$in expects value to be of type: array; but got: ${typeof value}`)
       const valueIncludesNull = value.includes(null) ? `OR ${toJson1Extract(columnName, [field])} IS NULL` : ''
       return `(${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')}) ${valueIncludesNull})`
     }
     case '$nin': {
-      if (!Array.isArray(value)) throw Error('$nin expects value to be of type: array')
+      if (!Array.isArray(value)) throw Error(`$nin expects value to be of type: array; but got: ${typeof value}`)
       let valueWithoutNull = value
       let valueWithoutNullSql = `OR ${toJson1Extract(columnName, [field])} IS NULL`
       if (valueWithoutNull.includes(null)) {
@@ -77,17 +90,37 @@ function convertOp (columnName: string, field: string, op: string, value: string
       }
       return `(${toJson1Extract(columnName, [field])} ${OPS[op]} (${valueWithoutNull.map(quote).join(',')}) ${valueWithoutNullSql})`
     }
+    // ---------------------- Logical Query Operators ----------------------
+    case '$nor':
+    case '$or':
+    case '$and': {
+      if (!Array.isArray(value)) throw Error(`$${op} expects value to be of type: array; but got: ${typeof value}`)
+      return `${op === '$nor' ? 'NOT' : ''} ((${value
+        .map(q => convert(columnName, q))
+        .join(`) ${OPS[op]} (`)}))`
+    }
+    case '$not': {
+      if (Array.isArray(value) || typeof value !== 'object') throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
+      return `${OPS[op]}(${convert(columnName, { [field]: value })})`
+    }
+    // ---------------------- Element Query Operators ----------------------
+    case '$exists': {
+      if (typeof value !== 'boolean') throw Error(`$exists expects value to be of type: boolean; but got: ${typeof value}`)
+      return `select count(*) ${value ? '>' : '='} 0 from json_each(${quote2(columnName)}, ${toJson1PathString([field])})`
+    }
+    // ---------------------- Array Query Operators ----------------------
     case '$all': {
-      if (!Array.isArray(value)) throw Error('$all expects value to be of type: array')
+      if (!Array.isArray(value)) throw Error(`$all expects value to be of type: array; but got: ${typeof value}`)
       return `(select count(*) from json_each(${toJson1Extract(columnName, [field])}) where value in (select value from json_each(${quote(value)}))) = ${quote(new Set(value).size)}`
     }
-    case '$size': {
-      if (typeof value !== 'number') throw Error('$size expects value to be of type: number')
-      return `json_array_length(${quote2(columnName)}, ${toJson1PathString([field])}) = ${quote(value)}`
+    case '$elemMatch': {
+      if (Array.isArray(value) || typeof value !== 'object') throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
+      const $and = Object.entries(value).map(([key, value]) => ({ [key]: value })).map(o => ({ f: o }))
+      return `EXISTS (select json_object('f', json(value)) as valueJson from json_each(${toJson1Extract(columnName, [field])}) where (${convert('valueJson', { $and })}))`
     }
-    case '$exists': {
-      if (typeof value !== 'boolean') throw Error('$exists expects value to be of type: boolean')
-      return `select count(*) ${value ? '>' : '='} 0 from json_each(${quote2(columnName)}, ${toJson1PathString([field])})`
+    case '$size': {
+      if (typeof value !== 'number') throw Error(`$size expects value to be of type: number; but got: ${typeof value}`)
+      return `json_array_length(${quote2(columnName)}, ${toJson1PathString([field])}) = ${quote(value)}`
     }
   }
 
@@ -99,29 +132,16 @@ function convert (columnName: string, query: QueryFilterDocument): string {
 
   if (entries.length === 0) return 'TRUE'
 
+  const [field, valueOrOp] = entries[0]
+  let value = valueOrOp
   if (entries.length === 1) {
-    const [field, valueOrOp] = entries[0]
+    const opEqualsField = OPS_KEYS.includes(field)
+    let op = opEqualsField ? field : '$eq'
 
-    if (field === '$or') {
-      if (!Array.isArray(valueOrOp)) throw Error('$or expects value to be an array')
-      return `(${valueOrOp
-        .map(q => convert(columnName, q))
-        .join(') OR (')})`
-    }
-
-    if (field === '$and') {
-      if (!Array.isArray(valueOrOp)) throw Error('$and expects value to be an array')
-      return `(${valueOrOp
-        .map(q => convert(columnName, q))
-        .join(') AND (')})`
-    }
-
-    let op = '$eq'
-    let value = valueOrOp
-    if (typeof valueOrOp === 'object' && valueOrOp !== null) {
+    if (!opEqualsField && typeof valueOrOp === 'object' && valueOrOp !== null) {
       const valueOrOpKeys = Object.keys(valueOrOp)
       if (valueOrOpKeys.length === 1 && countOps(valueOrOpKeys) === 1) {
-        // Expressions in the form: { field: { $operator: value } }
+        // Expressions in the form: { field: { $operator: value } }, where field is not an operator and value is an object
         op = valueOrOpKeys[0]
         value = value[op]
       } else if (valueOrOpKeys.length > 1 && countOps(valueOrOpKeys) === valueOrOpKeys.length) {
@@ -131,6 +151,8 @@ function convert (columnName: string, query: QueryFilterDocument): string {
           .join(') AND (')})`
       }
     }
+
+    // Expressions in the form: { field: { $operator: value } } OR { field: value }, where field could be an operator
     return convertOp(columnName, field, op, value)
   }
 

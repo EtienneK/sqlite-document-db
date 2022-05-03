@@ -14,7 +14,7 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
     mongod = await MongoMemoryServer.create()
     mongoClient = await MongoClient.connect(mongod.getUri())
     mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:', { debug: false })
+    sqldb = await Db.fromUrl(':memory:', { debug: true })
   })
 
   afterEach(async () => {
@@ -168,6 +168,83 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
           ]
         }).toArray()).toStrictEqual([i[1], i[3]])
         expect(await col.find({ sale: false, nullable: null, qty: 20 }).toArray()).toStrictEqual([i[4]])
+      })
+
+      it('$or; $nor', async () => {
+        const i = [
+          { _id: 1 as any, item: { name: 'ab', code: '123' }, quantity: 15, tags: ['A', 'B', 'C'], nullable: null, price: 1.99 },
+          { _id: 2 as any, item: { name: 'cd', code: '123' }, quantity: 51, tags: ['B'], nullable: 'not null', sale: true },
+          { _id: 3 as any, item: { name: 'ij', code: '456' }, quantity: 25, tags: ['A', 'B'], price: 10, sale: null },
+          { _id: 4 as any, item: { name: 'xy', code: '456' }, quantity: 5, tags: ['B', 'A'], nullable: 3, price: 10 },
+          { _id: 5 as any, item: { name: 'mn', code: '000' }, quantity: 20, tags: [['A', 'B'], 'C'], nullable: null, price: null, sale: false }
+        ]
+        const col = db().collection('i')
+        await col.insertMany(i)
+
+        // $or - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/or/
+        // TODO: Also add examples with $expr operator
+        expect(await col.find({ $or: [{ quantity: { $lt: 20 } }, { price: 10 }] }).toArray()).toStrictEqual([i[0], i[2], i[3]])
+        // Other
+        expect(await col.find({ $or: [{ $or: [{ quantity: { $lt: 20 } }, { _id: 5 }] }, { price: 10 }] }).toArray()).toStrictEqual([i[0], i[2], i[3], i[4]])
+        // Negation of $nor tests below
+        expect(await col.find({ $or: [{ price: 1.99 }, { sale: true }] }).toArray()).toStrictEqual([i[0], i[1]])
+        expect(await col.find({ $or: [{ price: 1.99 }, { qty: { $lt: 20 } }, { sale: true }] }).toArray()).toStrictEqual([i[0], i[1]])
+        expect(await col.find({
+          $or: [{ price: 1.99 }, { price: { $exists: false } },
+            { sale: true }, { sale: { $exists: false } }]
+        }).toArray()).toStrictEqual([i[0], i[1], i[3]])
+
+        // $nor - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/nor/
+        expect(await col.find({ $nor: [{ price: 1.99 }, { sale: true }] }).toArray()).toStrictEqual([i[2], i[3], i[4]])
+        expect(await col.find({ $nor: [{ price: 1.99 }, { qty: { $lt: 20 } }, { sale: true }] }).toArray()).toStrictEqual([i[2], i[3], i[4]])
+        expect(await col.find({
+          $nor: [{ price: 1.99 }, { price: { $exists: false } },
+            { sale: true }, { sale: { $exists: false } }]
+        }).toArray()).toStrictEqual([i[2], i[4]])
+        // negation of $or tests above
+        expect(await col.find({ $nor: [{ quantity: { $lt: 20 } }, { price: 10 }] }).toArray()).toStrictEqual([i[1], i[4]])
+        expect(await col.find({ $nor: [{ $nor: [{ quantity: { $lt: 20 } }, { _id: 5 }] }, { price: 10 }] }).toArray()).toStrictEqual([i[0], i[4]])
+      })
+
+      it('$not', async () => {
+        const i = [
+          { _id: 1 as any, item: { name: 'ab', code: '123' }, qty: 15, tags: ['A', 'B', 'C'], nullable: null, price: 1.99 },
+          { _id: 2 as any, item: { name: 'cd', code: '123' }, qty: 51, tags: ['B'], nullable: 'not null', sale: true },
+          { _id: 3 as any, item: { name: 'ij', code: '456' }, qty: 25, tags: ['A', 'B'], price: 55.32 },
+          { _id: 4 as any, item: { name: 'xy', code: '456' }, qty: 5, tags: ['B', 'A'], nullable: 3, price: 4.99 },
+          { _id: 5 as any, item: { name: 'mn', code: '000' }, qty: 20, tags: [['A', 'B'], 'C'], nullable: null, price: null, sale: false }
+        ]
+        const col = db().collection('i')
+        await col.insertMany(i)
+
+        // $not - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/not/
+        // TODO: Also add examples with $regex operator
+        expect(await col.find({ price: { $not: { $gt: 1.99 } } }).toArray()).toStrictEqual([i[0], i[1], i[4]])
+        // Other
+        expect(await col.find({ price: { $not: { $eq: 1.99 } } }).toArray()).toStrictEqual([i[1], i[2], i[3], i[4]])
+        expect(await col.find({ price: { $not: { $ne: 1.99 } } }).toArray()).toStrictEqual([i[0]])
+      })
+
+      it('$elemMatch', async () => {
+        const s = [
+          { _id: 1 as any, results: [82, 85, 88] },
+          { _id: 2, results: [75, 88, 89] }
+        ]
+        const scores = db().collection('scores')
+        await scores.insertMany(s)
+
+        const surv = [
+          { _id: 1 as any, results: [{ product: 'abc', score: 10 }, { product: 'xyz', score: 5 }] },
+          { _id: 2, results: [{ product: 'abc', score: 8 }, { product: 'xyz', score: 7 }] },
+          { _id: 3, results: [{ product: 'abc', score: 7 }, { product: 'xyz', score: 8 }] },
+          { _id: 4, results: [{ product: 'abc', score: 7 }, { product: 'def', score: 8 }] }
+        ]
+        const survey = db().collection('survey')
+        await survey.insertMany(surv)
+
+        // $elemMatch - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/elemMatch/
+        expect(await scores.find({ results: { $elemMatch: { $gte: 80, $lt: 85 } } }).toArray()).toStrictEqual([s[0]])
+        expect(await survey.find({ results: { $elemMatch: { product: 'xyz', score: { $gte: 8 } } } }).toArray()).toStrictEqual([surv[2]])
       })
 
       it('$exists', async () => {
