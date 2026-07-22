@@ -34,6 +34,7 @@ export interface UpdateResult {
 export interface FindCursor<TSchema extends Document = Document> {
   next: () => Promise<WithId<TSchema> | null>
   toArray: () => Promise<Array<WithId<TSchema>>>
+  close: () => Promise<void>
   [Symbol.asyncIterator]: () => AsyncIterableIterator<WithId<TSchema>>
 }
 
@@ -62,20 +63,36 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   find (query: Filter = {}): FindCursor<TSchema> {
-    // Paginate on rowid rather than materialising the whole result set, so a
-    // cursor over a large collection stays cheap.
-    const sql = `SELECT rowid, data FROM ${this.name} WHERE rowid > ? AND (${toSql('data', query)}) ORDER BY rowid LIMIT 1`
-    let currentRowId = -1
+    // One prepared statement per cursor, streamed with iterate() so a cursor
+    // over a large collection stays cheap. Deliberately no ORDER BY: like
+    // MongoDB, order without sort() is unspecified - and even a bare
+    // `ORDER BY rowid` makes SQLite pick a rowid-order scan over a field
+    // index (measured via EXPLAIN QUERY PLAN), which would defeat indexing.
+    // The parens around the filter are load-bearing: $exists compiles to a
+    // bare scalar subquery, which is only valid SQL inside parentheses.
+    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', query)})`
+    let rows: Iterator<unknown> | undefined
+    let done = false
 
     const next = async (): Promise<WithId<TSchema> | null> => {
-      const result = this.prepare(sql).get(currentRowId) as { rowid: number, data: string } | undefined
-      if (result === undefined) return null
-      currentRowId = Number(result.rowid)
-      return JSON.parse(result.data)
+      if (done) return null
+      rows ??= this.prepare(sql).iterate()
+      const row = rows.next()
+      if (row.done === true) {
+        done = true
+        return null
+      }
+      return JSON.parse((row.value as { data: string }).data)
+    }
+
+    const close = async (): Promise<void> => {
+      done = true
+      rows?.return?.(undefined) // finalizes the underlying statement early
     }
 
     return {
       next,
+      close,
 
       async toArray (): Promise<Array<WithId<TSchema>>> {
         const documents: Array<WithId<TSchema>> = []
@@ -89,9 +106,14 @@ export class Collection<TSchema extends Document = Document> {
       },
 
       async * [Symbol.asyncIterator] (): AsyncIterableIterator<WithId<TSchema>> {
-        let document: WithId<TSchema> | null
-        while ((document = await next()) !== null) {
-          yield document
+        try {
+          let document: WithId<TSchema> | null
+          while ((document = await next()) !== null) {
+            yield document
+          }
+        } finally {
+          // Breaking out of a for-await loop must not leak the statement.
+          await close()
         }
       }
     }
@@ -189,9 +211,13 @@ export class Db {
     return new Db(db, dbOptions)
   }
 
-  collection (name: string): Collection {
+  collection <TSchema extends Document = Document>(name: string): Collection<TSchema> {
     name = name.toLowerCase()
-    return this.collections[name] ??= new Collection(name, this.db, this.options)
+    // The type parameter is a caller-side assertion about the collection's
+    // contents, not something the cache can verify - the same stance the
+    // official MongoDB driver takes. Two callers naming the same collection
+    // at different types get whatever is actually stored.
+    return (this.collections[name] ??= new Collection(name, this.db, this.options)) as Collection<TSchema>
   }
 
   async close (): Promise<void> {
