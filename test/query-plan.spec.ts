@@ -13,41 +13,42 @@ import { Db } from '../src/index.js'
  * logger), replay the CREATE INDEXes on a mirror connection, and ask SQLite
  * how it would execute the captured SELECT.
  */
+
+/** Runs `use` against a debug Db, returning every SQL line it executed. */
+async function capture (use: (db: Db) => Promise<void>): Promise<string[]> {
+  const logs: string[] = []
+  const spy = vi.spyOn(console, 'log').mockImplementation((line: string) => { logs.push(line) })
+  try {
+    const db = await Db.fromUrl(':memory:', { debug: true })
+    await use(db)
+    await db.close()
+  } finally {
+    spy.mockRestore()
+  }
+  return logs.filter(l => typeof l === 'string')
+}
+
+/** EXPLAINs the captured SELECT on a mirror table populated with `docs` and the captured indexes. */
+function explain (logs: string[], docs: object[]): string {
+  const select = logs.findLast(l => l.startsWith('SELECT data FROM collection_items'))
+  expect(select).toBeDefined()
+
+  const mirror = new DatabaseSync(':memory:')
+  mirror.exec('CREATE TABLE collection_items (data JSON)')
+  const ins = mirror.prepare('INSERT INTO collection_items VALUES(json(?))')
+  for (const doc of docs) ins.run(JSON.stringify(doc))
+  for (const create of logs.filter(l => l.startsWith('CREATE') && l.includes('INDEX') && !l.includes('doc_id'))) {
+    mirror.exec(create)
+  }
+  mirror.exec('ANALYZE')
+
+  const plan = mirror.prepare(`EXPLAIN QUERY PLAN ${select as string}`).all()
+    .map(row => (row as { detail: string }).detail).join(' | ')
+  mirror.close()
+  return plan
+}
+
 describe('find() query plans', () => {
-  /** Runs `use` against a debug Db, returning every SQL line it executed. */
-  async function capture (use: (db: Db) => Promise<void>): Promise<string[]> {
-    const logs: string[] = []
-    const spy = vi.spyOn(console, 'log').mockImplementation((line: string) => { logs.push(line) })
-    try {
-      const db = await Db.fromUrl(':memory:', { debug: true })
-      await use(db)
-      await db.close()
-    } finally {
-      spy.mockRestore()
-    }
-    return logs.filter(l => typeof l === 'string')
-  }
-
-  /** EXPLAINs `select` on a mirror table populated with `docs` and the captured indexes. */
-  function explain (logs: string[], docs: object[]): string {
-    const select = logs.findLast(l => l.startsWith('SELECT data FROM collection_items'))
-    expect(select).toBeDefined()
-
-    const mirror = new DatabaseSync(':memory:')
-    mirror.exec('CREATE TABLE collection_items (data JSON)')
-    const ins = mirror.prepare('INSERT INTO collection_items VALUES(json(?))')
-    for (const doc of docs) ins.run(JSON.stringify(doc))
-    for (const create of logs.filter(l => l.startsWith('CREATE') && l.includes('INDEX') && !l.includes('doc_id'))) {
-      mirror.exec(create)
-    }
-    mirror.exec('ANALYZE')
-
-    const plan = mirror.prepare(`EXPLAIN QUERY PLAN ${select as string}`).all()
-      .map(row => (row as { detail: string }).detail).join(' | ')
-    mirror.close()
-    return plan
-  }
-
   it('a numeric-range find() should use the index createIndex() creates', async () => {
     const logs = await capture(async db => {
       await db.collection('items').createIndex({ qty: 1 })

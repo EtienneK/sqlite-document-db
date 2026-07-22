@@ -34,7 +34,7 @@ describe('Indexes (BACKLOG item 2)', () => {
 
         const normalized = (await col.indexes())
           .map(({ name, key }: any) => ({ name, key }))
-          .sort((a: any, b: any) => a.name.localeCompare(b.name))
+          .toSorted((a: any, b: any) => a.name.localeCompare(b.name))
 
         expect(normalized).toStrictEqual([
           { name: '_id_', key: { _id: 1 } },
