@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { objectIdHexString } from './object-id.js'
-import { toJson1PathString, toSql } from './query/query.js'
+import { toJson1PathString, toSql, toSqlValue } from './query/query.js'
 
 export declare interface Document {
   [key: string]: any
@@ -17,21 +17,34 @@ export declare type WithId<TSchema extends Document = Document> = WithoutId<TSch
 
 export type Filter = Record<string, any>
 
+// A subset of MongoDB's update document: { $set: {...}, $unset: {...}, $inc: {...} }
+export type UpdateFilter = Record<string, any>
+
+// Result shapes match the official MongoDB driver's (DR-2). `acknowledged` is
+// always true - node:sqlite is synchronous, so every write is acknowledged.
+
 export interface DeleteResult {
+  acknowledged: boolean
   deletedCount: number
 }
 
 export interface InsertManyResult {
+  acknowledged: boolean
   insertedCount: number
   insertedIds: Record<number, string>
 }
 
 export interface InsertOneResult {
+  acknowledged: boolean
   insertedId: string
 }
 
 export interface UpdateResult {
+  acknowledged: boolean
+  matchedCount: number
   modifiedCount: number
+  upsertedCount: number
+  upsertedId: string | null
 }
 
 export type IndexDirection = 1 | -1
@@ -59,6 +72,69 @@ export interface FindCursor<TSchema extends Document = Document> {
 /** Escapes a SQL identifier for use inside double quotes. */
 function sqlName (name: string): string {
   return name.replace(/"/g, '""')
+}
+
+const UPDATE_OPERATORS = ['$set', '$unset', '$inc']
+
+/**
+ * For a dotted field like 'a.b.c', wraps `expr` in json_insert calls creating
+ * '$.a' and '$.a.b' as empty objects when missing - MongoDB creates missing
+ * parents on $set/$inc, but SQLite's json_set only creates the leaf.
+ * json_insert is a no-op when the path already exists, so present parents
+ * (of any type) are left untouched.
+ */
+function ensureParents (expr: string, field: string): string {
+  const segments = field.split('.')
+  for (let i = 1; i < segments.length; i++) {
+    const parent = segments.slice(0, i).join('.')
+    expr = `json_insert(${expr}, ${toJson1PathString([parent])}, json('{}'))`
+  }
+  return expr
+}
+
+/**
+ * Compiles a MongoDB update document ({ $set, $unset, $inc }) into a SQL
+ * expression computing the new value of the `data` column.
+ */
+function buildUpdateExpression (update: UpdateFilter): string {
+  const keys = Object.keys(update)
+  if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')
+  for (const key of keys) {
+    if (!UPDATE_OPERATORS.includes(key)) {
+      throw Error(key.startsWith('$')
+        ? `unsupported update operator: ${key} (supported: ${UPDATE_OPERATORS.join(', ')})`
+        : 'update document requires atomic operators (e.g. { $set: { ... } })')
+    }
+  }
+
+  let expr = 'data'
+
+  if (update.$inc != null) {
+    for (const [field, amount] of Object.entries(update.$inc as Record<string, unknown>)) {
+      if (typeof amount !== 'number' || !Number.isFinite(amount)) {
+        throw Error(`$inc requires a finite number for field ${field}; but got: ${String(amount)}`)
+      }
+      expr = ensureParents(expr, field)
+      const path = toJson1PathString([field])
+      // Missing fields start from 0, like MongoDB.
+      expr = `json_set(${expr}, ${path}, COALESCE(json_extract(data, ${path}), 0) + ${amount})`
+    }
+  }
+
+  if (update.$unset != null) {
+    const paths = Object.keys(update.$unset as Record<string, unknown>).map(field => toJson1PathString([field]))
+    if (paths.length > 0) expr = `json_remove(${expr}, ${paths.join(', ')})`
+  }
+
+  if (update.$set != null) {
+    for (const [field, value] of Object.entries(update.$set as Record<string, unknown>)) {
+      if (field === '_id') throw Error('_id field is immutable and cannot be changed')
+      expr = ensureParents(expr, field)
+      expr = `json_set(${expr}, ${toJson1PathString([field])}, ${toSqlValue(value)})`
+    }
+  }
+
+  return expr
 }
 
 export class Collection<TSchema extends Document = Document> {
@@ -242,32 +318,64 @@ export class Collection<TSchema extends Document = Document> {
 
   async deleteOne (filter: Filter): Promise<DeleteResult> {
     const found = await this.findOne(filter)
-    if (found == null) return { deletedCount: 0 }
+    if (found == null) return { acknowledged: true, deletedCount: 0 }
 
     const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id }, this.name)})`
     const result = this.prepare(sql).run()
-    return { deletedCount: Number(result.changes) }
+    return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
   async deleteMany (filter: Filter): Promise<DeleteResult> {
     const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', filter, this.name)})`
     const result = this.prepare(sql).run()
-    return { deletedCount: Number(result.changes) }
+    return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
   async replaceOne (filter: Filter, doc: WithoutId<TSchema>): Promise<UpdateResult> {
+    // MongoDB rejects replacement documents whose first key is an operator.
+    if (Object.keys(doc)[0]?.startsWith('$') === true) {
+      throw Error('replacement document must not contain atomic operators')
+    }
+
     const found = await this.findOne(filter)
-    if (found == null) return { modifiedCount: 0 }
+    if (found == null) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0, upsertedId: null }
 
     if (doc._id != null && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
 
-    const sql = `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id }, this.name)}`
-    const result = this.prepare(sql).run(stringifyDocument({ ...doc, _id: found._id }))
-    return { modifiedCount: Number(result.changes) }
+    // `data != json(?)` makes a no-op replacement report modifiedCount 0,
+    // matching MongoDB (SQLite would otherwise count every touched row).
+    const sql = `UPDATE ${this.name} SET data = json(?) WHERE (${toSql('data', { _id: found._id }, this.name)}) AND data != json(?)`
+    const text = stringifyDocument({ ...doc, _id: found._id })
+    const result = this.prepare(sql).run(text, text)
+    return { acknowledged: true, matchedCount: 1, modifiedCount: Number(result.changes), upsertedCount: 0, upsertedId: null }
+  }
+
+  /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
+  async updateOne (filter: Filter, update: UpdateFilter): Promise<UpdateResult> {
+    const expr = buildUpdateExpression(update)
+
+    const found = await this.findOne(filter)
+    if (found == null) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0, upsertedId: null }
+
+    // `data != <expr>` makes a no-op update report modifiedCount 0, like MongoDB.
+    const sql = `UPDATE ${this.name} SET data = ${expr} WHERE (${toSql('data', { _id: found._id }, this.name)}) AND data != ${expr}`
+    const result = this.prepare(sql).run()
+    return { acknowledged: true, matchedCount: 1, modifiedCount: Number(result.changes), upsertedCount: 0, upsertedId: null }
+  }
+
+  /** Updates every document matching `filter` with $set/$unset/$inc operators. */
+  async updateMany (filter: Filter, update: UpdateFilter): Promise<UpdateResult> {
+    const expr = buildUpdateExpression(update)
+
+    const matchedCount = await this.countDocuments(filter)
+    const sql = `UPDATE ${this.name} SET data = ${expr} WHERE (${toSql('data', filter, this.name)}) AND data != ${expr}`
+    const result = this.prepare(sql).run()
+    return { acknowledged: true, matchedCount, modifiedCount: Number(result.changes), upsertedCount: 0, upsertedId: null }
   }
 
   async insertOne (doc: TSchema): Promise<InsertOneResult> {
     return {
+      acknowledged: true,
       insertedId: (await this.insertMany([doc])).insertedIds[0]!
     }
   }
@@ -289,7 +397,7 @@ export class Collection<TSchema extends Document = Document> {
       insertedCount++
     }
 
-    return { insertedIds, insertedCount }
+    return { acknowledged: true, insertedIds, insertedCount }
   }
 }
 

@@ -64,6 +64,17 @@ it made `$elemMatch` compare each element against the whole criterion object.
 `AND <field> IS NOT NULL` (see `convertOp`). This exists so `$not` behaves like
 MongoDB for missing/null fields; removing it breaks the `$not` tests.
 
+**Non-obvious detail — implicit array matching.** `{ tags: 'B' }` also matches
+arrays containing `'B'` (MongoDB semantics). Top-level comparisons compile to
+`rowid IN (scalar-arm UNION ALL element-arm)` — NOT a flat OR, which SQLite can
+never index (OR-optimization skips expression indexes entirely). The element arm's
+leading `extract >= '[' AND < '\'` range selects array rows through the same
+expression index (JSON arrays extract as text starting with `[`). Range operators
+carry `json_type` bracketing so number queries don't match text/arrays. `find()`
+and `findOne()` have `ORDER BY rowid` for natural order — safe ONLY because
+predicates are rowid-subquery-shaped; a bare scalar predicate plus ORDER BY rowid
+would make SQLite drop the field index (measured — don't "simplify" this).
+
 ### SQL injection posture
 
 `query.ts` builds SQL by string interpolation, not bound parameters. Values go

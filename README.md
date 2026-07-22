@@ -141,6 +141,12 @@ for await (const item of db.collection('items').find({ status: 'A' })) {
 ### Query arrays
 
 ```javascript
+// Implicit element matching, like MongoDB: matches documents where tags IS
+// 'red' or where tags is an array CONTAINING 'red'
+db.collection('items').find({ tags: 'red' })
+db.collection('items').find({ dim_cm: { $gt: 25 } })       // any element > 25
+db.collection('items').find({ tags: { $in: ['red', 'blue'] } })
+
 await db.collection('survey').insertMany([
   { results: [{ product: 'abc', score: 10 }, { product: 'xyz', score: 5 }] },
   { results: [{ product: 'abc', score: 7 }, { product: 'xyz', score: 8 }] }
@@ -152,6 +158,14 @@ db.collection('survey').find({ results: { $elemMatch: { product: 'xyz', score: {
 // Match on array length, or on an array containing all of a set of values
 db.collection('survey').find({ results: { $size: 2 } })
 db.collection('items').find({ tags: { $all: ['blank', 'red'] } })
+```
+
+### Update documents
+
+```javascript
+await db.collection('items').updateOne({ item: 'paper' }, { $set: { status: 'P' } })
+await db.collection('items').updateMany({ qty: { $lt: 50 } }, { $set: { status: 'P' }, $inc: { qty: 5 } })
+await db.collection('items').updateOne({ item: 'paper' }, { $unset: { status: '' } })
 ```
 
 ## Development
@@ -178,8 +192,11 @@ Operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 `$not` `$nor` `$exists` `$all` `$elemMatch` `$size`.
 
 Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
-`deleteOne()` `deleteMany()` `replaceOne()` `createIndex()` `dropIndex()` `indexes()`
-`listIndexes()`.
+`updateOne()` `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()`
+`createIndex()` `dropIndex()` `indexes()` `listIndexes()`.
+
+Update operators: `$set` `$unset` `$inc`. Result objects match the official
+driver's shapes (`acknowledged`, `matchedCount`, `modifiedCount`, ...).
 
 ### Supported value types
 

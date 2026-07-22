@@ -1,6 +1,4 @@
-// Imported as a value, not just a type: the assertions below use `instanceof Mdb`
-// to normalise MongoDB's richer result objects down to the fields this library returns.
-import { Db as Mdb } from 'mongodb'
+import type { Db as Mdb } from 'mongodb'
 import type { Db } from '../src/index.js'
 import { freshDualDbs } from './helpers/dual-dbs.js'
 
@@ -55,9 +53,7 @@ describe('Api', () => {
 
             let actual: any = await db().collection('col').deleteMany(byId(two.insertedId))
 
-            if (db() instanceof Mdb) {
-              actual = { deletedCount: actual.deletedCount }
-            }
+            actual = { deletedCount: actual.deletedCount } // compare only the count - both engines return the full driver shape
 
             expect(actual).toStrictEqual({ deletedCount: 1 })
           })
@@ -69,9 +65,7 @@ describe('Api', () => {
 
             let actual: any = await db().collection('col').deleteMany(byId(`${two.insertedId as string}NOT_FOUND`))
 
-            if (db() instanceof Mdb) {
-              actual = { deletedCount: actual.deletedCount }
-            }
+            actual = { deletedCount: actual.deletedCount } // compare only the count - both engines return the full driver shape
 
             expect(actual).toStrictEqual({ deletedCount: 0 })
           })
@@ -153,12 +147,10 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual = await db().collection('col')
+            let actual: any = await db().collection('col')
               .replaceOne(byId(two.insertedId), { four: 4 })
 
-            if (db() instanceof Mdb) {
-              actual = { modifiedCount: actual.modifiedCount }
-            }
+            actual = { modifiedCount: actual.modifiedCount } // compare only the count - both engines return the full driver shape
 
             expect(actual).toStrictEqual({ modifiedCount: 1 })
 
@@ -171,12 +163,10 @@ describe('Api', () => {
             await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual = await db().collection('col')
+            let actual: any = await db().collection('col')
               .replaceOne({ value: 'does not exist' }, { four: 4 })
 
-            if (db() instanceof Mdb) {
-              actual = { modifiedCount: actual.modifiedCount }
-            }
+            actual = { modifiedCount: actual.modifiedCount } // compare only the count - both engines return the full driver shape
 
             expect(actual).toStrictEqual({ modifiedCount: 0 })
           })
@@ -186,12 +176,10 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual = await db().collection('col')
+            let actual: any = await db().collection('col')
               .replaceOne(byId(two.insertedId), { _id: two.insertedId as string, four: 4 })
 
-            if (db() instanceof Mdb) {
-              actual = { modifiedCount: actual.modifiedCount }
-            }
+            actual = { modifiedCount: actual.modifiedCount } // compare only the count - both engines return the full driver shape
 
             expect(actual).toStrictEqual({ modifiedCount: 1 })
 
@@ -219,12 +207,10 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual = await db().collection('col')
+            let actual: any = await db().collection('col')
               .replaceOne(byId(`${two.insertedId as string}invalid`), { four: 4 })
 
-            if (db() instanceof Mdb) {
-              actual = { modifiedCount: actual.modifiedCount }
-            }
+            actual = { modifiedCount: actual.modifiedCount } // compare only the count - both engines return the full driver shape
 
             expect(actual).toStrictEqual({ modifiedCount: 0 })
           })

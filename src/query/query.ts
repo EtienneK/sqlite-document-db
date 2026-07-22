@@ -40,6 +40,15 @@ function quote2 (data: string): string {
   return '"' + stringEscape2(data) + '"'
 }
 
+/**
+ * Renders a JS value as a SQL literal, encoding objects/arrays/Dates exactly
+ * as the storage layer does. Exported for the update operators ($set values
+ * must be quoted by the same code that quotes query values).
+ */
+export function toSqlValue (data: any): string | number {
+  return quote(data)
+}
+
 // Exported so createIndex() builds index paths with the SAME code that builds
 // query paths - if these ever diverge, indexes silently stop matching queries.
 export function toJson1PathString (pathArr: string[]): string | number {

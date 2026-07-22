@@ -179,8 +179,8 @@ replacement".
 | --- | --- | --- | --- |
 | 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
 | 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
-| 3 | [Implicit array element matching](#3-implicit-array-element-matching) | M | Unblocks 4 disabled assertions; most-missed Mongo behaviour |
-| 4 | [`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators) | M | Largest API gap; the only CRUD letter missing |
+| 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
+| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE 2026-07-22** — `$set`/`$unset`/`$inc`; driver result shapes; upsert still open |
 | 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
 | 6 | [Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip) | M | Needed before this is usable for real workloads |
 | 7 | [Projection](#7-projection) | M | Listed in README; parity item |
@@ -309,7 +309,21 @@ regressing. Pair with benchmarks (item 17).
 
 ## 3. Implicit array element matching
 
-**Size: M.** Highest-leverage *query* feature: it single-handedly unblocks all four
+**Size: M — DONE 2026-07-22.** `{ tags: 'B' }` and the comparison/`$in`/`$nin`
+operators now match array elements like MongoDB; all four disabled assertions are
+enabled and the tutorial's query-an-array examples added, dual-engine verified.
+Implementation notes for posterity: a flat `OR` is NEVER indexed (SQLite's
+OR-optimization does not apply to expression indexes at all), so top-level
+comparisons compile to `rowid IN (scalar-arm UNION ALL element-arm)`, where the
+element arm leads with `extract >= '[' AND extract < '\'` — JSON arrays extract as
+text starting with `[`, so this range probes THE SAME expression index (0.45-0.73ms
+vs 9ms scans on 20k rows; `UNION ALL` not `UNION`, whose dedup sort blocked arm
+indexing; `IN` dedups anyway). Range operators gained MongoDB-style type bracketing
+(a number query no longer matches text/arrays/objects — SQLite's type ordering
+otherwise made `> 25` true for every array). `ORDER BY rowid` is restored in
+`find()`/`findOne()` — safe now that index work happens inside the rowid subqueries.
+Still open: implicit matching inside `$elemMatch` nesting uses the unindexed flat
+form (fine), `$all` on dates. Original analysis follows. it single-handedly unblocks all four
 commented-out assertions in
 [test/operators/query-operators.spec.ts](test/operators/query-operators.spec.ts#L29-L34).
 
@@ -344,7 +358,20 @@ surprising in MongoDB, and the parity tests will catch it.
 
 ## 4. `updateOne` / `updateMany` with update operators
 
-**Size: M.** The largest hole in the API: only `replaceOne` exists, so there is no way
+**Size: M — DONE 2026-07-22** for the core: `updateOne`/`updateMany` with
+`$set`/`$unset`/`$inc` (composable in one statement via nested
+`json_set`/`json_remove`; dotted `$set`/`$inc` paths create missing parents with
+`json_insert`, which no-ops when present). No-op updates report `modifiedCount: 0`
+via `AND data != <new-expr>` in the UPDATE. All result shapes now match the driver
+(`acknowledged`/`matchedCount`/`modifiedCount`/`upsertedCount`/`upsertedId`, and
+`acknowledged` on insert/delete results too — DR-2). `replaceOne` rejects operator
+documents; update methods reject operator-less documents. Dual-engine verified in
+[test/mdb-tutorials/update-documents.spec.ts](test/mdb-tutorials/update-documents.spec.ts).
+**Still open:** `upsert` option, `$mul`/`$min`/`$max`/`$rename`/`$push`/`$pull`/
+`$addToSet`/`$pop`, `findOneAndUpdate`/`findOneAndReplace`/`findOneAndDelete`.
+Known divergences (documented, not tested): `$inc` on a non-numeric field coerces
+instead of erroring; `$unset` of an array element removes it instead of nulling it.
+Original analysis follows. only `replaceOne` exists, so there is no way
 to modify a field without rewriting the whole document.
 From the README, and the
 [Update Documents tutorial](https://www.mongodb.com/docs/manual/tutorial/update-documents/).
