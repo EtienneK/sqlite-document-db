@@ -52,6 +52,9 @@ describe('Update Documents - https://www.mongodb.com/docs/manual/tutorial/update
         expect(actual.modifiedCount).toStrictEqual(1)
         expect(await db().collection('items').countDocuments({ flagged: true })).toStrictEqual(1)
         expect((await db().collection('items').findOne({ flagged: true }))?.item).toStrictEqual('mousepad')
+        // The stored value must be a real boolean, not SQLite's 1 (a $set
+        // value routed through json_set as a bare integer would store 1).
+        expect((await db().collection('items').findOne({ flagged: true }))?.flagged).toStrictEqual(true)
       })
 
       it('Should be able to update multiple documents using updateMany() with $set', async () => {

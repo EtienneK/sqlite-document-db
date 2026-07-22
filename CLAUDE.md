@@ -78,10 +78,19 @@ would make SQLite drop the field index (measured — don't "simplify" this).
 
 ### SQL injection posture
 
-`query.ts` builds SQL by string interpolation, not bound parameters. Values go
-through `quote()`, which doubles `'`, and identifiers through `quote2()`, which
-doubles `"`. Collection names are regex-validated. **If you add an operator,
-route every user-supplied value through `quote()`** — do not interpolate raw.
+User-supplied **values** are bound as named parameters (`bindValue()` →
+`:p0`..., update expressions use `:u0`... so the two merge in one UPDATE).
+Named, not positional, because fragments are reused — the same token appears in
+both arms of the implicit-array union and twice in `SET x WHERE data != x`.
+**If you add an operator, route every user-supplied value through
+`bindValue()`** — never interpolate. Field **paths** stay string literals
+through `quote()`/`toJson1PathString()` on purpose: SQLite only matches an
+expression index whose indexed expression is textually identical, so a bound
+`json_extract(data, :path)` would never use an index. Identifiers go through
+`quote2()`; collection names are regex-validated. Booleans bind as 1/0
+(SQLite cannot bind a bool); update values always go through `json(:u)` with
+the storage encoder so `$set: { x: true }` stores `true`, not `1`.
+Adversarial-value coverage: [test/injection.spec.ts](test/injection.spec.ts).
 
 ## Testing approach
 

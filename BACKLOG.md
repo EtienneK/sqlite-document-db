@@ -185,7 +185,7 @@ replacement".
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
 | 8 | ~~[`$regex`, `$type`, `$mod`](#8-remaining-query-operators)~~ | M | **DONE 2026-07-22** — `$expr`/`$bits*`/`$text` still open |
-| 9 | [Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation) | M | Hardening + lets statements be cached |
+| 9 | ~~[Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation)~~ | M | **DONE 2026-07-22** — named params for all values; statement caching still open |
 | 10 | [Error normalisation](#10-normalise-errors-to-mongodb-shapes) | S | Callers currently catch raw SQLite errors |
 | 11 | [Collection naming](#11-fix-collection-naming-restrictions) | S | Silent data-merging bug |
 | 12 | [Transactions](#12-transactions) | M | Correctness for multi-document writes |
@@ -570,7 +570,26 @@ Also: `$in`/`$nin` against array fields (two `TODO`s) falls out of item 3.
 
 ## 9. Use bound parameters instead of string interpolation
 
-**Size: M.** [src/query/query.ts](src/query/query.ts) builds SQL by concatenation,
+**Size: M — DONE 2026-07-22.** Every user-supplied VALUE now binds as a **named**
+parameter (`:p0`... for filters, `:u0`... for update expressions — distinct prefixes
+so one UPDATE can merge both). Named rather than positional because compiled
+fragments are REUSED: the same token appears in both arms of the implicit-array
+union, and an update expression appears twice in `SET x WHERE data != x`; SQLite
+binds a name once regardless of occurrences. Field PATHS deliberately stay string
+literals — SQLite only matches an expression index whose expression is textually
+identical, so `json_extract(data, :path)` would never be indexed (verified: with
+paths literal and values bound, all plan-regression tests and benchmarks are
+unchanged). Booleans bind as 1/0 in comparisons (SQLite can't bind a bool);
+update values always go through `json(:u)` with the storage encoder — which fixed
+a real bug where `$set: { flagged: true }` stored the number 1 instead of `true`
+(`json_set` treats a bare SQL 1 as a number; nothing had asserted the read-back
+value). Adversarial-value coverage in [test/injection.spec.ts](test/injection.spec.ts),
+dual-engine (quotes, backslashes, SQL fragments, fake `{"$date"}` wrappers, strings
+that look like our own `:p0` params). `toSql()` now returns `{ sql, params }`;
+`toSqlValue` was replaced by `bindValueAsJson`. Statement caching that this enables
+is still open (item 17). Original analysis follows.
+
+[src/query/query.ts](src/query/query.ts) builds SQL by concatenation,
 escaping values through `quote()` (doubling `'`) and identifiers through `quote2()`.
 That is *correct* as written, and collection names are regex-validated — this is
 hardening, not an open hole.

@@ -2,6 +2,15 @@ import { encodeValue } from '../ejson.js'
 
 export type QueryFilterDocument = Record<string, any>
 
+/** The named parameters accompanying a compiled SQL fragment. */
+export type SqlParams = Record<string, string | number | null>
+
+/** Mutable named-parameter registry shared by every context of one compilation. */
+interface Bindings {
+  n: number
+  values: SqlParams
+}
+
 /**
  * Compilation context threaded through the converter.
  *
@@ -9,11 +18,13 @@ export type QueryFilterDocument = Record<string, any>
  * 'valueJson' inside $elemMatch subqueries). `table` is the collection table
  * when the expression is being built for a top-level statement - it enables
  * the indexable rowid-union form of implicit array matching (see
- * withElementMatch). Nested contexts have no table and fall back to a flat OR.
+ * withElementMatch). Nested contexts have no table and fall back to a flat OR,
+ * but always share the top-level context's `bindings`.
  */
 interface SqlContext {
   col: string
   table?: string
+  bindings: Bindings
 }
 
 function stringEscape (str: string): string {
@@ -24,16 +35,10 @@ function stringEscape2 (str: string): string {
   return str.replace(/"/g, '""')
 }
 
-function quote (data: any): string | number {
-  if (typeof data === 'string') return "'" + stringEscape(data) + "'"
-  if (typeof data === 'number') return data
-  if (data === null) return 'null'
-  if (data === true) return 'TRUE'
-  if (data === false) return 'FALSE'
-  // Objects and arrays are encoded exactly as the storage layer encodes them
-  // (Dates wrapped as {"$date": ...}), so exact-match comparisons against
-  // stored values line up byte for byte.
-  return `json(${quote(JSON.stringify(encodeValue(data)))})`
+// Only PATHS are ever rendered as string literals. Values go through
+// bindValue - if you are about to quote() a user-supplied value, stop.
+function quote (str: string): string {
+  return "'" + stringEscape(str) + "'"
 }
 
 function quote2 (data: string): string {
@@ -41,17 +46,51 @@ function quote2 (data: string): string {
 }
 
 /**
- * Renders a JS value as a SQL literal, encoding objects/arrays/Dates exactly
- * as the storage layer does. Exported for the update operators ($set values
- * must be quoted by the same code that quotes query values).
+ * Registers a user-supplied value as a named parameter and returns the SQL
+ * fragment referencing it (BACKLOG item 9: values are bound, never
+ * interpolated). Named - not positional - parameters, because compiled
+ * fragments get reused: the same token can appear in both arms of the
+ * implicit-array union, or twice in an UPDATE's `SET x WHERE x != ...`, and
+ * SQLite binds it once regardless of how often it occurs.
+ *
+ * Booleans bind as 1/0 (SQLite cannot bind a boolean, and json_extract
+ * yields 1/0 for JSON true/false anyway). Objects, arrays and Dates are
+ * encoded exactly as the storage layer encodes them (see src/ejson.ts) so
+ * comparisons against stored values line up byte for byte.
  */
-export function toSqlValue (data: any): string | number {
-  return quote(data)
+function bindValue (ctx: SqlContext, value: any): string {
+  const name = `p${ctx.bindings.n++}`
+  if (typeof value === 'boolean') {
+    ctx.bindings.values[name] = value ? 1 : 0
+    return `:${name}`
+  }
+  if (typeof value === 'string' || typeof value === 'number' || value === null) {
+    ctx.bindings.values[name] = value
+    return `:${name}`
+  }
+  ctx.bindings.values[name] = JSON.stringify(encodeValue(value))
+  return `json(:${name})`
+}
+
+/**
+ * Encodes a JS value exactly as the storage layer does, registers it under
+ * `name`, and returns the SQL fragment referencing it. For the update
+ * operators in src/index.ts: $set values must be encoded by the same code
+ * that encodes query values and stored documents. Always json()-wrapped so
+ * json_set stores real JSON types (a bound bare 1 would store the number 1
+ * where `true` was meant).
+ */
+export function bindValueAsJson (params: SqlParams, name: string, value: any): string {
+  params[name] = JSON.stringify(encodeValue(value))
+  return `json(:${name})`
 }
 
 // Exported so createIndex() builds index paths with the SAME code that builds
 // query paths - if these ever diverge, indexes silently stop matching queries.
-export function toJson1PathString (pathArr: string[]): string | number {
+// Paths stay string LITERALS deliberately: SQLite only matches an expression
+// index whose indexed expression is textually identical, so a bound
+// json_extract(data, :path) would never use an index.
+export function toJson1PathString (pathArr: string[]): string {
   const firstDot = (pathArr.length === 1 && pathArr[0] === '') ? '' : '.'
   return quote(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
 }
@@ -238,13 +277,14 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       const extractField = isDate ? `${field}.$date` : field
       const extractValue = isDate ? value.toISOString() : (value as string | number | boolean | object | null)
       const elemValue = isDate ? `json_extract(value, '$.$date')` : 'value'
+      const boundValue = bindValue(ctx, extractValue)
 
       if (op === '$ne') {
         // MongoDB's $ne is the complement of the whole $eq match: it excludes
         // documents whose field equals the value AND documents whose array
         // field contains it, keeping everything else including missing fields.
-        const eqScalar = `${toJson1Extract(ctx.col, [extractField])} is ${quote(extractValue)}`
-        const eqElem = `${elemValue} is ${quote(extractValue)}`
+        const eqScalar = `${toJson1Extract(ctx.col, [extractField])} is ${boundValue}`
+        const eqElem = `${elemValue} is ${boundValue}`
         return `NOT (${withElementMatch(ctx, eqScalar, elementMatch(ctx, field, eqElem))})`
       }
 
@@ -266,8 +306,8 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
 
       // Have to put this in for $not operator, otherwise $not doesn't work for null/undefined fields
       const notNull = op === '$eq' ? '' : `AND ${toJson1Extract(ctx.col, [extractField])} IS NOT NULL`
-      const scalarPred = `${toJson1Extract(ctx.col, [extractField])} ${OPS[op]} ${quote(extractValue)} ${notNull}${scalarTypeGuard}`
-      const elemPred = `${elemValue} ${OPS[op]} ${quote(extractValue)}${elemTypeGuard}`
+      const scalarPred = `${toJson1Extract(ctx.col, [extractField])} ${OPS[op]} ${boundValue} ${notNull}${scalarTypeGuard}`
+      const elemPred = `${elemValue} ${OPS[op]} ${boundValue}${elemTypeGuard}`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
     case '$in': {
@@ -279,7 +319,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       if (value.some(element => element instanceof Date || element instanceof RegExp)) {
         return convert(ctx, { $or: value.map(element => ({ [field]: element })) })
       }
-      const list = `(${value.map(quote).join(',')})`
+      const list = `(${value.map(element => bindValue(ctx, element)).join(',')})`
       const scalarNull = value.includes(null) ? ` OR ${toJson1Extract(ctx.col, [field])} IS NULL` : ''
       const elemNull = value.includes(null) ? ' OR value IS NULL' : ''
       const scalarPred = `${toJson1Extract(ctx.col, [field])} IN ${list}${scalarNull}`
@@ -311,8 +351,8 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     // ---------------------- Evaluation Query Operators ----------------------
     case '$regex': {
       const regex = toRegExp(value)
-      const pattern = quote(regex.source)
-      const flags = quote(regex.flags)
+      const pattern = bindValue(ctx, regex.source)
+      const flags = bindValue(ctx, regex.flags)
       // mdb_regexp is the JS-backed SQL function Db.fromUrl registers on the
       // connection. The 'text' guards keep objects/arrays/numbers away from
       // it: json_extract renders compound values as JSON text, which MongoDB
@@ -334,8 +374,10 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       const divisor = Math.trunc(rawDivisor)
       const remainder = Math.trunc(rawRemainder)
       if (divisor === 0) throw Error('divisor cannot be 0')
-      const scalarPred = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) IN ('integer','real') AND CAST(${toJson1Extract(ctx.col, [field])} AS INTEGER) % ${divisor} = ${remainder}`
-      const elemPred = `json_each.type IN ('integer','real') AND CAST(value AS INTEGER) % ${divisor} = ${remainder}`
+      const boundDivisor = bindValue(ctx, divisor)
+      const boundRemainder = bindValue(ctx, remainder)
+      const scalarPred = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) IN ('integer','real') AND CAST(${toJson1Extract(ctx.col, [field])} AS INTEGER) % ${boundDivisor} = ${boundRemainder}`
+      const elemPred = `json_each.type IN ('integer','real') AND CAST(value AS INTEGER) % ${boundDivisor} = ${boundRemainder}`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
     // ---------------------- Element Query Operators ----------------------
@@ -362,7 +404,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     // ---------------------- Array Query Operators ----------------------
     case '$all': {
       if (!Array.isArray(value)) throw Error(`$all expects value to be of type: array; but got: ${typeof value}`)
-      return `(select count(*) from json_each(${toJson1Extract(ctx.col, [field])}) where value in (select value from json_each(${quote(value)}))) = ${quote(new Set(value).size)}`
+      return `(select count(*) from json_each(${toJson1Extract(ctx.col, [field])}) where value in (select value from json_each(${bindValue(ctx, value)}))) = ${bindValue(ctx, new Set(value).size)}`
     }
     case '$elemMatch': {
       if (Array.isArray(value) || typeof value !== 'object' || value === null) throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
@@ -391,11 +433,11 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       // element is re-wrapped with json_quote, not json(): a string element's
       // value is bare text - also malformed JSON - while json_quote encodes
       // scalars and passes objects/arrays through via the JSON subtype.
-      return `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'array' AND EXISTS (select json_object('f', json_quote(value)) as valueJson from json_each(${quote2(ctx.col)}, ${toJson1PathString([field])}) where (${convert({ col: 'valueJson' }, { $and })}))`
+      return `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'array' AND EXISTS (select json_object('f', json_quote(value)) as valueJson from json_each(${quote2(ctx.col)}, ${toJson1PathString([field])}) where (${convert({ col: 'valueJson', bindings: ctx.bindings }, { $and })}))`
     }
     case '$size': {
       if (typeof value !== 'number') throw Error(`$size expects value to be of type: number; but got: ${typeof value}`)
-      return `json_array_length(${quote2(ctx.col)}, ${toJson1PathString([field])}) = ${quote(value)}`
+      return `json_array_length(${quote2(ctx.col)}, ${toJson1PathString([field])}) = ${bindValue(ctx, value)}`
     }
   }
 
@@ -456,11 +498,16 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
 
 /**
  * Compiles a MongoDB filter document to a SQL boolean expression over
- * `columnName`. Pass `table` (the collection's table name) for top-level
- * statements so implicit array matching can compile to its indexable form.
+ * `columnName`, plus the named parameters (:p0, :p1, ...) it references.
+ * User-supplied values are always bound, never interpolated; field paths
+ * stay literals (see toJson1PathString). Pass `table` (the collection's
+ * table name) for top-level statements so implicit array matching can
+ * compile to its indexable form.
  */
-export function toSql (columnName: string, query: QueryFilterDocument, table?: string): string {
-  return convert({ col: columnName, table }, query)
+export function toSql (columnName: string, query: QueryFilterDocument, table?: string): { sql: string, params: SqlParams } {
+  const bindings: Bindings = { n: 0, values: {} }
+  const sql = convert({ col: columnName, table, bindings }, query)
+  return { sql, params: bindings.values }
 }
 
 /**

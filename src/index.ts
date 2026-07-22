@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { objectIdHexString } from './object-id.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
-import { toJson1PathString, toSortSql, toSql, toSqlValue } from './query/query.js'
+import { bindValueAsJson, toJson1PathString, toSortSql, toSql, type SqlParams } from './query/query.js'
 
 export type { ProjectionSpec } from './projection.js'
 
@@ -114,9 +114,11 @@ function ensureParents (expr: string, field: string): string {
 
 /**
  * Compiles a MongoDB update document ({ $set, $unset, $inc }) into a SQL
- * expression computing the new value of the `data` column.
+ * expression computing the new value of the `data` column, plus its named
+ * parameters. Update params are prefixed 'u' so they can be merged with a
+ * filter's 'p'-prefixed params in one statement without collisions.
  */
-function buildUpdateExpression (update: UpdateFilter): string {
+function buildUpdateExpression (update: UpdateFilter): { sql: string, params: SqlParams } {
   const keys = Object.keys(update)
   if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')
   for (const key of keys) {
@@ -128,6 +130,8 @@ function buildUpdateExpression (update: UpdateFilter): string {
   }
 
   let expr = 'data'
+  const params: SqlParams = {}
+  let n = 0
 
   if (update.$inc != null) {
     for (const [field, amount] of Object.entries(update.$inc as Record<string, unknown>)) {
@@ -136,8 +140,10 @@ function buildUpdateExpression (update: UpdateFilter): string {
       }
       expr = ensureParents(expr, field)
       const path = toJson1PathString([field])
+      const name = `u${n++}`
+      params[name] = amount
       // Missing fields start from 0, like MongoDB.
-      expr = `json_set(${expr}, ${path}, COALESCE(json_extract(data, ${path}), 0) + ${amount})`
+      expr = `json_set(${expr}, ${path}, COALESCE(json_extract(data, ${path}), 0) + :${name})`
     }
   }
 
@@ -150,11 +156,11 @@ function buildUpdateExpression (update: UpdateFilter): string {
     for (const [field, value] of Object.entries(update.$set as Record<string, unknown>)) {
       if (field === '_id') throw Error('_id field is immutable and cannot be changed')
       expr = ensureParents(expr, field)
-      expr = `json_set(${expr}, ${toJson1PathString([field])}, ${toSqlValue(value)})`
+      expr = `json_set(${expr}, ${toJson1PathString([field])}, ${bindValueAsJson(params, `u${n++}`, value)})`
     }
   }
 
-  return expr
+  return { sql: expr, params }
 }
 
 export class Collection<TSchema extends Document = Document> {
@@ -194,7 +200,7 @@ export class Collection<TSchema extends Document = Document> {
     // sort()/limit()/skip() modifiers can still contribute. One prepared
     // statement per cursor, streamed with iterate() so a cursor over a large
     // collection stays cheap.
-    const buildSql = (): string => {
+    const buildStatement = (): { sql: string, params: SqlParams } => {
       // ORDER BY rowid (last) gives insertion order, matching MongoDB's
       // natural order in practice, and makes sorted ties deterministic. It is
       // safe for index use because comparison predicates compile to
@@ -205,7 +211,8 @@ export class Collection<TSchema extends Document = Document> {
       // bare scalar subquery, which is only valid SQL inside parentheses.
       const normalizedSort = typeof sortSpec === 'string' ? { [sortSpec]: 1 } : sortSpec
       const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
-      let sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', query, this.name)}) ORDER BY ${orderBy}`
+      const filter = toSql('data', query, this.name)
+      let sql = `SELECT data FROM ${this.name} WHERE (${filter.sql}) ORDER BY ${orderBy}`
 
       if (limitCount != null || skipCount != null) {
         // MongoDB: limit(0) means no limit (SQLite spells that -1), and a
@@ -214,7 +221,7 @@ export class Collection<TSchema extends Document = Document> {
         sql += ` LIMIT ${limit}`
         if (skipCount != null && skipCount !== 0) sql += ` OFFSET ${Math.trunc(skipCount)}`
       }
-      return sql
+      return { sql, params: filter.params }
     }
 
     const assertNotStarted = (): void => {
@@ -227,7 +234,8 @@ export class Collection<TSchema extends Document = Document> {
         // Compiling here (not in find()) surfaces invalid projections as a
         // rejected promise, matching where the driver reports them.
         projector = projectionSpec == null ? undefined : compileProjection(projectionSpec)
-        rows = this.prepare(buildSql()).iterate()
+        const { sql, params } = buildStatement()
+        rows = this.prepare(sql).iterate(params)
       }
       const row = rows.next()
       if (row.done === true) {
@@ -390,8 +398,9 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   async countDocuments (filter?: Filter): Promise<number> {
-    const sql = `SELECT COUNT(*) AS count FROM ${this.name} WHERE (${toSql('data', filter ?? {}, this.name)})`
-    const result = this.prepare(sql).get() as { count: number }
+    const compiled = toSql('data', filter ?? {}, this.name)
+    const sql = `SELECT COUNT(*) AS count FROM ${this.name} WHERE (${compiled.sql})`
+    const result = this.prepare(sql).get(compiled.params) as { count: number }
     return Number(result.count)
   }
 
@@ -399,14 +408,14 @@ export class Collection<TSchema extends Document = Document> {
     const found = await this.findOne(filter)
     if (found == null) return { acknowledged: true, deletedCount: 0 }
 
-    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id }, this.name)})`
-    const result = this.prepare(sql).run()
+    const compiled = toSql('data', { _id: found._id }, this.name)
+    const result = this.prepare(`DELETE FROM ${this.name} WHERE (${compiled.sql})`).run(compiled.params)
     return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
   async deleteMany (filter: Filter): Promise<DeleteResult> {
-    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', filter, this.name)})`
-    const result = this.prepare(sql).run()
+    const compiled = toSql('data', filter, this.name)
+    const result = this.prepare(`DELETE FROM ${this.name} WHERE (${compiled.sql})`).run(compiled.params)
     return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
@@ -421,11 +430,12 @@ export class Collection<TSchema extends Document = Document> {
 
     if (doc._id != null && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
 
-    // `data != json(?)` makes a no-op replacement report modifiedCount 0,
-    // matching MongoDB (SQLite would otherwise count every touched row).
-    const sql = `UPDATE ${this.name} SET data = json(?) WHERE (${toSql('data', { _id: found._id }, this.name)}) AND data != json(?)`
-    const text = stringifyDocument({ ...doc, _id: found._id })
-    const result = this.prepare(sql).run(text, text)
+    // `data != json(:doc)` makes a no-op replacement report modifiedCount 0,
+    // matching MongoDB (SQLite would otherwise count every touched row). One
+    // named parameter serves both occurrences.
+    const compiled = toSql('data', { _id: found._id }, this.name)
+    const sql = `UPDATE ${this.name} SET data = json(:doc) WHERE (${compiled.sql}) AND data != json(:doc)`
+    const result = this.prepare(sql).run({ ...compiled.params, doc: stringifyDocument({ ...doc, _id: found._id }) })
     return { acknowledged: true, matchedCount: 1, modifiedCount: Number(result.changes), upsertedCount: 0, upsertedId: null }
   }
 
@@ -436,9 +446,12 @@ export class Collection<TSchema extends Document = Document> {
     const found = await this.findOne(filter)
     if (found == null) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 0, upsertedId: null }
 
-    // `data != <expr>` makes a no-op update report modifiedCount 0, like MongoDB.
-    const sql = `UPDATE ${this.name} SET data = ${expr} WHERE (${toSql('data', { _id: found._id }, this.name)}) AND data != ${expr}`
-    const result = this.prepare(sql).run()
+    // `data != <expr>` makes a no-op update report modifiedCount 0, like
+    // MongoDB. The expression's 'u' params and the filter's 'p' params merge
+    // without collisions, and each binds once for both occurrences of expr.
+    const compiled = toSql('data', { _id: found._id }, this.name)
+    const sql = `UPDATE ${this.name} SET data = ${expr.sql} WHERE (${compiled.sql}) AND data != ${expr.sql}`
+    const result = this.prepare(sql).run({ ...expr.params, ...compiled.params })
     return { acknowledged: true, matchedCount: 1, modifiedCount: Number(result.changes), upsertedCount: 0, upsertedId: null }
   }
 
@@ -447,8 +460,9 @@ export class Collection<TSchema extends Document = Document> {
     const expr = buildUpdateExpression(update)
 
     const matchedCount = await this.countDocuments(filter)
-    const sql = `UPDATE ${this.name} SET data = ${expr} WHERE (${toSql('data', filter, this.name)}) AND data != ${expr}`
-    const result = this.prepare(sql).run()
+    const compiled = toSql('data', filter, this.name)
+    const sql = `UPDATE ${this.name} SET data = ${expr.sql} WHERE (${compiled.sql}) AND data != ${expr.sql}`
+    const result = this.prepare(sql).run({ ...expr.params, ...compiled.params })
     return { acknowledged: true, matchedCount, modifiedCount: Number(result.changes), upsertedCount: 0, upsertedId: null }
   }
 
