@@ -138,6 +138,18 @@ for await (const item of db.collection('items').find({ status: 'A' })) {
 }
 ```
 
+### Project fields to return
+
+```javascript
+// Only these fields (plus _id)...
+db.collection('items').find({ status: 'A' }, { projection: { item: 1, status: 1 } })
+// ...without _id, via the chainable form
+db.collection('items').find({ status: 'A' }).project({ item: 1, status: 1, _id: 0 })
+// Exclusions, nested fields, and fields inside arrays of documents
+db.collection('items').find().project({ 'size.uom': 0 })
+db.collection('items').find().project({ item: 1, 'instock.qty': 1 })
+```
+
 ### Sort, limit and skip
 
 ```javascript
@@ -236,8 +248,7 @@ how each piece would be implemented. The headlines:
 #### Querying documents
 
 - [Query an Array for an Element](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element) — `{ tags: 'B' }` does not yet match a document whose `tags` array *contains* `'B'`
-- [Query an Array with Compound Filter Conditions on the Array Elements](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element) — conditions that may be satisfied by *different* elements of the same array
-- [Project Fields to Return from Query](https://www.mongodb.com/docs/manual/tutorial/project-fields-from-query-results/)
+- Projection `$`-operators: `$slice`, `$elemMatch`, `$` positional
 - [Type check using `$type`](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/#type-check)
 - [Evaluation Query Operators](https://www.mongodb.com/docs/manual/reference/operator/query-evaluation/) — `$regex`, `$expr`, `$mod`, …
 

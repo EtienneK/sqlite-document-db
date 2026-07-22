@@ -183,7 +183,7 @@ replacement".
 | 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE 2026-07-22** — `$set`/`$unset`/`$inc`; driver result shapes; upsert still open |
 | 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
-| 7 | [Projection](#7-projection) | M | Listed in README; parity item |
+| 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
 | 8 | [`$regex`, `$type`, `$mod`](#8-remaining-query-operators) | M | Closes parity gap with the Postgres project |
 | 9 | [Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation) | M | Hardening + lets statements be cached |
 | 10 | [Error normalisation](#10-normalise-errors-to-mongodb-shapes) | S | Callers currently catch raw SQLite errors |
@@ -495,15 +495,18 @@ rather than a filesort.
 
 ## 7. Projection
 
-**Size: M.** `find(query, { projection: { item: 1, status: 1 } })`. Named in the README
-([Project Fields to Return](https://www.mongodb.com/docs/manual/tutorial/project-fields-from-query-results/));
-the Postgres project supports it but notes "advanced projection fields are not yet
-supported", which is a reasonable scope to copy.
-
-**Approach.** Inclusion projections build a `json_object(...)` of the requested paths;
-exclusion projections use `json_remove(data, ...)`. `_id` is included unless explicitly
-excluded. Mixing inclusion and exclusion is an error in MongoDB (except for `_id`) —
-match that. Defer `$slice`, `$elemMatch` and `$` positional projection.
+**Size: M — DONE 2026-07-22.** `find(query, { projection })`, the chainable
+`cursor.project()`, and `findOne(filter, { projection })` (findOne now delegates to
+`find(..., { limit: 1 })`, gaining sort support for free). Inclusion, exclusion, the
+`_id` exemption, dotted paths, and projecting INTO arrays of embedded documents —
+all dual-engine verified in
+[test/mdb-tutorials/project-fields.spec.ts](test/mdb-tutorials/project-fields.spec.ts).
+Deliberately applied **in JS to decoded documents, not in SQL**: `json_object`
+reconstruction cannot distinguish missing fields from null ones (MongoDB omits
+missing), and array-of-documents projection is trivial in JS. Invalid projections
+(inclusion/exclusion mixes, path collisions) throw at iteration time, where the
+driver reports them. **Deferred:** `$slice`, `$elemMatch`, `$` positional.
+Original analysis follows (note it proposed the SQL-side approach — superseded).
 
 ---
 

@@ -3,7 +3,10 @@ import { DatabaseSync } from 'node:sqlite'
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { objectIdHexString } from './object-id.js'
+import { compileProjection, type ProjectionSpec } from './projection.js'
 import { toJson1PathString, toSortSql, toSql, toSqlValue } from './query/query.js'
+
+export type { ProjectionSpec } from './projection.js'
 
 export declare interface Document {
   [key: string]: any
@@ -68,6 +71,7 @@ export interface FindOptions {
   sort?: SortSpecification
   limit?: number
   skip?: number
+  projection?: ProjectionSpec
 }
 
 export interface FindCursor<TSchema extends Document = Document> {
@@ -77,6 +81,8 @@ export interface FindCursor<TSchema extends Document = Document> {
   limit: (count: number) => FindCursor<TSchema>
   /** Skips the first `count` results. Chainable; throws once iteration has started. */
   skip: (count: number) => FindCursor<TSchema>
+  /** Restricts the fields returned. Chainable; throws once iteration has started. */
+  project: (spec: ProjectionSpec) => FindCursor<TSchema>
   next: () => Promise<WithId<TSchema> | null>
   toArray: () => Promise<Array<WithId<TSchema>>>
   close: () => Promise<void>
@@ -179,6 +185,8 @@ export class Collection<TSchema extends Document = Document> {
     let sortSpec = options.sort
     let limitCount = options.limit
     let skipCount = options.skip
+    let projectionSpec = options.projection
+    let projector: ((doc: any) => any) | undefined
     let rows: Iterator<unknown> | undefined
     let done = false
 
@@ -215,13 +223,19 @@ export class Collection<TSchema extends Document = Document> {
 
     const next = async (): Promise<WithId<TSchema> | null> => {
       if (done) return null
-      rows ??= this.prepare(buildSql()).iterate()
+      if (rows === undefined) {
+        // Compiling here (not in find()) surfaces invalid projections as a
+        // rejected promise, matching where the driver reports them.
+        projector = projectionSpec == null ? undefined : compileProjection(projectionSpec)
+        rows = this.prepare(buildSql()).iterate()
+      }
       const row = rows.next()
       if (row.done === true) {
         done = true
         return null
       }
-      return parseDocument((row.value as { data: string }).data)
+      const document = parseDocument((row.value as { data: string }).data)
+      return projector === undefined ? document : projector(document)
     }
 
     const close = async (): Promise<void> => {
@@ -247,6 +261,12 @@ export class Collection<TSchema extends Document = Document> {
         assertNotStarted()
         if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) throw Error('skip must be a non-negative number')
         skipCount = count
+        return cursor
+      },
+
+      project (spec: ProjectionSpec): FindCursor<TSchema> {
+        assertNotStarted()
+        projectionSpec = spec
         return cursor
       },
 
@@ -279,15 +299,15 @@ export class Collection<TSchema extends Document = Document> {
     return cursor
   }
 
-  async findOne (filter: string | Filter): Promise<WithId<TSchema> | null> {
+  async findOne (filter: string | Filter = {}, options: FindOptions = {}): Promise<WithId<TSchema> | null> {
     if (typeof filter === 'string') filter = { _id: filter }
-    // ORDER BY rowid: findOne returns the FIRST match in natural order, like
-    // MongoDB - updateOne/deleteOne/replaceOne depend on this for "one".
-    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', filter, this.name)}) ORDER BY rowid LIMIT 1`
-    const result = this.prepare(sql).get() as { data: string } | undefined
-
-    if (result == null) return null
-    else return parseDocument(result.data)
+    // Delegates to find() with limit 1: same SQL shape (ORDER BY rowid LIMIT 1
+    // returns the FIRST match in natural order, like MongoDB - updateOne/
+    // deleteOne/replaceOne depend on this), plus sort/projection support.
+    const cursor = this.find(filter, { ...options, limit: 1 })
+    const document = await cursor.next()
+    await cursor.close()
+    return document
   }
 
   /**
