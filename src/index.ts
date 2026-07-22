@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { objectIdHexString } from './object-id.js'
-import { toJson1PathString, toSql, toSqlValue } from './query/query.js'
+import { toJson1PathString, toSortSql, toSql, toSqlValue } from './query/query.js'
 
 export declare interface Document {
   [key: string]: any
@@ -62,7 +62,21 @@ export interface IndexDescription {
   unique?: boolean
 }
 
+export type SortSpecification = string | Record<string, 1 | -1>
+
+export interface FindOptions {
+  sort?: SortSpecification
+  limit?: number
+  skip?: number
+}
+
 export interface FindCursor<TSchema extends Document = Document> {
+  /** Sorts results in MongoDB's BSON type order. Chainable; throws once iteration has started. */
+  sort: (spec: SortSpecification) => FindCursor<TSchema>
+  /** Caps the number of results; 0 means no limit. Chainable; throws once iteration has started. */
+  limit: (count: number) => FindCursor<TSchema>
+  /** Skips the first `count` results. Chainable; throws once iteration has started. */
+  skip: (count: number) => FindCursor<TSchema>
   next: () => Promise<WithId<TSchema> | null>
   toArray: () => Promise<Array<WithId<TSchema>>>
   close: () => Promise<void>
@@ -161,23 +175,47 @@ export class Collection<TSchema extends Document = Document> {
     return this.db.prepare(sql)
   }
 
-  find (query: Filter = {}): FindCursor<TSchema> {
-    // One prepared statement per cursor, streamed with iterate() so a cursor
-    // over a large collection stays cheap. ORDER BY rowid gives insertion
-    // order, matching MongoDB's natural order in practice - and is safe for
-    // index use because comparison predicates compile to `rowid IN (...)`
-    // subqueries, whose internal index searches the outer ORDER BY cannot
-    // defeat (a bare scalar predicate + ORDER BY rowid, by contrast, makes
-    // SQLite pick a rowid scan over a field index - measured).
-    // The parens around the filter are load-bearing: $exists compiles to a
-    // bare scalar subquery, which is only valid SQL inside parentheses.
-    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', query, this.name)}) ORDER BY rowid`
+  find (query: Filter = {}, options: FindOptions = {}): FindCursor<TSchema> {
+    let sortSpec = options.sort
+    let limitCount = options.limit
+    let skipCount = options.skip
     let rows: Iterator<unknown> | undefined
     let done = false
 
+    // The SQL is built lazily on first iteration so the chainable
+    // sort()/limit()/skip() modifiers can still contribute. One prepared
+    // statement per cursor, streamed with iterate() so a cursor over a large
+    // collection stays cheap.
+    const buildSql = (): string => {
+      // ORDER BY rowid (last) gives insertion order, matching MongoDB's
+      // natural order in practice, and makes sorted ties deterministic. It is
+      // safe for index use because comparison predicates compile to
+      // `rowid IN (...)` subqueries, whose internal index searches the outer
+      // ORDER BY cannot defeat (a bare scalar predicate + ORDER BY rowid, by
+      // contrast, makes SQLite pick a rowid scan over a field index - measured).
+      // The parens around the filter are load-bearing: $exists compiles to a
+      // bare scalar subquery, which is only valid SQL inside parentheses.
+      const normalizedSort = typeof sortSpec === 'string' ? { [sortSpec]: 1 } : sortSpec
+      const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
+      let sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', query, this.name)}) ORDER BY ${orderBy}`
+
+      if (limitCount != null || skipCount != null) {
+        // MongoDB: limit(0) means no limit (SQLite spells that -1), and a
+        // negative limit behaves like its absolute value.
+        const limit = limitCount == null || limitCount === 0 ? -1 : Math.trunc(Math.abs(limitCount))
+        sql += ` LIMIT ${limit}`
+        if (skipCount != null && skipCount !== 0) sql += ` OFFSET ${Math.trunc(skipCount)}`
+      }
+      return sql
+    }
+
+    const assertNotStarted = (): void => {
+      if (rows !== undefined || done) throw Error('Cursor is already initialized, cannot be modified')
+    }
+
     const next = async (): Promise<WithId<TSchema> | null> => {
       if (done) return null
-      rows ??= this.prepare(sql).iterate()
+      rows ??= this.prepare(buildSql()).iterate()
       const row = rows.next()
       if (row.done === true) {
         done = true
@@ -191,7 +229,27 @@ export class Collection<TSchema extends Document = Document> {
       rows?.return?.(undefined) // finalizes the underlying statement early
     }
 
-    return {
+    const cursor: FindCursor<TSchema> = {
+      sort (spec: SortSpecification): FindCursor<TSchema> {
+        assertNotStarted()
+        sortSpec = spec
+        return cursor
+      },
+
+      limit (count: number): FindCursor<TSchema> {
+        assertNotStarted()
+        if (typeof count !== 'number' || !Number.isFinite(count)) throw Error('limit must be a finite number')
+        limitCount = count
+        return cursor
+      },
+
+      skip (count: number): FindCursor<TSchema> {
+        assertNotStarted()
+        if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) throw Error('skip must be a non-negative number')
+        skipCount = count
+        return cursor
+      },
+
       next,
       close,
 
@@ -218,6 +276,7 @@ export class Collection<TSchema extends Document = Document> {
         }
       }
     }
+    return cursor
   }
 
   async findOne (filter: string | Filter): Promise<WithId<TSchema> | null> {

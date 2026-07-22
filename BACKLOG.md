@@ -182,7 +182,7 @@ replacement".
 | 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
 | 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE 2026-07-22** — `$set`/`$unset`/`$inc`; driver result shapes; upsert still open |
 | 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
-| 6 | [Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip) | M | Needed before this is usable for real workloads |
+| 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | [Projection](#7-projection) | M | Listed in README; parity item |
 | 8 | [`$regex`, `$type`, `$mod`](#8-remaining-query-operators) | M | Closes parity gap with the Postgres project |
 | 9 | [Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation) | M | Hardening + lets statements be cached |
@@ -469,9 +469,17 @@ Related: the `byId()` helper and `as any` casts in
 
 ## 6. Cursor `sort()`, `limit()` and `skip()`
 
-**Size: M.** Currently `find()` returns documents in insertion order with no way to
-order or paginate — a hard blocker for real use. The Postgres project supports sorting
-with optional numeric casting.
+**Size: M — DONE 2026-07-22.** Chainable `sort()`/`limit()`/`skip()` plus the
+`find(filter, { sort, limit, skip })` options form, throwing once iteration starts
+(like the driver). Sorting emits a type-rank CASE per key emulating MongoDB's BSON
+comparison order — null/missing < numbers < strings < booleans < dates — with
+wrapped `{"$date"}` values ranked as dates and compared by ISO string; verified
+dual-engine in [test/sort-limit-skip.spec.ts](test/sort-limit-skip.spec.ts)
+including mixed-type fields. `limit(0)` = no limit; ties break by rowid (natural
+order). **Known divergence:** MongoDB sorts array fields by min (asc) / max (desc)
+element; here arrays rank as a group and compare as text. **Not done:** sorting via
+an index (the rank CASE always filesorts — revisit with benchmarks, item 17).
+Original analysis follows.
 
 **Approach.** `ORDER BY json_extract(data,'$.f') ASC/DESC`, `LIMIT`, `OFFSET`.
 The interesting part is **type ordering**: SQLite sorts NULL < number < text < blob,

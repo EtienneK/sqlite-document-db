@@ -138,6 +138,19 @@ for await (const item of db.collection('items').find({ status: 'A' })) {
 }
 ```
 
+### Sort, limit and skip
+
+```javascript
+db.collection('items').find().sort({ qty: -1 }).skip(10).limit(5)
+db.collection('items').find({}, { sort: { qty: -1 }, skip: 10, limit: 5 }) // same thing
+
+// Multi-key sorting, in MongoDB's BSON type order
+db.collection('items').find().sort({ status: 1, qty: -1 })
+```
+
+Sorting follows MongoDB's type comparison order (null/missing < numbers <
+strings < booleans < dates), verified against real MongoDB.
+
 ### Query arrays
 
 ```javascript
@@ -227,7 +240,6 @@ how each piece would be implemented. The headlines:
 - [Project Fields to Return from Query](https://www.mongodb.com/docs/manual/tutorial/project-fields-from-query-results/)
 - [Type check using `$type`](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/#type-check)
 - [Evaluation Query Operators](https://www.mongodb.com/docs/manual/reference/operator/query-evaluation/) — `$regex`, `$expr`, `$mod`, …
-- Sorting, `limit()` and `skip()` on cursors
 
 #### Updating documents
 

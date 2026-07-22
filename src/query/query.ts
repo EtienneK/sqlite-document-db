@@ -291,3 +291,46 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
 export function toSql (columnName: string, query: QueryFilterDocument, table?: string): string {
   return convert({ col: columnName, table }, query)
 }
+
+/**
+ * Compiles a MongoDB sort specification ({ field: 1 | -1, ... }) into SQL
+ * ORDER BY terms that follow MongoDB's BSON type comparison order:
+ *
+ *   null/missing < numbers < strings < objects < arrays < booleans < dates
+ *
+ * SQLite's own ordering (NULL < numbers < text, booleans as 0/1 integers,
+ * our wrapped dates as object text) disagrees with all of the exotic cases,
+ * so each key sorts by a type-rank CASE first and the value second. Date
+ * wrappers ({"$date": ISO}) rank as dates and compare by their ISO string,
+ * which orders chronologically.
+ *
+ * Known divergence: MongoDB sorts an ARRAY field by its smallest (asc) /
+ * largest (desc) element; here arrays rank as a group and compare as text.
+ */
+export function toSortSql (columnName: string, sort: Record<string, number>): string {
+  const entries = Object.entries(sort)
+  if (entries.length === 0) throw Error('sort specification must contain at least one field')
+
+  const terms: string[] = []
+  for (const [field, direction] of entries) {
+    if (direction !== 1 && direction !== -1) {
+      throw Error(`unsupported sort direction for field ${field}: ${String(direction)} (only 1 and -1 are supported)`)
+    }
+    const path = toJson1PathString([field])
+    const datePath = toJson1PathString([`${field}.$date`])
+    const type = `json_type(${quote2(columnName)}, ${path})`
+    const dateValue = `json_extract(${quote2(columnName)}, ${datePath})`
+    const rank = `CASE WHEN ${type} IS NULL OR ${type} = 'null' THEN 0 ` +
+      `WHEN ${type} IN ('integer','real') THEN 1 ` +
+      `WHEN ${type} = 'text' THEN 2 ` +
+      `WHEN ${type} = 'object' AND ${dateValue} IS NOT NULL THEN 6 ` +
+      `WHEN ${type} = 'object' THEN 3 ` +
+      `WHEN ${type} = 'array' THEN 4 ` +
+      'ELSE 5 END' // 'true'/'false'
+    const value = `CASE WHEN ${type} = 'object' AND ${dateValue} IS NOT NULL THEN ${dateValue} ` +
+      `ELSE json_extract(${quote2(columnName)}, ${path}) END`
+    const dir = direction === 1 ? 'ASC' : 'DESC'
+    terms.push(`${rank} ${dir}`, `${value} ${dir}`)
+  }
+  return terms.join(', ')
+}
