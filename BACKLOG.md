@@ -25,10 +25,15 @@ still free to change. After a release, either becomes a migration problem.
 
 ## DR-1: Document storage format
 
-**Status: DECIDED 2026-07-22 — option C.** Dates are stored in EJSON format
-(`{"$date": "..."}`) via a minimal vendored encoder; other non-JSON types are rejected
-at insert time with a clear error instead of being silently corrupted. Full EJSON
-(option B) remains open for later since the wire format is identical. Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
+**Status: DECIDED 2026-07-22 — option C. IMPLEMENTED same day.** Dates are stored in
+EJSON format (`{"$date": "..."}`) via [src/ejson.ts](src/ejson.ts) (~100 lines, zero
+dependencies kept); other non-JSON types are rejected at write time with the offending
+path. Query support: `$eq/$ne/$gt/$gte/$lt/$lte` target the `field.$date` sub-path,
+`$in/$nin` with Dates rewrite to `$or/$nor` of equalities, whole-object/array equality
+encodes query values through the same encoder. Verified dual-engine in
+[test/dates.spec.ts](test/dates.spec.ts). Not yet date-aware: `$all` and `$elemMatch`
+on date elements (niche; revisit with item 3). Full EJSON (option B) remains open —
+the wire format is identical. Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
 [5b](#5-typescript-typing) and [6](#6-cursor-sort-limit-and-skip), and caps DR-2.
 
 ### Context

@@ -165,14 +165,20 @@ Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
 
 ### Supported value types
 
-Documents are stored as JSON, so **only JSON types round-trip**: object, array, string,
-number, boolean and null.
+Supported: object, array, string, number, boolean, null — and **`Date`**, which is
+stored in MongoDB's [Extended JSON](https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/)
+format (`{"$date": "..."}`), round-trips as a real `Date`, and works in equality and
+range queries:
 
-> ⚠️ Other types are currently converted on the way in and do not come back as they went:
-> a `Date` returns as an ISO **string** (so `findOne({ when: someDate })` will not match
-> it), and `RegExp` and `Uint8Array` are flattened to empty or index-keyed objects. Store
-> dates as ISO strings or epoch numbers explicitly until this is resolved — see
-> [DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
+```javascript
+await db.collection('events').insertOne({ name: 'launch', at: new Date('2020-06-15') })
+await db.collection('events').find({ at: { $gte: new Date('2020-01-01') } }).toArray()
+```
+
+Anything else JSON cannot represent (`RegExp`, `Uint8Array`/`Buffer`, `Map`, `Set`,
+`bigint`, functions, `NaN`/`Infinity`) is **rejected at write time** with an error
+naming the offending path, rather than silently corrupted the way `JSON.stringify`
+would. Design notes in [DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
 
 ### Still missing
 

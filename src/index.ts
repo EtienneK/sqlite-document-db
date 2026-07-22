@@ -1,4 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
+// Documents round-trip through the EJSON layer, not plain JSON: Dates are
+// stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
+import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { objectIdHexString } from './object-id.js'
 import { toSql } from './query/query.js'
 
@@ -82,7 +85,7 @@ export class Collection<TSchema extends Document = Document> {
         done = true
         return null
       }
-      return JSON.parse((row.value as { data: string }).data)
+      return parseDocument((row.value as { data: string }).data)
     }
 
     const close = async (): Promise<void> => {
@@ -125,7 +128,7 @@ export class Collection<TSchema extends Document = Document> {
     const result = this.prepare(sql).get() as { data: string } | undefined
 
     if (result == null) return null
-    else return JSON.parse(result.data)
+    else return parseDocument(result.data)
   }
 
   async countDocuments (filter?: Filter): Promise<number> {
@@ -156,7 +159,7 @@ export class Collection<TSchema extends Document = Document> {
     if (doc._id != null && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
 
     const sql = `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id })}`
-    const result = this.prepare(sql).run(JSON.stringify({ ...doc, _id: found._id }))
+    const result = this.prepare(sql).run(stringifyDocument({ ...doc, _id: found._id }))
     return { modifiedCount: Number(result.changes) }
   }
 
@@ -178,7 +181,7 @@ export class Collection<TSchema extends Document = Document> {
       const doc = docs[index]!
       const id = (doc._id == null) ? objectIdHexString() : doc._id;
       (doc as unknown as WithId<TSchema>)._id = id
-      stmt.run(JSON.stringify({ _id: id, ...doc }))
+      stmt.run(stringifyDocument({ _id: id, ...doc }))
       insertedIds[index] = id
       insertedCount++
     }

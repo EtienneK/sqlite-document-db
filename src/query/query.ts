@@ -1,3 +1,5 @@
+import { encodeValue } from '../ejson.js'
+
 export type QueryFilterDocument = Record<string, any>
 
 function stringEscape (str: string): string {
@@ -14,7 +16,10 @@ function quote (data: any): string | number {
   if (data === null) return 'null'
   if (data === true) return 'TRUE'
   if (data === false) return 'FALSE'
-  return `json(${quote(JSON.stringify(data))})`
+  // Objects and arrays are encoded exactly as the storage layer encodes them
+  // (Dates wrapped as {"$date": ...}), so exact-match comparisons against
+  // stored values line up byte for byte.
+  return `json(${quote(JSON.stringify(encodeValue(data)))})`
 }
 
 function quote2 (data: string): string {
@@ -71,17 +76,35 @@ function convertOp (columnName: string, field: string, op: string, value: string
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
         throw Error(`$${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
+      // Dates are stored as {"$date": "<ISO>"} (see src/ejson.ts), so date
+      // comparisons target the wrapped string one level down. ISO-8601 UTC
+      // strings order lexicographically, which makes range operators work.
+      // For a non-date field the extract yields NULL: `is`/`is not` then give
+      // MongoDB's semantics (a date never equals a non-date), and the range
+      // operators exclude it via their IS NOT NULL guard.
+      const extractField = value instanceof Date ? `${field}.$date` : field
+      const extractValue = value instanceof Date ? value.toISOString() : value
       // Have to put this in for $not operator, otherwise $not doesn't work for null/undefined fields
-      const notNull = op === '$eq' || op === '$ne' ? '' : `AND ${toJson1Extract(columnName, [field])} IS NOT NULL`
-      return `${toJson1Extract(columnName, [field])} ${OPS[op]} ${quote(value)} ${notNull}`
+      const notNull = op === '$eq' || op === '$ne' ? '' : `AND ${toJson1Extract(columnName, [extractField])} IS NOT NULL`
+      return `${toJson1Extract(columnName, [extractField])} ${OPS[op]} ${quote(extractValue)} ${notNull}`
     }
     case '$in': {
       if (!Array.isArray(value)) throw Error(`$in expects value to be of type: array; but got: ${typeof value}`)
+      // A Date in the list needs a different extract path than the scalar
+      // values, so the list form can't be used; rewrite as an OR of per-value
+      // equalities, which is what $in means anyway.
+      if (value.some(element => element instanceof Date)) {
+        return convert(columnName, { $or: value.map(element => ({ [field]: element })) })
+      }
       const valueIncludesNull = value.includes(null) ? `OR ${toJson1Extract(columnName, [field])} IS NULL` : ''
       return `(${toJson1Extract(columnName, [field])} ${OPS[op]} (${value.map(quote).join(',')}) ${valueIncludesNull})`
     }
     case '$nin': {
       if (!Array.isArray(value)) throw Error(`$nin expects value to be of type: array; but got: ${typeof value}`)
+      // Mirror of the $in rewrite above.
+      if (value.some(element => element instanceof Date)) {
+        return convert(columnName, { $nor: value.map(element => ({ [field]: element })) })
+      }
       let valueWithoutNull = value
       let valueWithoutNullSql = `OR ${toJson1Extract(columnName, [field])} IS NULL`
       if (valueWithoutNull.includes(null)) {

@@ -128,10 +128,14 @@ implicit array-element matching (`{ tags: 'B' }` matching an array containing
   matches the MongoDB driver, and several tests assert on the mutated objects.
 - `insertMany` is not transactional, matching MongoDB's *ordered* insert: on a
   duplicate `_id` the documents already written stay written.
-- **Only JSON types round-trip.** Documents go through `JSON.stringify`, so a `Date`
-  comes back as an ISO string (and therefore cannot be matched by a `Date` filter),
-  while `RegExp` and `Uint8Array` are silently flattened. Measured against real MongoDB;
-  see [DR-1 in BACKLOG.md](BACKLOG.md#dr-1-document-storage-format). Don't add features
-  that assume richer types until that decision is made.
+- **Storage is EJSON-for-Dates, not plain JSON** ([src/ejson.ts](src/ejson.ts), per
+  DR-1). Dates are stored as `{"$date": "<ISO>"}` and revived on read; every other
+  non-JSON type is rejected at write time with the offending path. Consequences:
+  documents must go through `stringifyDocument`/`parseDocument`, never raw
+  `JSON.stringify`/`parse`; date comparisons in [src/query/query.ts](src/query/query.ts)
+  target the `field.$date` sub-path (ISO strings order lexicographically, which is what
+  makes `$gt`/`$lt` work); `$in`/`$nin` with a Date rewrite to `$or`/`$nor` of
+  equalities; and any future index over a date field must target the same `.$date`
+  sub-path or it won't match.
 - `backup/` holds an older abandoned implementation. It is excluded from the
   build, typecheck and lint. Don't treat it as live code.
