@@ -26,7 +26,9 @@ function quote2 (data: string): string {
   return '"' + stringEscape2(data) + '"'
 }
 
-function toJson1PathString (pathArr: string[]): string | number {
+// Exported so createIndex() builds index paths with the SAME code that builds
+// query paths - if these ever diverge, indexes silently stop matching queries.
+export function toJson1PathString (pathArr: string[]): string | number {
   const firstDot = (pathArr.length === 1 && pathArr[0] === '') ? '' : '.'
   return quote(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
 }

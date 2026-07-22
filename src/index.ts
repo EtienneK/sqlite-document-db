@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { objectIdHexString } from './object-id.js'
-import { toSql } from './query/query.js'
+import { toJson1PathString, toSql } from './query/query.js'
 
 export declare interface Document {
   [key: string]: any
@@ -34,11 +34,31 @@ export interface UpdateResult {
   modifiedCount: number
 }
 
+export type IndexDirection = 1 | -1
+
+export type IndexSpecification = string | Record<string, IndexDirection>
+
+export interface CreateIndexOptions {
+  unique?: boolean
+  name?: string
+}
+
+export interface IndexDescription {
+  name: string
+  key: Record<string, IndexDirection>
+  unique?: boolean
+}
+
 export interface FindCursor<TSchema extends Document = Document> {
   next: () => Promise<WithId<TSchema> | null>
   toArray: () => Promise<Array<WithId<TSchema>>>
   close: () => Promise<void>
   [Symbol.asyncIterator]: () => AsyncIterableIterator<WithId<TSchema>>
+}
+
+/** Escapes a SQL identifier for use inside double quotes. */
+function sqlName (name: string): string {
+  return name.replace(/"/g, '""')
 }
 
 export class Collection<TSchema extends Document = Document> {
@@ -129,6 +149,85 @@ export class Collection<TSchema extends Document = Document> {
 
     if (result == null) return null
     else return parseDocument(result.data)
+  }
+
+  /**
+   * Creates a SQLite expression index over the given document fields and
+   * returns its MongoDB-style name (e.g. `qty_1`, `size.uom_1_status_-1`).
+   *
+   * Index paths are built by the same code that builds query paths, so any
+   * query on an indexed field is index-eligible. For single-field indexes a
+   * non-unique companion index on `<field>.$date` is also created, because
+   * Date values are stored as `{"$date": ...}` (see src/ejson.ts) and date
+   * comparisons therefore query that sub-path.
+   */
+  async createIndex (spec: IndexSpecification, options: CreateIndexOptions = {}): Promise<string> {
+    const key: Record<string, IndexDirection> = typeof spec === 'string' ? { [spec]: 1 } : spec
+    const entries = Object.entries(key)
+    if (entries.length === 0) throw Error('createIndex requires at least one field')
+    for (const [field, direction] of entries) {
+      if (field === '') throw Error('createIndex field names must be non-empty')
+      if (direction !== 1 && direction !== -1) {
+        throw Error(`unsupported index direction for field ${field}: ${String(direction)} (only 1 and -1 are supported)`)
+      }
+    }
+
+    // MongoDB's generated name: `<field>_<direction>` pairs joined with '_'.
+    const name = options.name ?? entries.map(([field, direction]) => `${field}_${direction}`).join('_')
+    const unique = options.unique === true ? 'UNIQUE ' : ''
+
+    const columns = entries
+      .map(([field, direction]) => `json_extract(data, ${toJson1PathString([field])}) ${direction === 1 ? 'ASC' : 'DESC'}`)
+      .join(', ')
+    this.exec(`CREATE ${unique}INDEX IF NOT EXISTS "${sqlName(`ix_${this.name}_${name}`)}" ON ${this.name} (${columns})`)
+
+    if (entries.length === 1) {
+      const [field, direction] = entries[0]!
+      const dateColumn = `json_extract(data, ${toJson1PathString([`${field}.$date`])}) ${direction === 1 ? 'ASC' : 'DESC'}`
+      this.exec(`CREATE INDEX IF NOT EXISTS "${sqlName(`ixd_${this.name}_${name}`)}" ON ${this.name} (${dateColumn})`)
+    }
+
+    return name
+  }
+
+  /** Drops an index by the name createIndex returned. Throws if it does not exist. */
+  async dropIndex (name: string): Promise<void> {
+    const physical = `ix_${this.name}_${name}`
+    const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get(physical)
+    if (found === undefined) throw Error(`index not found with name [${name}]`)
+    this.exec(`DROP INDEX "${sqlName(physical)}"`)
+    this.exec(`DROP INDEX IF EXISTS "${sqlName(`ixd_${this.name}_${name}`)}"`)
+  }
+
+  /** Lists indexes in (a subset of) MongoDB's shape: `{ name, key, unique? }`. */
+  async indexes (): Promise<IndexDescription[]> {
+    const rows = this.db.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? ORDER BY name"
+    ).all(this.name) as Array<{ name: string, sql: string | null }>
+
+    const descriptions: IndexDescription[] = [
+      { name: '_id_', key: { _id: 1 }, unique: true } // the index the constructor creates
+    ]
+    const prefix = `ix_${this.name}_`
+    for (const row of rows) {
+      if (!row.name.startsWith(prefix) || row.sql == null) continue
+      const key: Record<string, IndexDirection> = {}
+      for (const match of row.sql.matchAll(/json_extract\(data, '([^']+)'\) (ASC|DESC)/g)) {
+        // '$.a.b[0]' back to the dotted field form 'a.b.0' used in queries.
+        const field = match[1]!.replace(/^\$\.?/, '').replace(/\[(\d+)\]/g, '.$1')
+        key[field] = match[2] === 'ASC' ? 1 : -1
+      }
+      descriptions.push({
+        name: row.name.slice(prefix.length),
+        key,
+        ...(row.sql.startsWith('CREATE UNIQUE') ? { unique: true } : {})
+      })
+    }
+    return descriptions
+  }
+
+  listIndexes (): { toArray: () => Promise<IndexDescription[]> } {
+    return { toArray: async () => await this.indexes() }
   }
 
   async countDocuments (filter?: Filter): Promise<number> {

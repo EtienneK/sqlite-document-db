@@ -110,6 +110,23 @@ db.collection('items').find({ $or: [{ status: 'A' }, { qty: { $lt: 30 } }] })
 db.collection('items').find({ 'size.uom': 'in' })
 ```
 
+### Indexes
+
+Collections always have a unique index on `_id`. Additional fields can be indexed with
+the MongoDB `createIndex` API — backed by real SQLite expression indexes, so filtered
+queries stop being full-table scans:
+
+```javascript
+await db.collection('items').createIndex({ qty: 1 })                       // -> 'qty_1'
+await db.collection('items').createIndex({ 'size.uom': 1, status: -1 })    // compound
+await db.collection('users').createIndex({ email: 1 }, { unique: true })   // unique
+await db.collection('items').indexes()                                     // list
+await db.collection('items').dropIndex('qty_1')                            // drop
+```
+
+Single-field indexes automatically cover `Date` values too (they are stored in a
+wrapped format — see below — and get a companion index on the wrapped path).
+
 ### Iterate a cursor
 
 Cursors are async-iterable, and fetch one document at a time rather than
@@ -161,7 +178,8 @@ Operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 `$not` `$nor` `$exists` `$all` `$elemMatch` `$size`.
 
 Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
-`deleteOne()` `deleteMany()` `replaceOne()`.
+`deleteOne()` `deleteMany()` `replaceOne()` `createIndex()` `dropIndex()` `indexes()`
+`listIndexes()`.
 
 ### Supported value types
 

@@ -32,6 +32,14 @@ one document per row. A unique index on `json_extract(data, '$._id')` enforces
 `_id` uniqueness. Collection names are validated against `/^[a-z_]+[a-z0-9_]*$/`
 and lowercased, because they are interpolated straight into SQL.
 
+User indexes (`createIndex`) are SQLite expression indexes named
+`ix_<table>_<mongoName>`; single-field indexes get a `ixd_` companion on
+`<field>.$date` so date-range queries (which target that sub-path) are served too.
+`indexes()` reconstructs the key spec by parsing the CREATE INDEX SQL out of
+`sqlite_master` — there is no separate metadata table. The plan-regression tests in
+[test/query-plan.spec.ts](test/query-plan.spec.ts) replay captured SQL and fail if
+`find()`'s statements ever stop using these indexes.
+
 ### How query compilation works
 
 `toSql('data', filter)` recurses through the filter object and emits a SQL

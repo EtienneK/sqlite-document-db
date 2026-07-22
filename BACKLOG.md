@@ -178,7 +178,7 @@ replacement".
 | # | Item | Size | Why now |
 | --- | --- | --- | --- |
 | 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
-| 2 | [`createIndex()` and friends](#2-createindex-and-friends) | M | The whole point of using SQLite |
+| 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
 | 3 | [Implicit array element matching](#3-implicit-array-element-matching) | M | Unblocks 4 disabled assertions; most-missed Mongo behaviour |
 | 4 | [`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators) | M | Largest API gap; the only CRUD letter missing |
 | 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
@@ -249,7 +249,18 @@ item 2) proving a filtered `find()` uses an index.
 
 ## 2. `createIndex()` and friends
 
-**Size: M.** *This is the feature that justifies building on SQLite at all* — it's
+**Size: M — DONE 2026-07-22.** `createIndex()` (single, compound, unique, custom
+name), `dropIndex()`, `indexes()` and `listIndexes()`, with MongoDB-style generated
+names, all verified dual-engine in [test/indexes.spec.ts](test/indexes.spec.ts).
+Index paths are built by the exported `toJson1PathString()` — the same code queries
+use. Because Dates are stored wrapped (DR-1), single-field indexes get a non-unique
+companion index on `<field>.$date`; [test/query-plan.spec.ts](test/query-plan.spec.ts)
+replays the *captured* CREATE INDEX + SELECT statements and asserts via
+`EXPLAIN QUERY PLAN` that both the plain and the date index actually serve `find()`.
+Not done: compound-index date companions (niche), `dropIndexes()`/`indexExists()`,
+index direction only matters once item 6 (sort) lands. Original analysis follows.
+
+*This is the feature that justifies building on SQLite at all* — it's
 what a hand-rolled JSON-file document store can't do.
 
 Collections currently have exactly one index, the unique `_id` index created in the
