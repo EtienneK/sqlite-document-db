@@ -25,7 +25,10 @@ still free to change. After a release, either becomes a migration problem.
 
 ## DR-1: Document storage format
 
-**Status: open.** Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
+**Status: DECIDED 2026-07-22 — option C.** Dates are stored in EJSON format
+(`{"$date": "..."}`) via a minimal vendored encoder; other non-JSON types are rejected
+at insert time with a clear error instead of being silently corrupted. Full EJSON
+(option B) remains open for later since the wire format is identical. Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
 [5b](#5-typescript-typing) and [6](#6-cursor-sort-limit-and-skip), and caps DR-2.
 
 ### Context
@@ -99,7 +102,10 @@ silent corruption of `RegExp` and `Uint8Array` is worth fixing even under option
 
 ## DR-2: How MongoDB-compatible should the API be?
 
-**Status: open.** Shapes items [5b](#5-typescript-typing), [15](#15-remaining-collection--db-api)
+**Status: DECIDED 2026-07-22 — option 2, "compatible subset".** Method names,
+signatures and result shapes match the official driver for the CRUD surface;
+deviations get documented. Types are vendored from the driver (Apache-2.0, with
+attribution), never imported from it. Shapes items [5b](#5-typescript-typing), [15](#15-remaining-collection--db-api)
 and [16](#16-aggregation-pipeline).
 
 ### Options
