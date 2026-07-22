@@ -3,6 +3,9 @@
 A MongoDB-style document database implemented on top of SQLite's JSON functions.
 Zero runtime dependencies; ESM only; requires Node >= 22.5 for `node:sqlite`.
 
+Planned work is in [BACKLOG.md](BACKLOG.md) — check it before starting a feature, it
+records prior investigation (query plans, feasibility, sequencing) for most items.
+
 ## Commands
 
 | Command | What it does |
@@ -125,5 +128,10 @@ implicit array-element matching (`{ tags: 'B' }` matching an array containing
   matches the MongoDB driver, and several tests assert on the mutated objects.
 - `insertMany` is not transactional, matching MongoDB's *ordered* insert: on a
   duplicate `_id` the documents already written stay written.
+- **Only JSON types round-trip.** Documents go through `JSON.stringify`, so a `Date`
+  comes back as an ISO string (and therefore cannot be matched by a `Date` filter),
+  while `RegExp` and `Uint8Array` are silently flattened. Measured against real MongoDB;
+  see [DR-1 in BACKLOG.md](BACKLOG.md#dr-1-document-storage-format). Don't add features
+  that assume richer types until that decision is made.
 - `backup/` holds an older abandoned implementation. It is excluded from the
   build, typecheck and lint. Don't treat it as live code.

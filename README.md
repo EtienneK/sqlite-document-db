@@ -163,9 +163,21 @@ Operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
 `deleteOne()` `deleteMany()` `replaceOne()`.
 
+### Supported value types
+
+Documents are stored as JSON, so **only JSON types round-trip**: object, array, string,
+number, boolean and null.
+
+> ⚠️ Other types are currently converted on the way in and do not come back as they went:
+> a `Date` returns as an ISO **string** (so `findOne({ when: someDate })` will not match
+> it), and `RegExp` and `Uint8Array` are flattened to empty or index-keyed objects. Store
+> dates as ISO strings or epoch numbers explicitly until this is resolved — see
+> [DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
+
 ### Still missing
 
-Can't list them all, but from the top of my head:
+The planned work is tracked in [BACKLOG.md](BACKLOG.md), prioritised and with notes on
+how each piece would be implemented. The headlines:
 
 #### Querying documents
 
