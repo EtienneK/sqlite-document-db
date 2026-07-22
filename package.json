@@ -1,45 +1,51 @@
 {
   "name": "sqlite-document-db",
-  "version": "1.0.7",
-  "description": "",
+  "version": "2.0.0",
+  "description": "Use SQLite as a JSON document database, with an API based on MongoDB's",
   "repository": {
     "type": "git",
     "url": "https://github.com/EtienneK/sqlite-document-db.git"
   },
-  "main": "dist/src/index.js",
-  "types": "dist/src/index.d.ts",
-  "files": [
-    "/dist/src"
-  ],
-  "scripts": {
-    "build": "rimraf ./dist/ && ./node_modules/typescript/bin/tsc",
-    "test": "jest",
-    "test:watch": "jest --watch"
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "keywords": [],
-  "author": "",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "sqlite",
+    "mongodb",
+    "document-database",
+    "json",
+    "nosql",
+    "embedded"
+  ],
+  "author": "Etienne Koekemoer",
   "license": "ISC",
   "devDependencies": {
-    "@types/chai": "^4.3.1",
-    "@types/jest": "^27.4.1",
-    "@types/node": "^17.0.29",
-    "@types/sqlite3": "^3.1.8",
-    "chai": "^4.3.6",
-    "jest": "^27.5.1",
-    "mongodb": "^4.5.0",
-    "mongodb-memory-server": "^8.5.1",
-    "rimraf": "^3.0.2",
-    "ts-jest": "^27.1.4",
-    "ts-node": "^10.7.0",
-    "ts-standard": "^11.0.0",
-    "typescript": "^4.6.3"
-  },
-  "ts-standard": {
-    "project": "./tsconfig.json"
-  },
-  "dependencies": {
-    "bson-objectid": "^2.0.3",
-    "sqlite": "^4.1.1",
-    "sqlite3": "^5.0.5"
+    "@types/node": "^26.1.1",
+    "mongodb": "^7.5.0",
+    "mongodb-memory-server": "^11.2.0",
+    "oxlint": "^1.75.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }

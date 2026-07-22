@@ -1,18 +1,23 @@
 {
   "compilerOptions": {
-    "target": "es5",
-    "module": "commonjs",
-    "lib": [ "ES2015" ],
-    "outDir": "./dist",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "types": ["node", "vitest/globals"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    "rootDir": ".",
+    "noEmit": true,
+
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
     "esModuleInterop": true,
-    "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true
+    "skipLibCheck": true
   },
-  "exclude": [
-    "node_modules",
-    "backup",
-    "dist"
-  ]
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
 }

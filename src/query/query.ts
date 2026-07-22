@@ -114,8 +114,16 @@ function convertOp (columnName: string, field: string, op: string, value: string
       return `(select count(*) from json_each(${toJson1Extract(columnName, [field])}) where value in (select value from json_each(${quote(value)}))) = ${quote(new Set(value).size)}`
     }
     case '$elemMatch': {
-      if (Array.isArray(value) || typeof value !== 'object') throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
-      const $and = Object.entries(value).map(([key, value]) => ({ [key]: value })).map(o => ({ f: o }))
+      if (Array.isArray(value) || typeof value !== 'object' || value === null) throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
+      // Each array element is re-wrapped as { "f": <element> } so the normal
+      // field-path machinery can address it. An operator key ($gte, $lt, ...)
+      // constrains the element itself, so it targets "f"; any other key is a
+      // field path *inside* the element, so it targets "f.<key>".
+      const $and = Object.entries(value).map(([key, criterion]) => (
+        OPS_KEYS.includes(key)
+          ? { f: { [key]: criterion } }
+          : { [`f.${key}`]: criterion }
+      ))
       return `EXISTS (select json_object('f', json(value)) as valueJson from json_each(${toJson1Extract(columnName, [field])}) where (${convert('valueJson', { $and })}))`
     }
     case '$size': {
@@ -132,7 +140,7 @@ function convert (columnName: string, query: QueryFilterDocument): string {
 
   if (entries.length === 0) return 'TRUE'
 
-  const [field, valueOrOp] = entries[0]
+  const [field, valueOrOp] = entries[0]!
   let value = valueOrOp
   if (entries.length === 1) {
     const opEqualsField = OPS_KEYS.includes(field)
@@ -142,7 +150,7 @@ function convert (columnName: string, query: QueryFilterDocument): string {
       const valueOrOpKeys = Object.keys(valueOrOp)
       if (valueOrOpKeys.length === 1 && countOps(valueOrOpKeys) === 1) {
         // Expressions in the form: { field: { $operator: value } }, where field is not an operator and value is an object
-        op = valueOrOpKeys[0]
+        op = valueOrOpKeys[0]!
         value = value[op]
       } else if (valueOrOpKeys.length > 1 && countOps(valueOrOpKeys) === valueOrOpKeys.length) {
         // Expressions in the form: { field: { $operator1: value, $operator2: value } }
@@ -157,7 +165,7 @@ function convert (columnName: string, query: QueryFilterDocument): string {
   }
 
   // Expressions in the form: { field1: value1, field2: value2 }
-  return `(${entries.map(([key, value]) => ({ [key]: value }))
+  return `(${entries.map(([key, entryValue]) => ({ [key]: entryValue }))
     .map(q => convert(columnName, q))
     .join(') AND (')})`
 }

@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index'
+import { Db } from '../../src/index.js'
 
 describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/reference/operator/query-comparison/', () => {
   let mongod: MongoMemoryServer
@@ -14,7 +14,7 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
     mongod = await MongoMemoryServer.create()
     mongoClient = await MongoClient.connect(mongod.getUri())
     mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:', { debug: true })
+    sqldb = await Db.fromUrl(':memory:')
   })
 
   afterEach(async () => {

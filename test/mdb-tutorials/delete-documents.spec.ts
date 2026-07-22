@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index'
+import { Db } from '../../src/index.js'
 
 describe('Delete Documents - https://www.mongodb.com/docs/manual/tutorial/remove-documents/', () => {
   let mongod: MongoMemoryServer

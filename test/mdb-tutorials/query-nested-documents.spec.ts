@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index'
+import { Db } from '../../src/index.js'
 
 describe('Query on Embedded/Nested Documents - https://www.mongodb.com/docs/manual/tutorial/query-embedded-documents/', () => {
   let mongod: MongoMemoryServer

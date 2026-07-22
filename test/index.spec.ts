@@ -1,6 +1,11 @@
 import { MongoClient, Db as Mdb } from 'mongodb'
-import MongoMemoryServer from 'mongodb-memory-server-core'
-import { Db } from '../src/index'
+import { MongoMemoryServer } from 'mongodb-memory-server'
+import { Db } from '../src/index.js'
+
+// This library types _id as a string; the MongoDB driver types it as an
+// ObjectId. Each driver accepts the ids it hands back, but the Db | Mdb union
+// below accepts neither, so id filters are built through this helper.
+const byId = (id: unknown): any => ({ _id: id })
 
 describe('Api', () => {
   let mongod: MongoMemoryServer
@@ -63,7 +68,7 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual: any = await db().collection('col').deleteMany({ _id: two.insertedId })
+            let actual: any = await db().collection('col').deleteMany(byId(two.insertedId))
 
             if (db() instanceof Mdb) {
               actual = { deletedCount: actual.deletedCount }
@@ -77,7 +82,7 @@ describe('Api', () => {
             const two = await db().collection('col').insertOne({ two: 2 })
             await db().collection('col').insertOne({ three: 3 })
 
-            let actual: any = await db().collection('col').deleteMany({ _id: `${two.insertedId as string}` + 'NOT_FOUND' })
+            let actual: any = await db().collection('col').deleteMany(byId(`${two.insertedId as string}NOT_FOUND`))
 
             if (db() instanceof Mdb) {
               actual = { deletedCount: actual.deletedCount }
@@ -164,7 +169,7 @@ describe('Api', () => {
             await db().collection('col').insertOne({ three: 3 })
 
             let actual = await db().collection('col')
-              .replaceOne({ _id: two.insertedId }, { four: 4 })
+              .replaceOne(byId(two.insertedId), { four: 4 })
 
             if (db() instanceof Mdb) {
               actual = { modifiedCount: actual.modifiedCount }
@@ -197,7 +202,7 @@ describe('Api', () => {
             await db().collection('col').insertOne({ three: 3 })
 
             let actual = await db().collection('col')
-              .replaceOne({ _id: two.insertedId }, { _id: two.insertedId as string, four: 4 })
+              .replaceOne(byId(two.insertedId), { _id: two.insertedId as string, four: 4 })
 
             if (db() instanceof Mdb) {
               actual = { modifiedCount: actual.modifiedCount }
@@ -217,7 +222,7 @@ describe('Api', () => {
             let error
             try {
               await db().collection('col')
-                .replaceOne({ _id: two.insertedId }, { _id: `${two.insertedId as string}invalid`, four: 4 })
+                .replaceOne(byId(two.insertedId), { _id: `${two.insertedId as string}invalid`, four: 4 })
             } catch (e) {
               error = e
             }
@@ -230,7 +235,7 @@ describe('Api', () => {
             await db().collection('col').insertOne({ three: 3 })
 
             let actual = await db().collection('col')
-              .replaceOne({ _id: `${two.insertedId as string}invalid` }, { four: 4 })
+              .replaceOne(byId(`${two.insertedId as string}invalid`), { four: 4 })
 
             if (db() instanceof Mdb) {
               actual = { modifiedCount: actual.modifiedCount }

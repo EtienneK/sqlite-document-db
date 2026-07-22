@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index'
+import { Db } from '../../src/index.js'
 
 describe('Update Documents - https://www.mongodb.com/docs/manual/tutorial/update-documents/', () => {
   let mongod: MongoMemoryServer
@@ -57,7 +57,7 @@ describe('Update Documents - https://www.mongodb.com/docs/manual/tutorial/update
         const actual = await db().collection('items').replaceOne(query, newItem)
         // Assert
         expect(actual.modifiedCount).toStrictEqual(1)
-        expect(await db().collection('items').findOne({ item: 'paper' })).toStrictEqual({ ...newItem, _id: items[5]._id })
+        expect(await db().collection('items').findOne({ item: 'paper' })).toStrictEqual({ ...newItem, _id: items[5]!._id })
       })
     })
   }

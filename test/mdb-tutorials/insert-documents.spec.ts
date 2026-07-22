@@ -1,7 +1,7 @@
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import { MongoClient, Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index'
+import { Db } from '../../src/index.js'
 
 describe('Insert Documents - https://www.mongodb.com/docs/manual/tutorial/insert-documents/', () => {
   let mongod: MongoMemoryServer
@@ -50,17 +50,17 @@ describe('Insert Documents - https://www.mongodb.com/docs/manual/tutorial/insert
       const actual = await db().collection('inventory').insertMany(items)
       // Assert
       expect(actual.insertedIds).toBeDefined()
-      expect(items[0]._id).toBeDefined()
-      expect(items[1]._id).toBeDefined()
-      expect(items[2]._id).toBeDefined()
+      expect(items[0]!._id).toBeDefined()
+      expect(items[1]!._id).toBeDefined()
+      expect(items[2]!._id).toBeDefined()
       expect(actual.insertedCount).toStrictEqual(3)
       const actualItems = await db().collection('inventory').find().toArray()
       expect(actualItems).toStrictEqual(items)
       expect(actualItems.length).toStrictEqual(3)
       expect(actual.insertedIds).toStrictEqual({
-        0: items[0]._id,
-        1: items[1]._id,
-        2: items[2]._id
+        0: items[0]!._id,
+        1: items[1]!._id,
+        2: items[2]!._id
       })
     })
   }
