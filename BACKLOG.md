@@ -705,8 +705,18 @@ people from filing issues about it. The Postgres project doesn't do aggregation 
 
 ## 17. Smaller items and nice-to-haves
 
-- **Benchmarks.** There's no way to demonstrate that item 2 helped. A small
-  insert/query benchmark over ~100k documents, ideally in CI to catch regressions.
+- **Benchmarks.** ~~There's no way to demonstrate that item 2 helped.~~ **DONE
+  2026-07-22:** `npm run bench` runs [bench/db.bench.ts](bench/db.bench.ts) (vitest
+  bench, own config so no mongod boots) — paired indexed-vs-scan queries over 20k
+  deterministic docs, plus unindexable queries and writes. First numbers: equality
+  find 40x faster indexed, date range 22x, countDocuments 14x, qty range 7x. One
+  finding worth knowing: **implicit array matching was only 1.45x faster indexed**
+  on this dataset — when *every* document holds an array in the queried field, the
+  element arm's `>= '[' AND < '\'` range covers all rows and the index can't narrow
+  anything (it cannot see inside arrays); the union form only pays off when array
+  rows are a minority or the scalar arm dominates. `$elemMatch` is the slowest
+  operator measured (~99ms/20k: json_each + json_object per element per row).
+  Still open: run in CI to catch regressions (item 14 first).
 - **`_id` types.** Tests use numeric `_id`s and they work, but this isn't specified
   anywhere. Decide what's supported, type it (item 5b), and document it.
 - **Statement cache.** Once item 9 lands, cache prepared statements per collection.

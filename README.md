@@ -213,6 +213,7 @@ await db.collection('items').updateOne({ item: 'paper' }, { $unset: { status: ''
 ```
 npm install
 npm test        # runs every assertion against BOTH this library and a real MongoDB
+npm run bench   # benchmarks (indexed vs full-scan queries, writes) over 20k docs
 npm run lint
 npm run build
 ```
