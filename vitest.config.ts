@@ -6,11 +6,9 @@ export default defineConfig({
     // These specs were written against Jest's global describe/it/expect. Vitest
     // is API-compatible, so exposing the globals keeps them unchanged.
     globals: true,
-    // Every spec boots its own in-memory MongoDB to compare against, which is
-    // slow to start and hungry for RAM. Run files sequentially and give the
-    // hooks room to download/spawn mongod on a cold cache.
-    fileParallelism: false,
-    testTimeout: 60_000,
+    // Boots one mongod for the whole run and shares its URI with every spec.
+    globalSetup: ['./test/global-setup.ts'],
+    testTimeout: 30_000,
     hookTimeout: 120_000
   }
 })

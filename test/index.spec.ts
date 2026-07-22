@@ -1,6 +1,8 @@
-import { MongoClient, Db as Mdb } from 'mongodb'
-import { MongoMemoryServer } from 'mongodb-memory-server'
-import { Db } from '../src/index.js'
+// Imported as a value, not just a type: the assertions below use `instanceof Mdb`
+// to normalise MongoDB's richer result objects down to the fields this library returns.
+import { Db as Mdb } from 'mongodb'
+import type { Db } from '../src/index.js'
+import { freshDualDbs } from './helpers/dual-dbs.js'
 
 // This library types _id as a string; the MongoDB driver types it as an
 // ObjectId. Each driver accepts the ids it hands back, but the Db | Mdb union
@@ -8,32 +10,15 @@ import { Db } from '../src/index.js'
 const byId = (id: unknown): any => ({ _id: id })
 
 describe('Api', () => {
-  let mongod: MongoMemoryServer
-  let mongoClient: MongoClient
-
-  let mongodb: Mdb
-  let sqldb: Db
-
-  beforeEach(async () => {
-    mongod = await MongoMemoryServer.create()
-    mongoClient = await MongoClient.connect(mongod.getUri())
-    mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
-  })
-
-  afterEach(async () => {
-    await sqldb.close()
-    await mongoClient.close()
-    await mongod.stop()
-  })
+  const dbs = freshDualDbs()
 
   it('should create a new database from a URL', async () => {
-    expect(sqldb).toBeDefined()
+    expect(dbs.sqlite()).toBeDefined()
   })
 
   describe('Db', () => {
     for (const dbName of ['Sqlite', 'Mongodb']) {
-      const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+      const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
       describe(`${dbName} › Collection`, () => {
         describe('find', () => {
           it('should be case sensitive', async () => {

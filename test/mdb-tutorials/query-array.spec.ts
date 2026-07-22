@@ -1,15 +1,9 @@
-import { MongoMemoryServer } from 'mongodb-memory-server'
-import { MongoClient, Db as Mdb } from 'mongodb'
+import type { Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index.js'
+import type { Db } from '../../src/index.js'
+import { seededDualDbs } from '../helpers/dual-dbs.js'
 
 describe('Query an Array - https://www.mongodb.com/docs/manual/tutorial/query-arrays/', () => {
-  let mongod: MongoMemoryServer
-  let mongoClient: MongoClient
-
-  let mongodb: Mdb
-  let sqldb: Db
-
   const items = [
     { item: 'journal', qty: 25, tags: ['blank', 'red'], dim_cm: [14, 21] },
     { item: 'notebook', qty: 50, tags: ['red', 'blank'], dim_cm: [14, 21] },
@@ -18,24 +12,13 @@ describe('Query an Array - https://www.mongodb.com/docs/manual/tutorial/query-ar
     { item: 'postcard', qty: 45, tags: ['blue'], dim_cm: [10, 15.25] }
   ]
 
-  beforeAll(async () => {
-    mongod = await MongoMemoryServer.create()
-    mongoClient = await MongoClient.connect(mongod.getUri())
-    mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
-
-    await sqldb.collection('items').insertMany(items)
-    await mongodb.collection('items').insertMany(items)
-  })
-
-  afterAll(async () => {
-    await sqldb.close()
-    await mongoClient.close()
-    await mongod.stop()
+  const dbs = seededDualDbs(async ({ sqlite, mongo }) => {
+    await sqlite().collection('items').insertMany(items)
+    await mongo().collection('items').insertMany(items)
   })
 
   for (const dbName of ['Sqlite', 'Mongodb']) {
-    const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
 
     describe(dbName, () => {
       it('Should be able to match an array exactly', async () => {

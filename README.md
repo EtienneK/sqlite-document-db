@@ -148,7 +148,8 @@ npm run build
 
 The test suite is the interesting part: each assertion runs twice, once against
 `sqlite-document-db` and once against a real MongoDB booted in-memory, so
-MongoDB itself acts as the oracle for correct behaviour.
+MongoDB itself acts as the oracle for correct behaviour. Running the tests
+therefore downloads a `mongod` binary the first time.
 
 ## Missing Features
 

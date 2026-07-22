@@ -1,15 +1,9 @@
-import { MongoMemoryServer } from 'mongodb-memory-server'
-import { MongoClient, Db as Mdb } from 'mongodb'
+import type { Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index.js'
+import type { Db } from '../../src/index.js'
+import { seededDualDbs } from '../helpers/dual-dbs.js'
 
 describe('Query Documents - https://www.mongodb.com/docs/manual/tutorial/query-documents/', () => {
-  let mongod: MongoMemoryServer
-  let mongoClient: MongoClient
-
-  let mongodb: Mdb
-  let sqldb: Db
-
   const data = {
     items: [
       { _id: undefined, item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
@@ -21,26 +15,15 @@ describe('Query Documents - https://www.mongodb.com/docs/manual/tutorial/query-d
     ]
   }
 
-  beforeAll(async () => {
-    mongod = await MongoMemoryServer.create()
-    mongoClient = await MongoClient.connect(mongod.getUri())
-    mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
-
+  const dbs = seededDualDbs(async ({ sqlite, mongo }) => {
     for (const [key, value] of Object.entries(data)) {
-      await sqldb.collection(key).insertMany(value)
-      await mongodb.collection(key).insertMany(value)
+      await sqlite().collection(key).insertMany(value)
+      await mongo().collection(key).insertMany(value)
     }
   })
 
-  afterAll(async () => {
-    await sqldb.close()
-    await mongoClient.close()
-    await mongod.stop()
-  })
-
   for (const dbName of ['Sqlite', 'Mongodb']) {
-    const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
 
     describe(dbName, () => {
       it('Should be able to select a single document', async () => {

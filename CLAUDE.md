@@ -7,7 +7,7 @@ Zero runtime dependencies; ESM only; requires Node >= 22.5 for `node:sqlite`.
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Full suite (vitest). Takes ~60s — it boots real MongoDB servers. |
+| `npm test` | Full suite (vitest), ~4s. Boots one real MongoDB for the run. |
 | `npm run test:watch` | Watch mode |
 | `npm run lint` | oxlint |
 | `npm run typecheck` | `tsc` over `src` **and** `test` |
@@ -69,17 +69,32 @@ in-memory by `mongodb-memory-server`. Each spec loops
 MongoDB is the oracle — if an assertion is wrong, the Mongodb variant fails too,
 which immediately tells you the *test* is wrong rather than the implementation.
 
-Consequences to keep in mind:
+### Test infrastructure
 
-- Tests are slow (~60s) and spawn `mongod` per spec via `beforeEach`. Don't
-  mistake this for a hang.
-- `fileParallelism: false` in [vitest.config.ts](vitest.config.ts) is deliberate;
-  parallel specs contend for RAM and mongod ports.
+Originally every spec spawned its own `mongod` in `beforeEach`, which cost ~60s
+a run. Now:
+
+- [test/global-setup.ts](test/global-setup.ts) boots **one** mongod for the whole
+  run and hands its URI to the specs via Vitest's `provide`/`inject`.
+- [test/helpers/dual-dbs.ts](test/helpers/dual-dbs.ts) gives each spec file its
+  own randomly-named database on that shared server, so files stay isolated and
+  can run in parallel. Two entry points:
+  - `freshDualDbs(seed?)` — empty databases recreated before **every test**.
+    Use for specs that insert/update/delete.
+  - `seededDualDbs(seed)` — seeded once, shared by the file. Use for read-only specs.
+
+That took the suite from ~60s to ~4s. When adding a spec, reach for one of those
+two helpers rather than hand-rolling setup.
+
+Other things to know:
+
 - Vitest runs with `globals: true` so the Jest-era `describe`/`it`/`expect` in
   the specs work unchanged.
 - `test/index.spec.ts` has a `byId()` helper. It exists because this library
   types `_id` as `string` while the MongoDB driver types it as `ObjectId`; the
-  `Db | Mdb` union accepts neither, so id filters bypass it via `any`.
+  `Db | Mdb` union accepts neither, so id filters bypass it via `any`. That file
+  also imports `Db as Mdb` as a **value** (not `import type`) because its
+  assertions use `instanceof Mdb`.
 
 Some assertions are commented out with `// TODO` (see
 [test/operators/query-operators.spec.ts](test/operators/query-operators.spec.ts)).

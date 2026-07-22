@@ -1,15 +1,9 @@
-import { MongoMemoryServer } from 'mongodb-memory-server'
-import { MongoClient, Db as Mdb } from 'mongodb'
+import type { Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index.js'
+import type { Db } from '../../src/index.js'
+import { freshDualDbs } from '../helpers/dual-dbs.js'
 
 describe('Delete Documents - https://www.mongodb.com/docs/manual/tutorial/remove-documents/', () => {
-  let mongod: MongoMemoryServer
-  let mongoClient: MongoClient
-
-  let mongodb: Mdb
-  let sqldb: Db
-
   const items = [
     { item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
     { item: 'notebook', qty: 50, size: { h: 8.5, w: 11, uom: 'in' }, status: 'P' },
@@ -18,24 +12,13 @@ describe('Delete Documents - https://www.mongodb.com/docs/manual/tutorial/remove
     { item: 'postcard', qty: 45, size: { h: 10, w: 15.25, uom: 'cm' }, status: 'A' }
   ]
 
-  beforeEach(async () => {
-    mongod = await MongoMemoryServer.create()
-    mongoClient = await MongoClient.connect(mongod.getUri())
-    mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
-
-    await sqldb.collection('items').insertMany(items)
-    await mongodb.collection('items').insertMany(items)
-  })
-
-  afterEach(async () => {
-    await sqldb.close()
-    await mongoClient.close()
-    await mongod.stop()
+  const dbs = freshDualDbs(async ({ sqlite, mongo }) => {
+    await sqlite().collection('items').insertMany(items)
+    await mongo().collection('items').insertMany(items)
   })
 
   for (const dbName of ['Sqlite', 'Mongodb']) {
-    const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
 
     describe(dbName, () => {
       it('Should be able to delete all documents', async () => {

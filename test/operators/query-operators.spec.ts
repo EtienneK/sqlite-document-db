@@ -1,30 +1,13 @@
-import { MongoMemoryServer } from 'mongodb-memory-server'
-import { MongoClient, Db as Mdb } from 'mongodb'
+import type { Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index.js'
+import type { Db } from '../../src/index.js'
+import { freshDualDbs } from '../helpers/dual-dbs.js'
 
 describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/reference/operator/query-comparison/', () => {
-  let mongod: MongoMemoryServer
-  let mongoClient: MongoClient
-
-  let mongodb: Mdb
-  let sqldb: Db
-
-  beforeEach(async () => {
-    mongod = await MongoMemoryServer.create()
-    mongoClient = await MongoClient.connect(mongod.getUri())
-    mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
-  })
-
-  afterEach(async () => {
-    await sqldb.close()
-    await mongoClient.close()
-    await mongod.stop()
-  })
+  const dbs = freshDualDbs()
 
   for (const dbName of ['Sqlite', 'Mongodb']) {
-    const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
 
     describe(dbName, () => {
       it('$eq; $ne', async () => {

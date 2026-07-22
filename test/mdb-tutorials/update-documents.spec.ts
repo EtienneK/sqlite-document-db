@@ -1,15 +1,9 @@
-import { MongoMemoryServer } from 'mongodb-memory-server'
-import { MongoClient, Db as Mdb } from 'mongodb'
+import type { Db as Mdb } from 'mongodb'
 
-import { Db } from '../../src/index.js'
+import type { Db } from '../../src/index.js'
+import { freshDualDbs } from '../helpers/dual-dbs.js'
 
 describe('Update Documents - https://www.mongodb.com/docs/manual/tutorial/update-documents/', () => {
-  let mongod: MongoMemoryServer
-  let mongoClient: MongoClient
-
-  let mongodb: Mdb
-  let sqldb: Db
-
   const items = [
     { _id: undefined, item: 'canvas', qty: 100, size: { h: 28, w: 35.5, uom: 'cm' }, status: 'A' },
     { item: 'journal', qty: 25, size: { h: 14, w: 21, uom: 'cm' }, status: 'A' },
@@ -23,24 +17,13 @@ describe('Update Documents - https://www.mongodb.com/docs/manual/tutorial/update
     { item: 'sketch pad', qty: 95, size: { h: 22.85, w: 30.5, uom: 'cm' }, status: 'A' }
   ]
 
-  beforeEach(async () => {
-    mongod = await MongoMemoryServer.create()
-    mongoClient = await MongoClient.connect(mongod.getUri())
-    mongodb = mongoClient.db('testdb')
-    sqldb = await Db.fromUrl(':memory:')
-
-    await sqldb.collection('items').insertMany(items)
-    await mongodb.collection('items').insertMany(items)
-  })
-
-  afterEach(async () => {
-    await sqldb.close()
-    await mongoClient.close()
-    await mongod.stop()
+  const dbs = freshDualDbs(async ({ sqlite, mongo }) => {
+    await sqlite().collection('items').insertMany(items)
+    await mongo().collection('items').insertMany(items)
   })
 
   for (const dbName of ['Sqlite', 'Mongodb']) {
-    const db = (): Db | Mdb => dbName === 'Sqlite' ? sqldb : mongodb
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
 
     describe(dbName, () => {
       it('Should be able to replace a document using replaceOne()', async () => {
