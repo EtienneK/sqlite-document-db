@@ -1,7 +1,8 @@
 # sqlite-document-db
 
 A MongoDB-style document database implemented on top of SQLite's JSON functions.
-Zero runtime dependencies; ESM only; requires Node >= 22.5 for `node:sqlite`.
+Zero runtime dependencies; ESM only; requires Node >= 22.13 for `node:sqlite`
+plus `DatabaseSync.prototype.function` (which backs `$regex`).
 
 Planned work is in [BACKLOG.md](BACKLOG.md) — check it before starting a feature, it
 records prior investigation (query plans, feasibility, sequencing) for most items.

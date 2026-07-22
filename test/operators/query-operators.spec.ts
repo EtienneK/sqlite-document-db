@@ -32,7 +32,11 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         // Equals an array value
         expect(await col.find({ tags: { $eq: ['A', 'B'] } }).toArray()).toStrictEqual([i[2], i[4]])
         expect(await col.find({ tags: ['A', 'B'] }).toArray()).toStrictEqual([i[2], i[4]])
-        // TODO: Regex Match Behaviour
+        // Regex Match Behaviour: an explicit $eq never pattern-matches - it
+        // only equals stored regex values, which cannot exist - whereas the
+        // implicit form { field: /re/ } does.
+        expect(await col.find({ 'item.name': { $eq: /^ab/ } }).toArray()).toStrictEqual([])
+        expect(await col.find({ 'item.name': /^ab/ }).toArray()).toStrictEqual([i[0]])
         // Other
         expect(await col.find({ qty: { $eq: 21 } }).toArray()).toStrictEqual([])
         expect(await col.find({ qty: 21 }).toArray()).toStrictEqual([])
@@ -114,7 +118,8 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         expect(await col.find({ quantity: { $in: [5, 15] } }).toArray()).toStrictEqual([i[1], i[3]])
         // Use the $in Operator to Match Values in an Array
         expect(await col.find({ tags: { $in: ['home', 'office'] } }).toArray()).toStrictEqual([i[0], i[1], i[2], i[3]])
-        // TODO: Use the $in Operator with a Regular Expression
+        // Use the $in Operator with a Regular Expression
+        expect(await col.find({ tags: { $in: [/^be/, /^st/] } }).toArray()).toStrictEqual([i[2], i[3]])
         // Other
         expect(await col.find({ quantity: { $in: [4, 16] } }).toArray()).toStrictEqual([])
         expect(await col.find({ quantity: { $in: [null] } }).toArray()).toStrictEqual([i[2]])
@@ -124,7 +129,8 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         expect(await col.find({ quantity: { $nin: [5, 15] } }).toArray()).toStrictEqual([i[0], i[2]])
         // Use $nin to exclude documents whose array contains any of the values
         expect(await col.find({ tags: { $nin: ['school'] } }).toArray()).toStrictEqual([i[2]])
-        // TODO: Use the $in Operator with a Regular Expression
+        // Use $nin with a Regular Expression
+        expect(await col.find({ tags: { $nin: [/^st/, 'home'] } }).toArray()).toStrictEqual([i[0]])
         // Other
         expect(await col.find({ quantity: { $nin: [4, 16] } }).toArray()).toStrictEqual([i[0], i[1], i[2], i[3]])
         expect(await col.find({ quantity: { $nin: [null] } }).toArray()).toStrictEqual([i[0], i[1], i[3]])
@@ -203,8 +209,10 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         await col.insertMany(i)
 
         // $not - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/not/
-        // TODO: Also add examples with $regex operator
         expect(await col.find({ price: { $not: { $gt: 1.99 } } }).toArray()).toStrictEqual([i[0], i[1], i[4]])
+        // Regular Expressions: regex literal and $regex operator forms
+        expect(await col.find({ 'item.name': { $not: /^ab/ } }).toArray()).toStrictEqual([i[1], i[2], i[3], i[4]])
+        expect(await col.find({ 'item.name': { $not: { $regex: '^ab' } } }).toArray()).toStrictEqual([i[1], i[2], i[3], i[4]])
         // Other
         expect(await col.find({ price: { $not: { $eq: 1.99 } } }).toArray()).toStrictEqual([i[1], i[2], i[3], i[4]])
         expect(await col.find({ price: { $not: { $ne: 1.99 } } }).toArray()).toStrictEqual([i[0]])

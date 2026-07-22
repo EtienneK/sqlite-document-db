@@ -18,8 +18,9 @@ to compile and no native binaries to install.
 
 ## Requirements
 
-Node.js **22.5 or newer** (`node:sqlite` is unavailable before that, and only
-became stable in Node 24).
+Node.js **22.13 or newer** (`node:sqlite` appeared in 22.5 and only became
+stable in Node 24; the custom SQL function behind `$regex` needs
+`DatabaseSync.prototype.function`, added in 22.13).
 
 ## Getting started
 
@@ -185,6 +186,20 @@ db.collection('survey').find({ results: { $size: 2 } })
 db.collection('items').find({ tags: { $all: ['blank', 'red'] } })
 ```
 
+### Match with regular expressions, types and modulo
+
+```javascript
+db.collection('items').find({ item: /^p/ })                          // implicit regex match
+db.collection('items').find({ item: { $regex: '^p', $options: 'i' } })
+db.collection('items').find({ item: { $in: [/^p/, 'notebook'] } })   // regexes inside $in/$nin
+db.collection('items').find({ qty: { $mod: [4, 0] } })               // qty % 4 === 0
+db.collection('items').find({ qty: { $type: 'number' } })            // BSON type aliases and codes
+db.collection('items').find({ qty: { $type: ['int', 'string'] } })
+```
+
+`$regex` runs JavaScript `RegExp` inside SQLite (via a registered SQL function),
+so JS regex syntax applies. MongoDB's `x` (extended) option is not supported.
+
 ### Update documents
 
 ```javascript
@@ -214,7 +229,8 @@ Many MongoDB features are missing - either because I have not gotten time to imp
 ### What is supported
 
 Operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
-`$not` `$nor` `$exists` `$all` `$elemMatch` `$size`.
+`$not` `$nor` `$exists` `$type` `$regex` (with `$options`) `$mod` `$all`
+`$elemMatch` `$size`.
 
 Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
 `updateOne()` `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()`
@@ -238,7 +254,9 @@ await db.collection('events').find({ at: { $gte: new Date('2020-01-01') } }).toA
 Anything else JSON cannot represent (`RegExp`, `Uint8Array`/`Buffer`, `Map`, `Set`,
 `bigint`, functions, `NaN`/`Infinity`) is **rejected at write time** with an error
 naming the offending path, rather than silently corrupted the way `JSON.stringify`
-would. Design notes in [DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
+would. (`RegExp` still works fine as a *query* value via `$regex` — it just cannot
+be stored in documents.) Design notes in
+[DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
 
 ### Still missing
 
@@ -247,14 +265,15 @@ how each piece would be implemented. The headlines:
 
 #### Querying documents
 
-- [Query an Array for an Element](https://www.mongodb.com/docs/manual/tutorial/query-arrays/#query-an-array-for-an-element) — `{ tags: 'B' }` does not yet match a document whose `tags` array *contains* `'B'`
 - Projection `$`-operators: `$slice`, `$elemMatch`, `$` positional
-- [Type check using `$type`](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/#type-check)
-- [Evaluation Query Operators](https://www.mongodb.com/docs/manual/reference/operator/query-evaluation/) — `$regex`, `$expr`, `$mod`, …
+- Remaining [Evaluation Query Operators](https://www.mongodb.com/docs/manual/reference/operator/query-evaluation/) —
+  `$expr`, `$text`, and the `$bits*` operators. `$where` will **not** be supported
+  (it executes arbitrary JavaScript).
 
 #### Updating documents
 
-- [`updateOne()` and `updateMany()`](https://www.mongodb.com/docs/manual/tutorial/update-documents/), and the update operators (`$set`, `$inc`, …)
+- The `upsert` option, `findOneAndUpdate()`/`findOneAndReplace()`/`findOneAndDelete()`,
+  and the remaining update operators (`$mul`, `$rename`, `$push`, `$pull`, …)
 
 ## Thanks
 

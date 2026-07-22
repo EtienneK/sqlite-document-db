@@ -497,6 +497,23 @@ export class Db {
 
     const db = new DatabaseSync(url)
 
+    // $regex compiles to calls of this function (src/query/query.ts). It only
+    // ever sees strings - the compiled SQL type-guards with json_type - but
+    // the typeof check keeps it total. Compiled patterns are cached because
+    // SQLite calls the function once per candidate row.
+    // Requires Node >= 22.13 (DatabaseSync.prototype.function).
+    const regexCache = new Map<string, RegExp>()
+    db.function('mdb_regexp', { deterministic: true }, (pattern, flags, value) => {
+      if (typeof value !== 'string' || typeof pattern !== 'string' || typeof flags !== 'string') return 0
+      const key = `${flags} ${pattern}`
+      let regex = regexCache.get(key)
+      if (regex === undefined) {
+        regex = new RegExp(pattern, flags)
+        regexCache.set(key, regex)
+      }
+      return regex.test(value) ? 1 : 0
+    })
+
     const sql = 'PRAGMA journal_mode=WAL'
     if (dbOptions.debug) console.log(sql)
     db.exec(sql)

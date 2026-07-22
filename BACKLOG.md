@@ -184,7 +184,7 @@ replacement".
 | 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
-| 8 | [`$regex`, `$type`, `$mod`](#8-remaining-query-operators) | M | Closes parity gap with the Postgres project |
+| 8 | ~~[`$regex`, `$type`, `$mod`](#8-remaining-query-operators)~~ | M | **DONE 2026-07-22** — `$expr`/`$bits*`/`$text` still open |
 | 9 | [Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation) | M | Hardening + lets statements be cached |
 | 10 | [Error normalisation](#10-normalise-errors-to-mongodb-shapes) | S | Callers currently catch raw SQLite errors |
 | 11 | [Collection naming](#11-fix-collection-naming-restrictions) | S | Silent data-merging bug |
@@ -512,8 +512,37 @@ Original analysis follows (note it proposed the SQL-side approach — superseded
 
 ## 8. Remaining query operators
 
-**Size: M** total. These close the parity gap with the Postgres project, which supports
-`$regex`, `$type` and `$mod` where this library does not.
+**Size: M — DONE 2026-07-22** for the headline three, closing the parity gap with the
+Postgres project. `$regex` (string, RegExp and `$options` forms; implicit
+`{ field: /re/ }`; regexes inside `$in`/`$nin`/`$not`/`$elemMatch`; array element
+matching), `$type` (name and numeric aliases, arrays of aliases) and `$mod`, all
+dual-engine verified in
+[test/operators/evaluation-operators.spec.ts](test/operators/evaluation-operators.spec.ts).
+Notes for posterity:
+
+- `$regex` compiles to a `mdb_regexp()` SQL function that `Db.fromUrl` registers on
+  the connection (JS `RegExp`-backed, per-connection pattern cache). This **raised the
+  Node floor to 22.13** (`DatabaseSync.prototype.function`). MongoDB's `x` option has
+  no JS equivalent and throws; `g`/`y` are stripped (stateful `test()` would skip rows).
+- An **explicit** `$eq` against a regex compiles to `FALSE` — MongoDB only
+  equality-matches *stored* regex values, which cannot exist here — while `$ne`/ranges
+  throw, matching the server. `$options` without `$regex` throws; the pair must reach
+  the compiler as ONE operator (see the `convert()` preprocess), or the
+  multiple-operator branch splits them.
+- `$type`'s number aliases mirror the driver's serialization: integral JS numbers in
+  int32 range are `'int'`, everything else `'double'` — so both aliases carry int32
+  range brackets. Unstorable BSON types (`'long'`, `'binData'`, …) are valid aliases
+  that match nothing; unknown aliases throw. The stored-Date wrapper ranks as
+  `'date'`, never `'object'`.
+- `$mod` truncates decimal arguments AND decimal field values toward zero
+  (oracle-verified), which SQLite's `CAST`/`%` do natively.
+- Fixed in passing, latent `$elemMatch` crashes ("malformed JSON"): on scalar
+  fields, and on string array elements. It now uses 2-arg `json_each(doc, path)` +
+  `json_quote(value)` and only matches real arrays. (`$all` still has the same
+  scalar-field hazard — it feeds `json_each` an extracted value.)
+
+Still open below: `$expr`, `$bits*`, `$text`; `$where` is a documented won't-do.
+Original analysis follows.
 
 - **`$regex`** — SQLite has no built-in `REGEXP`, but `node:sqlite` lets you register
   one: `db.function('regexp', (pattern, value) => ...)` backed by JavaScript `RegExp`.

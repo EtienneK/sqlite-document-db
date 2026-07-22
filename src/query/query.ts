@@ -78,12 +78,95 @@ const OPS = {
   $nor: 'OR',
   // Element Query Operators
   $exists: null,
+  $type: null,
+  // Evaluation Query Operators
+  $regex: null,
+  $options: null,
+  $mod: null,
   // Array Query Operators
   $all: null,
   $elemMatch: null,
   $size: null
 }
 const OPS_KEYS = Object.keys(OPS)
+
+/**
+ * Normalizes $regex input (a RegExp or a pattern string, optionally with a
+ * separate $options string) to a single RegExp, validating the pattern and
+ * flags in the process. MongoDB's 'x' (extended) option has no JavaScript
+ * equivalent and is rejected; 'g'/'y' are stateful in JavaScript (test()
+ * advances lastIndex, skipping rows) and are stripped.
+ */
+function toRegExp (pattern: unknown, options?: unknown): RegExp {
+  let source: string
+  let flags: string
+  if (pattern instanceof RegExp) {
+    source = pattern.source
+    flags = pattern.flags
+  } else if (typeof pattern === 'string') {
+    source = pattern
+    flags = ''
+  } else {
+    throw Error('$regex has to be a string or a RegExp')
+  }
+  if (options !== undefined) {
+    if (typeof options !== 'string') throw Error('$options has to be a string')
+    if (flags !== '' && options !== '') throw Error('options set in both $regex and $options')
+    flags = options
+  }
+  if (flags.includes('x')) throw Error('$options flag "x" (extended) is not supported')
+  return new RegExp(source, flags.replace(/[gy]/g, ''))
+}
+
+const INT32_MIN = -2147483648
+const INT32_MAX = 2147483647
+
+// BSON type codes -> name aliases, per https://www.mongodb.com/docs/manual/reference/operator/query/type/
+const TYPE_ALIAS_BY_CODE: Record<number, string> = {
+  1: 'double', 2: 'string', 3: 'object', 4: 'array', 5: 'binData', 6: 'undefined', 7: 'objectId', 8: 'bool', 9: 'date', 10: 'null', 11: 'regex', 12: 'dbPointer', 13: 'javascript', 14: 'symbol', 15: 'javascriptWithScope', 16: 'int', 17: 'timestamp', 18: 'long', 19: 'decimal', '-1': 'minKey', 127: 'maxKey'
+}
+
+// Valid aliases for types the storage layer cannot hold (rejected at write
+// time, see src/ejson.ts) - $type accepts them but they can never match.
+const UNSTORABLE_TYPE_ALIASES = new Set(['binData', 'undefined', 'objectId', 'regex', 'dbPointer', 'javascript', 'symbol', 'javascriptWithScope', 'timestamp', 'long', 'decimal', 'minKey', 'maxKey'])
+
+/**
+ * One $type alias as a predicate over SQLite's JSON type system.
+ *
+ * `typeExpr`/`valueExpr`/`dateExpr` are SQL expressions for json_type of the
+ * value, the value itself, and its `.$date` sub-path (NULL when not a date
+ * wrapper). Number aliases follow the driver's serialization rule - an
+ * integral JS number becomes int32 when it fits, double otherwise - so 'int'
+ * is bracketed to the int32 range and out-of-range integers count as doubles.
+ * 'long' can never match: the driver only produces it for BigInt/Long, which
+ * the storage layer rejects.
+ */
+function typePredicate (typeExpr: string, valueExpr: string, dateExpr: string, alias: string): string {
+  switch (alias) {
+    case 'double': return `(${typeExpr} = 'real' OR (${typeExpr} = 'integer' AND (${valueExpr} < ${INT32_MIN} OR ${valueExpr} > ${INT32_MAX})))`
+    case 'string': return `${typeExpr} = 'text'`
+    case 'object': return `(${typeExpr} = 'object' AND ${dateExpr} IS NULL)`
+    case 'array': return `${typeExpr} = 'array'`
+    case 'bool': return `${typeExpr} IN ('true','false')`
+    case 'date': return `${dateExpr} IS NOT NULL`
+    case 'null': return `${typeExpr} = 'null'`
+    case 'int': return `(${typeExpr} = 'integer' AND ${valueExpr} >= ${INT32_MIN} AND ${valueExpr} <= ${INT32_MAX})`
+    case 'number': return `${typeExpr} IN ('integer','real')`
+    default:
+      if (UNSTORABLE_TYPE_ALIASES.has(alias)) return 'FALSE'
+      throw Error(`Unknown type name alias: ${alias}`)
+  }
+}
+
+function resolveTypeAlias (value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') {
+    const alias = TYPE_ALIAS_BY_CODE[value]
+    if (alias === undefined) throw Error(`Invalid numerical type code: ${String(value)}`)
+    return alias
+  }
+  throw Error('type must be represented as a number or a string')
+}
 
 function countOps (keys: string[]): number {
   return keys.filter(k => OPS_KEYS.includes(k)).length
@@ -128,7 +211,7 @@ function withElementMatch (ctx: SqlContext, scalarPred: string, elemArm: string)
   return `rowid IN (SELECT rowid FROM ${ctx.table} WHERE ${scalarPred} UNION ALL SELECT rowid FROM ${ctx.table} WHERE ${elemArm})`
 }
 
-function convertOp (ctx: SqlContext, field: string, op: string, value: string | number | any[]): string {
+function convertOp (ctx: SqlContext, field: string, op: string, value: any): string {
   switch (op) {
     // ---------------------- Comparison Query Operators ----------------------
     case '$gt':
@@ -137,6 +220,14 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: string | 
     case '$lte':
     case '$ne':
     case '$eq': {
+      if (value instanceof RegExp) {
+        // MongoDB distinguishes these: { field: /re/ } pattern-matches (and
+        // reaches convertOp as $regex, not $eq), while an EXPLICIT $eq against
+        // a regex only matches stored regex values - which cannot exist here.
+        // The other comparison operators reject regex arguments, as MongoDB does.
+        if (op === '$eq') return 'FALSE'
+        throw Error(`Can't have RegEx as arg to ${op}`)
+      }
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
         throw Error(`$${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
@@ -182,9 +273,10 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: string | 
     case '$in': {
       if (!Array.isArray(value)) throw Error(`$in expects value to be of type: array; but got: ${typeof value}`)
       // A Date in the list needs a different extract path than the scalar
-      // values, so the list form can't be used; rewrite as an OR of per-value
-      // equalities, which is what $in means anyway.
-      if (value.some(element => element instanceof Date)) {
+      // values, and a RegExp means "or matches this pattern" - neither fits
+      // the SQL list form, so rewrite as an OR of per-value queries, which is
+      // what $in means anyway.
+      if (value.some(element => element instanceof Date || element instanceof RegExp)) {
         return convert(ctx, { $or: value.map(element => ({ [field]: element })) })
       }
       const list = `(${value.map(quote).join(',')})`
@@ -198,7 +290,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: string | 
       if (!Array.isArray(value)) throw Error(`$nin expects value to be of type: array; but got: ${typeof value}`)
       // $nin is the exact complement of $in (matching missing fields too),
       // which NOT over the union/flat form gives us directly.
-      if (value.some(element => element instanceof Date)) {
+      if (value.some(element => element instanceof Date || element instanceof RegExp)) {
         return convert(ctx, { $nor: value.map(element => ({ [field]: element })) })
       }
       return `NOT (${convertOp(ctx, field, '$in', value)})`
@@ -216,7 +308,53 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: string | 
       if (Array.isArray(value) || typeof value !== 'object') throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
       return `${OPS[op]}(${convert(ctx, { [field]: value })})`
     }
+    // ---------------------- Evaluation Query Operators ----------------------
+    case '$regex': {
+      const regex = toRegExp(value)
+      const pattern = quote(regex.source)
+      const flags = quote(regex.flags)
+      // mdb_regexp is the JS-backed SQL function Db.fromUrl registers on the
+      // connection. The 'text' guards keep objects/arrays/numbers away from
+      // it: json_extract renders compound values as JSON text, which MongoDB
+      // would never regex-match.
+      const scalarPred = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'text' AND mdb_regexp(${pattern}, ${flags}, ${toJson1Extract(ctx.col, [field])})`
+      const elemPred = `json_each.type = 'text' AND mdb_regexp(${pattern}, ${flags}, value)`
+      return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
+    }
+    case '$mod': {
+      if (!Array.isArray(value)) throw Error('malformed mod, needs to be an array')
+      if (value.length < 2) throw Error('malformed mod, not enough elements')
+      if (value.length > 2) throw Error('malformed mod, too many elements')
+      const [rawDivisor, rawRemainder] = value
+      if (typeof rawDivisor !== 'number' || typeof rawRemainder !== 'number' || !Number.isFinite(rawDivisor) || !Number.isFinite(rawRemainder)) {
+        throw Error('malformed mod, divisor and remainder must be finite numbers')
+      }
+      // MongoDB truncates decimal divisor/remainder arguments AND decimal
+      // field values toward zero; SQLite's CAST and % do the same.
+      const divisor = Math.trunc(rawDivisor)
+      const remainder = Math.trunc(rawRemainder)
+      if (divisor === 0) throw Error('divisor cannot be 0')
+      const scalarPred = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) IN ('integer','real') AND CAST(${toJson1Extract(ctx.col, [field])} AS INTEGER) % ${divisor} = ${remainder}`
+      const elemPred = `json_each.type IN ('integer','real') AND CAST(value AS INTEGER) % ${divisor} = ${remainder}`
+      return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
+    }
     // ---------------------- Element Query Operators ----------------------
+    case '$type': {
+      const aliases = (Array.isArray(value) ? value : [value]).map(resolveTypeAlias)
+      if (aliases.length === 0) throw Error('$type must match at least one type')
+      const typeExpr = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])})`
+      const valueExpr = toJson1Extract(ctx.col, [field])
+      // The document is always well-formed JSON, so the scalar side can
+      // extract the .$date sub-path directly. json_each.value is NOT: a text
+      // element is a bare string that json_extract rejects as malformed JSON,
+      // so the element side must CASE-guard on the element being an object
+      // (CASE evaluates strictly in order; AND terms may be reordered).
+      const dateExpr = toJson1Extract(ctx.col, [`${field}.$date`])
+      const elemDateExpr = "CASE WHEN json_each.type = 'object' THEN json_extract(json_each.value, '$.$date') END"
+      const scalarPred = `(${aliases.map(alias => typePredicate(typeExpr, valueExpr, dateExpr, alias)).join(' OR ')})`
+      const elemPred = `(${aliases.map(alias => typePredicate('json_each.type', 'json_each.value', elemDateExpr, alias)).join(' OR ')})`
+      return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
+    }
     case '$exists': {
       if (typeof value !== 'boolean') throw Error(`$exists expects value to be of type: boolean; but got: ${typeof value}`)
       return `select count(*) ${value ? '>' : '='} 0 from json_each(${quote2(ctx.col)}, ${toJson1PathString([field])})`
@@ -231,13 +369,29 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: string | 
       // Each array element is re-wrapped as { "f": <element> } so the normal
       // field-path machinery can address it. An operator key ($gte, $lt, ...)
       // constrains the element itself, so it targets "f"; any other key is a
-      // field path *inside* the element, so it targets "f.<key>".
-      const $and = Object.entries(value).map(([key, criterion]) => (
-        OPS_KEYS.includes(key)
+      // field path *inside* the element, so it targets "f.<key>". $regex and
+      // its companion $options must stay together in one criterion.
+      const regexPair: Record<string, unknown> = {}
+      const $and: QueryFilterDocument[] = []
+      for (const [key, criterion] of Object.entries(value)) {
+        if (key === '$regex' || key === '$options') {
+          regexPair[key] = criterion
+          continue
+        }
+        $and.push(OPS_KEYS.includes(key)
           ? { f: { [key]: criterion } }
-          : { [`f.${key}`]: criterion }
-      ))
-      return `EXISTS (select json_object('f', json(value)) as valueJson from json_each(${toJson1Extract(ctx.col, [field])}) where (${convert({ col: 'valueJson' }, { $and })}))`
+          : { [`f.${key}`]: criterion })
+      }
+      if (Object.keys(regexPair).length > 0) $and.push({ f: regexPair })
+      // json_each takes (document, path), NOT the extracted value: a scalar
+      // string field extracts to bare text, which json_each rejects as
+      // malformed JSON. The 2-arg form is always safe, and the json_type
+      // guard excludes the single self-row json_each yields for scalars
+      // ($elemMatch only ever matches actual arrays, like MongoDB). The
+      // element is re-wrapped with json_quote, not json(): a string element's
+      // value is bare text - also malformed JSON - while json_quote encodes
+      // scalars and passes objects/arrays through via the JSON subtype.
+      return `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'array' AND EXISTS (select json_object('f', json_quote(value)) as valueJson from json_each(${quote2(ctx.col)}, ${toJson1PathString([field])}) where (${convert({ col: 'valueJson' }, { $and })}))`
     }
     case '$size': {
       if (typeof value !== 'number') throw Error(`$size expects value to be of type: number; but got: ${typeof value}`)
@@ -259,7 +413,24 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
     const opEqualsField = OPS_KEYS.includes(field)
     let op = opEqualsField ? field : '$eq'
 
+    // A bare RegExp value pattern-matches: { field: /re/ } is MongoDB's
+    // implicit form of { field: { $regex: /re/ } }. (An explicit $eq against
+    // a regex does NOT pattern-match - convertOp handles that.)
+    if (!opEqualsField && valueOrOp instanceof RegExp) {
+      return convertOp(ctx, field, '$regex', valueOrOp)
+    }
+
     if (!opEqualsField && typeof valueOrOp === 'object' && valueOrOp !== null) {
+      // $options is $regex's companion key, not an operator of its own - the
+      // pair must reach convertOp as ONE $regex, not be split into two ANDed
+      // criteria by the multi-operator branch below.
+      if ('$options' in valueOrOp && !('$regex' in valueOrOp)) throw Error('$options needs a $regex')
+      if ('$regex' in valueOrOp) {
+        const { $regex, $options, ...rest } = valueOrOp
+        const regexSql = convertOp(ctx, field, '$regex', toRegExp($regex, $options))
+        if (Object.keys(rest).length === 0) return regexSql
+        return `(${regexSql}) AND (${convert(ctx, { [field]: rest })})`
+      }
       const valueOrOpKeys = Object.keys(valueOrOp)
       if (valueOrOpKeys.length === 1 && countOps(valueOrOpKeys) === 1) {
         // Expressions in the form: { field: { $operator: value } }, where field is not an operator and value is an object
