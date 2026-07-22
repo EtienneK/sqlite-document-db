@@ -9,6 +9,8 @@ import { freshDualDbs } from './helpers/dual-dbs.js'
  * for the types this library stores) - every assertion runs against real
  * MongoDB as the oracle, including the mixed-type cases.
  */
+const ids = async (cursor: any): Promise<any[]> => (await cursor.toArray()).map((d: any) => d._id)
+
 describe('Cursor sort, limit and skip', () => {
   const jan = new Date('2020-01-15T00:00:00.000Z')
   const mar = new Date('2020-03-15T00:00:00.000Z')
@@ -30,7 +32,6 @@ describe('Cursor sort, limit and skip', () => {
 
   for (const dbName of ['Sqlite', 'Mongodb']) {
     const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
-    const ids = async (cursor: any): Promise<any[]> => (await cursor.toArray()).map((d: any) => d._id)
 
     describe(dbName, () => {
       it('should sort ascending and descending', async () => {
