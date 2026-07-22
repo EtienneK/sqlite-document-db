@@ -87,13 +87,15 @@ export class Collection<TSchema extends Document = Document> {
 
   find (query: Filter = {}): FindCursor<TSchema> {
     // One prepared statement per cursor, streamed with iterate() so a cursor
-    // over a large collection stays cheap. Deliberately no ORDER BY: like
-    // MongoDB, order without sort() is unspecified - and even a bare
-    // `ORDER BY rowid` makes SQLite pick a rowid-order scan over a field
-    // index (measured via EXPLAIN QUERY PLAN), which would defeat indexing.
+    // over a large collection stays cheap. ORDER BY rowid gives insertion
+    // order, matching MongoDB's natural order in practice - and is safe for
+    // index use because comparison predicates compile to `rowid IN (...)`
+    // subqueries, whose internal index searches the outer ORDER BY cannot
+    // defeat (a bare scalar predicate + ORDER BY rowid, by contrast, makes
+    // SQLite pick a rowid scan over a field index - measured).
     // The parens around the filter are load-bearing: $exists compiles to a
     // bare scalar subquery, which is only valid SQL inside parentheses.
-    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', query)})`
+    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', query, this.name)}) ORDER BY rowid`
     let rows: Iterator<unknown> | undefined
     let done = false
 
@@ -144,7 +146,9 @@ export class Collection<TSchema extends Document = Document> {
 
   async findOne (filter: string | Filter): Promise<WithId<TSchema> | null> {
     if (typeof filter === 'string') filter = { _id: filter }
-    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', filter)}) LIMIT 1`
+    // ORDER BY rowid: findOne returns the FIRST match in natural order, like
+    // MongoDB - updateOne/deleteOne/replaceOne depend on this for "one".
+    const sql = `SELECT data FROM ${this.name} WHERE (${toSql('data', filter, this.name)}) ORDER BY rowid LIMIT 1`
     const result = this.prepare(sql).get() as { data: string } | undefined
 
     if (result == null) return null
@@ -231,7 +235,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   async countDocuments (filter?: Filter): Promise<number> {
-    const sql = `SELECT COUNT(*) AS count FROM ${this.name} WHERE (${toSql('data', filter ?? {})})`
+    const sql = `SELECT COUNT(*) AS count FROM ${this.name} WHERE (${toSql('data', filter ?? {}, this.name)})`
     const result = this.prepare(sql).get() as { count: number }
     return Number(result.count)
   }
@@ -240,13 +244,13 @@ export class Collection<TSchema extends Document = Document> {
     const found = await this.findOne(filter)
     if (found == null) return { deletedCount: 0 }
 
-    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id })})`
+    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', { _id: found._id }, this.name)})`
     const result = this.prepare(sql).run()
     return { deletedCount: Number(result.changes) }
   }
 
   async deleteMany (filter: Filter): Promise<DeleteResult> {
-    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', filter)})`
+    const sql = `DELETE FROM ${this.name} WHERE (${toSql('data', filter, this.name)})`
     const result = this.prepare(sql).run()
     return { deletedCount: Number(result.changes) }
   }
@@ -257,7 +261,7 @@ export class Collection<TSchema extends Document = Document> {
 
     if (doc._id != null && found._id !== doc._id) throw Error('_id field is immutable and cannot be changed')
 
-    const sql = `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id })}`
+    const sql = `UPDATE ${this.name} SET data = json(?) WHERE ${toSql('data', { _id: found._id }, this.name)}`
     const result = this.prepare(sql).run(stringifyDocument({ ...doc, _id: found._id }))
     return { modifiedCount: Number(result.changes) }
   }

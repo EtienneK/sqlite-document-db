@@ -56,7 +56,7 @@ describe('find() query plans', () => {
       await db.collection('items').find({ qty: { $gt: 1 } }).next()
     })
     const docs = Array.from({ length: 1000 }, (_, i) => ({ _id: String(i), qty: i }))
-    expect(explain(logs, docs)).toContain('USING INDEX ix_collection_items_qty_1')
+    expect(explain(logs, docs)).toContain('INDEX ix_collection_items_qty_1')
   })
 
   it('a Date-range find() should use the .$date companion index', async () => {
@@ -67,6 +67,6 @@ describe('find() query plans', () => {
     })
     const docs = Array.from({ length: 1000 }, (_, i) =>
       ({ _id: String(i), at: { $date: new Date(1_500_000_000_000 + i * 60_000).toISOString() } }))
-    expect(explain(logs, docs)).toContain('USING INDEX ixd_collection_items_at_1')
+    expect(explain(logs, docs)).toContain('INDEX ixd_collection_items_at_1')
   })
 })
