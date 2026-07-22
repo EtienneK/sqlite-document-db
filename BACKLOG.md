@@ -172,11 +172,11 @@ replacement".
 
 | # | Item | Size | Why now |
 | --- | --- | --- | --- |
-| 1 | [Rework the cursor](#1-rework-the-cursor-off-rowid-pagination) | S | Blocks indexing; also an easy perf win |
+| 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
 | 2 | [`createIndex()` and friends](#2-createindex-and-friends) | M | The whole point of using SQLite |
 | 3 | [Implicit array element matching](#3-implicit-array-element-matching) | M | Unblocks 4 disabled assertions; most-missed Mongo behaviour |
 | 4 | [`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators) | M | Largest API gap; the only CRUD letter missing |
-| 5 | [TypeScript typing](#5-typescript-typing) | S then M | Generics are currently unreachable — a one-line fix, then real work |
+| 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
 | 6 | [Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip) | M | Needed before this is usable for real workloads |
 | 7 | [Projection](#7-projection) | M | Listed in README; parity item |
 | 8 | [`$regex`, `$type`, `$mod`](#8-remaining-query-operators) | M | Closes parity gap with the Postgres project |
@@ -197,7 +197,15 @@ format); items 5b, 15 and 16 depend on **[DR-2](#dr-2-how-mongodb-compatible-sho
 
 ## 1. Rework the cursor off rowid pagination
 
-**Size: S — do this first.**
+**Size: S — DONE 2026-07-22.** `find()` now prepares one statement per cursor and
+streams it with `StatementSync.iterate()`, with no `ORDER BY` (order without `sort()`
+is unspecified, matching MongoDB — a bare `ORDER BY rowid` was measured to defeat
+field indexes too). Added `cursor.close()`, statement release on `for-await` break,
+[test/cursor.spec.ts](test/cursor.spec.ts), and a plan-regression guard in
+[test/query-plan.spec.ts](test/query-plan.spec.ts) that fails if `find()`'s SQL ever
+stops being index-eligible. One trap for posterity: the parens around the compiled
+filter are load-bearing — `$exists` emits a bare scalar subquery. Original analysis
+follows.
 
 `find()` currently re-runs a `LIMIT 1` query for every single document:
 
@@ -355,7 +363,7 @@ which currently only tests `replaceOne`.
 This is a TypeScript-first library, but the type surface doesn't currently deliver on
 that. Split into a quick fix and a real project.
 
-### 5a. Make the generics reachable — **Size: S, do immediately**
+### 5a. Make the generics reachable — **Size: S — DONE 2026-07-22**
 
 `Collection<TSchema>` is generic and `TSchema` correctly threads through `find()`,
 `findOne()` and `insertOne()`. But `Db.collection()` is declared as:
