@@ -212,6 +212,37 @@ Updates are validated the way MongoDB validates them, rather than being applied
 loosely: `_id` is immutable, a field cannot be targeted by two operators in one
 update, and `$inc` on a non-numeric field is an error.
 
+### Upsert, and find-and-modify
+
+`upsert` inserts when nothing matched, seeding the new document from the
+filter's **equality** conditions (a range or `$in` names no single value, so it
+contributes nothing) and then applying the update over them:
+
+```javascript
+await db.collection('items').updateOne(
+  { item: 'planner', 'size.uom': 'cm' },   // -> { item: 'planner', size: { uom: 'cm' } }
+  { $inc: { qty: 1 }, $setOnInsert: { createdAt: new Date() } },
+  { upsert: true }
+)                                          // -> { ..., qty: 1, createdAt: <Date> }
+```
+
+`$setOnInsert` applies only when the upsert actually inserts. `replaceOne` and
+`updateMany` take `upsert` too — an upsert that matches nothing always inserts
+exactly one document.
+
+The find-and-modify trio returns the document itself, defaulting to the version
+from *before* the write, like the driver:
+
+```javascript
+await db.collection('items').findOneAndUpdate({ item: 'paper' }, { $inc: { qty: -1 } })
+await db.collection('items').findOneAndUpdate(
+  {}, { $set: { picked: true } },
+  { sort: { qty: -1 }, returnDocument: 'after', projection: { item: 1 } }
+)
+await db.collection('items').findOneAndReplace({ item: 'paper' }, { item: 'card' }, { upsert: true })
+await db.collection('items').findOneAndDelete({ status: 'D' }, { sort: { qty: 1 } })
+```
+
 ### Handle errors
 
 Write failures carry MongoDB's error codes, so the usual `catch` works unchanged:
@@ -267,11 +298,13 @@ Operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 
 Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
 `updateOne()` `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()`
+`findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()`
 `createIndex()` `dropIndex()` `indexes()` `listIndexes()`.
 
-Update operators: `$set` `$unset` `$inc`. Result objects match the official
-driver's shapes (`acknowledged`, `matchedCount`, `modifiedCount`, ...), and
-errors match its codes (`11000` for a duplicate key).
+Update operators: `$set` `$unset` `$inc` `$setOnInsert`, and the `upsert`
+option on `updateOne`/`updateMany`/`replaceOne`. Result objects match the
+official driver's shapes (`acknowledged`, `matchedCount`, `modifiedCount`,
+`upsertedId`, ...), and errors match its codes (`11000` for a duplicate key).
 
 ### Supported value types
 
@@ -327,8 +360,8 @@ how each piece would be implemented. The headlines:
 
 #### Updating documents
 
-- The `upsert` option, `findOneAndUpdate()`/`findOneAndReplace()`/`findOneAndDelete()`,
-  and the remaining update operators (`$mul`, `$rename`, `$push`, `$pull`, …)
+- The remaining update operators: `$mul`, `$min`, `$max`, `$rename`, `$push`,
+  `$pull`, `$addToSet`, `$pop`
 
 ## Thanks
 

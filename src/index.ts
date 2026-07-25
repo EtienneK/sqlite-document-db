@@ -77,6 +77,31 @@ export interface FindOptions {
   projection?: ProjectionSpec
 }
 
+export interface UpdateOptions {
+  /** Insert a document built from the filter and the update when nothing matches. */
+  upsert?: boolean
+}
+
+export interface ReplaceOptions {
+  /** Insert the replacement (plus any `_id` the filter pins) when nothing matches. */
+  upsert?: boolean
+}
+
+export interface FindOneAndUpdateOptions {
+  /** Which version to return. Defaults to 'before', as the driver does. */
+  returnDocument?: 'before' | 'after'
+  upsert?: boolean
+  sort?: SortSpecification
+  projection?: ProjectionSpec
+}
+
+export interface FindOneAndReplaceOptions extends FindOneAndUpdateOptions {}
+
+export interface FindOneAndDeleteOptions {
+  sort?: SortSpecification
+  projection?: ProjectionSpec
+}
+
 export interface FindCursor<TSchema extends Document = Document> {
   /** Sorts results in MongoDB's BSON type order. Chainable; throws once iteration has started. */
   sort: (spec: SortSpecification) => FindCursor<TSchema>
@@ -92,7 +117,9 @@ export interface FindCursor<TSchema extends Document = Document> {
   [Symbol.asyncIterator]: () => AsyncIterableIterator<WithId<TSchema>>
 }
 
-const UPDATE_OPERATORS = ['$set', '$unset', '$inc']
+// $setOnInsert only ever contributes to the document an upsert INSERTS; it is
+// a no-op on a matched document, so it never reaches the SQL expression.
+const UPDATE_OPERATORS = ['$set', '$unset', '$inc', '$setOnInsert']
 
 /**
  * Rejects field paths an update must never touch.
@@ -102,20 +129,26 @@ const UPDATE_OPERATORS = ['$set', '$unset', '$inc']
  * with the number 1. `_id` is immutable in MongoDB, and letting `$unset` remove
  * it (or `$inc` overwrite it) leaves an unaddressable document behind.
  */
-function assertUpdatableField (operator: string, field: string): void {
+function assertUpdatableField (operator: string, field: string, allowId = false): void {
   if (field === '') throw Error(`${operator} requires a non-empty field name`)
+  if (allowId) return
   if (field === '_id' || field.startsWith('_id.')) {
     throw Error(`Performing an update on the path '${field}' would modify the immutable field '_id'`)
   }
 }
 
-/** The `{ field: value }` map an update operator applies, validated. */
-function updateOperand (operator: string, value: unknown): Array<[string, unknown]> {
+/**
+ * The `{ field: value }` map an update operator applies, validated.
+ *
+ * `allowId` is for `$setOnInsert`, whose fields only ever land in a document
+ * being created - nothing immutable is being changed there.
+ */
+function updateOperand (operator: string, value: unknown, allowId = false): Array<[string, unknown]> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw Error(`Modifiers operate on fields but ${operator} was given type: ${value === null ? 'null' : typeof value}`)
   }
   const entries = Object.entries(value)
-  for (const [field] of entries) assertUpdatableField(operator, field)
+  for (const [field] of entries) assertUpdatableField(operator, field, allowId)
   return entries
 }
 
@@ -137,6 +170,77 @@ function assertNoConflictingPaths (update: UpdateFilter): void {
       seen.push(field)
     }
   }
+}
+
+/**
+ * Writes `value` at a dotted path, creating missing parent objects - the JS
+ * counterpart of what `ensureParents` + `json_set` do in SQL. Used only when
+ * building the document an upsert inserts.
+ */
+function setPath (doc: Document, field: string, value: unknown): void {
+  const segments = field.split('.')
+  let node = doc
+  for (const segment of segments.slice(0, -1)) {
+    const existing = node[segment]
+    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) node[segment] = {}
+    node = node[segment] as Document
+  }
+  node[segments[segments.length - 1]!] = value
+}
+
+/**
+ * Collects the equality conditions a filter pins, the way MongoDB seeds an
+ * upsert's new document: `{ a: 1, 'b.c': { $eq: 2 } }` contributes
+ * `{ a: 1, b: { c: 2 } }`.
+ *
+ * Anything that is not an equality contributes NOTHING - a range, `$in`, a
+ * regex, `$or`/`$nor`/`$not` - because there is no single value they imply.
+ * `$and` is the exception: it is a conjunction, so each of its terms still
+ * has to hold.
+ */
+function collectEqualities (filter: Filter, into: Document): void {
+  for (const [key, value] of Object.entries(filter)) {
+    if (key === '$and' && Array.isArray(value)) {
+      for (const term of value) {
+        if (term !== null && typeof term === 'object') collectEqualities(term as Filter, into)
+      }
+      continue
+    }
+    if (key.startsWith('$')) continue
+    if (value instanceof RegExp) continue // a pattern, not a value
+
+    if (value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date)) {
+      const keys = Object.keys(value)
+      if (keys.some(k => k.startsWith('$'))) {
+        // An operator criterion. Only an explicit $eq names a value.
+        if (keys.length === 1 && keys[0] === '$eq' && !((value as Document).$eq instanceof RegExp)) {
+          setPath(into, key, (value as Document).$eq)
+        }
+        continue
+      }
+    }
+    setPath(into, key, value)
+  }
+}
+
+/**
+ * The document an upsert inserts when nothing matched: the filter's equality
+ * conditions, then `$setOnInsert`, `$set` and `$inc` applied over them (`$inc`
+ * counts up from 0, as it does on a missing field). `$unset` is ignored -
+ * there is nothing to remove from a document that does not exist yet.
+ */
+function buildUpsertDocument (filter: Filter, update: UpdateFilter): Document {
+  const doc: Document = {}
+  collectEqualities(filter, doc)
+  for (const operator of ['$setOnInsert', '$set'] as const) {
+    for (const [field, value] of Object.entries((update[operator] ?? {}) as Record<string, unknown>)) {
+      setPath(doc, field, value)
+    }
+  }
+  for (const [field, amount] of Object.entries((update.$inc ?? {}) as Record<string, number>)) {
+    setPath(doc, field, amount)
+  }
+  return doc
 }
 
 /**
@@ -197,6 +301,10 @@ function buildUpdateExpression (update: UpdateFilter): UpdateExpression {
 
   assertNoConflictingPaths(update)
 
+  // $setOnInsert contributes no SQL - it only shapes the document an upsert
+  // inserts - but its operand still has to be a well-formed field map.
+  if (update.$setOnInsert != null) updateOperand('$setOnInsert', update.$setOnInsert, true)
+
   let expr = 'data'
   const params: SqlParams = {}
   const incFields: string[] = []
@@ -239,9 +347,14 @@ function buildUpdateExpression (update: UpdateFilter): UpdateExpression {
   return { sql: expr, params, incFields, ...(incConflict === undefined ? {} : { incConflict }) }
 }
 
-/** The driver's UpdateResult shape; upserts are not supported yet, hence the zeroes. */
+/** The driver's UpdateResult shape for a write that did not upsert. */
 function updateResult (matchedCount: number, modifiedCount: number): UpdateResult {
   return { acknowledged: true, matchedCount, modifiedCount, upsertedCount: 0, upsertedId: null }
+}
+
+/** Applies a projection to a single document, when one was requested. */
+function applyProjection<T> (doc: T, spec?: ProjectionSpec): T {
+  return spec == null ? doc : compileProjection(spec)(doc)
 }
 
 function assertLimit (count: number): void {
@@ -609,11 +722,61 @@ export class Collection<TSchema extends Document = Document> {
    * array-element rule made `{ _id: [...] }` match sibling documents too, so
    * `deleteOne` could remove more than one row.
    */
-  private findOneRow (filter: Filter): { rowid: number, data: string } | null {
+  private findOneRow (filter: Filter, sort?: SortSpecification): { rowid: number, data: string } | null {
     const compiled = toSql('data', filter, this.table)
-    const sql = `SELECT rowid, data FROM ${this.table} WHERE (${compiled.sql}) ORDER BY rowid LIMIT 1`
+    const normalizedSort = typeof sort === 'string' ? { [sort]: 1 } : sort
+    const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
+    const sql = `SELECT rowid, data FROM ${this.table} WHERE (${compiled.sql}) ORDER BY ${orderBy} LIMIT 1`
     const row = this.prepare(sql).get(compiled.params) as { rowid: number, data: string } | undefined
     return row ?? null
+  }
+
+  /**
+   * Inserts the document an upsert implies and reports it as the driver does.
+   *
+   * Callers must already have established that nothing matched. Between that
+   * check and this insert nothing else can run in-process (node:sqlite is
+   * synchronous and there is no await in between); across processes the unique
+   * `_id` index is what makes a lost race an error rather than a duplicate.
+   */
+  private async insertUpserted (doc: Document): Promise<{ result: UpdateResult, document: WithId<TSchema> }> {
+    const insert = await this.insertMany([doc as TSchema])
+    const upsertedId = insert.insertedIds[0]!
+    return {
+      result: { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 1, upsertedId },
+      // Read back rather than reusing `doc`: the storage layer decides the
+      // final shape (dropped `undefined`s, Date round-trip, key order).
+      document: (await this.findOne({ _id: upsertedId } as Filter))!
+    }
+  }
+
+  /** Applies a compiled update expression to exactly one row. */
+  private updateRow (expr: UpdateExpression, rowid: number): number {
+    this.assertIncApplies(expr, 'rowid = :rowid', { rowid })
+    // `data != <expr>` makes a no-op update report modifiedCount 0, like
+    // MongoDB. Each 'u' parameter binds once for both occurrences of expr.
+    const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE rowid = :rowid AND data != ${expr.sql}`
+    return Number(this.run(sql, { ...expr.params, rowid }).changes)
+  }
+
+  /** Replaces exactly one row's document, keeping its `_id`. */
+  private replaceRow (rowid: number, doc: WithoutId<TSchema>, id: unknown): number {
+    // One named parameter serves both occurrences of the new document.
+    const sql = `UPDATE ${this.table} SET data = json(:doc) WHERE rowid = :rowid AND data != json(:doc)`
+    return Number(this.run(sql, { rowid, doc: stringifyDocument({ ...doc, _id: id }) }).changes)
+  }
+
+  /**
+   * The document a replacement upsert inserts: the replacement itself, plus
+   * the `_id` the filter pins when the replacement does not name one. Other
+   * filter equalities are NOT carried over - a replacement document is meant
+   * to be the whole document.
+   */
+  private upsertReplacement (filter: Filter, doc: WithoutId<TSchema>, givenId: unknown): Document {
+    const pinned: Document = {}
+    collectEqualities(filter, pinned)
+    const id = givenId ?? pinned._id
+    return { ...(id == null ? {} : { _id: id }), ...doc }
   }
 
   async deleteOne (filter: Filter): Promise<DeleteResult> {
@@ -631,48 +794,55 @@ export class Collection<TSchema extends Document = Document> {
     return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
-  async replaceOne (filter: Filter, doc: WithoutId<TSchema>): Promise<UpdateResult> {
+  /** Rejects a replacement document and returns the `_id` it pins, if any. */
+  private static replacementId (doc: Document): unknown {
     // MongoDB rejects replacement documents whose first key is an operator.
     if (Object.keys(doc)[0]?.startsWith('$') === true) {
       throw Error('replacement document must not contain atomic operators')
     }
+    return doc._id
+  }
+
+  async replaceOne (filter: Filter, doc: WithoutId<TSchema>, options: ReplaceOptions = {}): Promise<UpdateResult> {
+    const givenId = Collection.replacementId(doc)
 
     const found = this.findOneRow(filter)
-    if (found === null) return updateResult(0, 0)
+    if (found === null) {
+      if (options.upsert !== true) return updateResult(0, 0)
+      return (await this.insertUpserted(this.upsertReplacement(filter, doc, givenId))).result
+    }
 
     const id = parseDocument(found.data)._id
-    if (doc._id != null && id !== doc._id) throw Error('_id field is immutable and cannot be changed')
+    if (givenId != null && id !== givenId) throw Error('_id field is immutable and cannot be changed')
 
-    // `data != json(:doc)` makes a no-op replacement report modifiedCount 0,
-    // matching MongoDB (SQLite would otherwise count every touched row). One
-    // named parameter serves both occurrences.
-    const sql = `UPDATE ${this.table} SET data = json(:doc) WHERE rowid = :rowid AND data != json(:doc)`
-    const result = this.run(sql, { rowid: found.rowid, doc: stringifyDocument({ ...doc, _id: id }) })
-    return updateResult(1, Number(result.changes))
+    // A no-op replacement reports modifiedCount 0, matching MongoDB - SQLite
+    // would otherwise count every touched row.
+    return updateResult(1, this.replaceRow(found.rowid, doc, id))
   }
 
   /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
-  async updateOne (filter: Filter, update: UpdateFilter): Promise<UpdateResult> {
+  async updateOne (filter: Filter, update: UpdateFilter, options: UpdateOptions = {}): Promise<UpdateResult> {
     const expr = buildUpdateExpression(update)
 
     const found = this.findOneRow(filter)
-    if (found === null) return updateResult(0, 0)
-    const { rowid } = found
+    if (found === null) {
+      if (options.upsert !== true) return updateResult(0, 0)
+      return (await this.insertUpserted(buildUpsertDocument(filter, update))).result
+    }
 
-    this.assertIncApplies(expr, 'rowid = :rowid', { rowid })
-
-    // `data != <expr>` makes a no-op update report modifiedCount 0, like
-    // MongoDB. Each 'u' parameter binds once for both occurrences of expr.
-    const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE rowid = :rowid AND data != ${expr.sql}`
-    const result = this.run(sql, { ...expr.params, rowid })
-    return updateResult(1, Number(result.changes))
+    return updateResult(1, this.updateRow(expr, found.rowid))
   }
 
   /** Updates every document matching `filter` with $set/$unset/$inc operators. */
-  async updateMany (filter: Filter, update: UpdateFilter): Promise<UpdateResult> {
+  async updateMany (filter: Filter, update: UpdateFilter, options: UpdateOptions = {}): Promise<UpdateResult> {
     const expr = buildUpdateExpression(update)
 
     const matchedCount = await this.countDocuments(filter)
+    // An upsert that matches nothing inserts exactly ONE document, as it does
+    // for updateOne - "many" describes what is updated, not what is created.
+    if (matchedCount === 0 && options.upsert === true) {
+      return (await this.insertUpserted(buildUpsertDocument(filter, update))).result
+    }
     const compiled = toSql('data', filter, this.table)
 
     // Checked across every matched row before anything is written, so a bad
@@ -686,6 +856,74 @@ export class Collection<TSchema extends Document = Document> {
     const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE (${compiled.sql}) AND data != ${expr.sql}`
     const result = this.run(sql, { ...expr.params, ...compiled.params })
     return updateResult(matchedCount, Number(result.changes))
+  }
+
+  /**
+   * Finds one document, applies `update` to it, and returns a version of it.
+   *
+   * Returns the document as it was BEFORE the update by default, matching the
+   * driver's `returnDocument: 'before'`. With `upsert` and nothing matched,
+   * 'before' returns null - there was no earlier version - while 'after'
+   * returns the document that was inserted.
+   */
+  async findOneAndUpdate (
+    filter: Filter, update: UpdateFilter, options: FindOneAndUpdateOptions = {}
+  ): Promise<WithId<TSchema> | null> {
+    const expr = buildUpdateExpression(update)
+    const found = this.findOneRow(filter, options.sort)
+
+    if (found === null) {
+      if (options.upsert !== true) return null
+      return await this.returnUpserted(buildUpsertDocument(filter, update), options)
+    }
+
+    const before = parseDocument(found.data) as WithId<TSchema>
+    this.updateRow(expr, found.rowid)
+    return this.returnWritten(before, found.rowid, options)
+  }
+
+  /** As `findOneAndUpdate`, but with a whole replacement document. */
+  async findOneAndReplace (
+    filter: Filter, replacement: WithoutId<TSchema>, options: FindOneAndReplaceOptions = {}
+  ): Promise<WithId<TSchema> | null> {
+    const givenId = Collection.replacementId(replacement)
+    const found = this.findOneRow(filter, options.sort)
+
+    if (found === null) {
+      if (options.upsert !== true) return null
+      return await this.returnUpserted(this.upsertReplacement(filter, replacement, givenId), options)
+    }
+
+    const before = parseDocument(found.data) as WithId<TSchema>
+    if (givenId != null && before._id !== givenId) throw Error('_id field is immutable and cannot be changed')
+    this.replaceRow(found.rowid, replacement, before._id)
+    return this.returnWritten(before, found.rowid, options)
+  }
+
+  /** Deletes one document and returns it, or null when nothing matched. */
+  async findOneAndDelete (filter: Filter, options: FindOneAndDeleteOptions = {}): Promise<WithId<TSchema> | null> {
+    const found = this.findOneRow(filter, options.sort)
+    if (found === null) return null
+
+    const document = parseDocument(found.data) as WithId<TSchema>
+    this.run(`DELETE FROM ${this.table} WHERE rowid = :rowid`, { rowid: found.rowid })
+    return applyProjection(document, options.projection)
+  }
+
+  /** The 'before'/'after' choice, for a row that was just written in place. */
+  private returnWritten (
+    before: WithId<TSchema>, rowid: number, options: FindOneAndUpdateOptions
+  ): WithId<TSchema> | null {
+    if (options.returnDocument !== 'after') return applyProjection(before, options.projection)
+    const row = this.prepare(`SELECT data FROM ${this.table} WHERE rowid = :rowid`).get({ rowid }) as { data: string } | undefined
+    return row === undefined ? null : applyProjection(parseDocument(row.data), options.projection)
+  }
+
+  /** The 'before'/'after' choice for an upsert: there is no 'before' version. */
+  private async returnUpserted (doc: Document, options: FindOneAndUpdateOptions): Promise<WithId<TSchema> | null> {
+    const { document } = await this.insertUpserted(doc)
+    if (options.returnDocument !== 'after') return null
+    return applyProjection(document, options.projection)
   }
 
   async insertOne (doc: TSchema): Promise<InsertOneResult> {

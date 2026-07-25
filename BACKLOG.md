@@ -181,7 +181,7 @@ replacement".
 | 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
 | 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
 | 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
-| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE 2026-07-22** — `$set`/`$unset`/`$inc`; driver result shapes; upsert still open |
+| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — 2026-07-22 core; upsert + findOneAnd* 2026-07-25 |
 | 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
@@ -461,8 +461,29 @@ via `AND data != <new-expr>` in the UPDATE. All result shapes now match the driv
 `acknowledged` on insert/delete results too — DR-2). `replaceOne` rejects operator
 documents; update methods reject operator-less documents. Dual-engine verified in
 [test/mdb-tutorials/update-documents.spec.ts](test/mdb-tutorials/update-documents.spec.ts).
-**Still open:** `upsert` option, `$mul`/`$min`/`$max`/`$rename`/`$push`/`$pull`/
-`$addToSet`/`$pop`, `findOneAndUpdate`/`findOneAndReplace`/`findOneAndDelete`.
+**Upsert and find-and-modify landed 2026-07-25:** `upsert` on
+`updateOne`/`updateMany`/`replaceOne`, the `$setOnInsert` operator, and
+`findOneAndUpdate`/`findOneAndReplace`/`findOneAndDelete` (with
+`returnDocument`, `sort`, `projection` and `upsert`), all dual-engine verified in
+[test/upsert-and-find-one-and.spec.ts](test/upsert-and-find-one-and.spec.ts).
+
+The part worth knowing is what an upsert INSERTS. MongoDB seeds the new document
+from the filter's **equality** conditions only, then applies the update over
+them - `collectEqualities()` in [src/index.ts](src/index.ts) implements exactly
+that, and the spec pins down each rule against the server: a dotted path becomes
+a nested document; `$eq` counts but `$gt`/`$in`/`$ne`/a regex contribute nothing
+(they name no single value); `$and` is traversed but `$or` is not; whole objects
+and arrays carry over intact; `$unset` contributes nothing; `$inc` counts up from
+0; `$setOnInsert` may set `_id` (nothing immutable is changing yet) but still
+conflicts with `$set` on the same path. `updateMany` with `upsert` inserts
+exactly ONE document - "many" describes what is updated, not what is created.
+
+`findOneAndUpdate`/`findOneAndReplace` return the pre-write document by default
+(`returnDocument: 'before'`), and `null` when an upsert inserts, since there was
+no earlier version. The driver's v6+ shape is used: the document itself, not the
+`{ value, ok }` wrapper.
+
+**Still open:** `$mul`/`$min`/`$max`/`$rename`/`$push`/`$pull`/`$addToSet`/`$pop`.
 Known divergences: `$unset` of an array element removes it instead of nulling it;
 `$set`/`$inc` through a SCALAR parent (`$set: { 'qty.x': 1 }` where `qty` is a
 number) silently no-ops where MongoDB errors. (`$inc` on a non-numeric field used
@@ -488,9 +509,6 @@ The Postgres project supports `$set` and `$inc`.
 
 Operators compose in one statement by nesting `json_set` calls. Do `$set`/`$unset`/
 `$inc` first — they cover most usage and match the Postgres project's scope.
-
-Also add the `upsert` option, and `findOneAndUpdate` / `findOneAndReplace` /
-`findOneAndDelete` once updates exist.
 
 **Verify.** Extend
 [test/mdb-tutorials/update-documents.spec.ts](test/mdb-tutorials/update-documents.spec.ts),

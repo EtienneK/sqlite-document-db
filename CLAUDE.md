@@ -106,6 +106,16 @@ used to become an equality match against that object and return nothing). If you
 add an operator, add it to `OPS`, and add it to `TOP_LEVEL_OPS_KEYS` only if
 MongoDB accepts it as a filter-document key.
 
+**Non-obvious detail — what an upsert inserts.** When nothing matched, the new
+document is built in JS by `buildUpsertDocument()`, not in SQL: MongoDB seeds it
+from the filter's **equality** conditions only, and "equality" is narrower than
+it looks — `$gt`/`$in`/`$ne`/a regex contribute nothing, `$and` is traversed but
+`$or` is not, and a dotted path becomes a nested document. `collectEqualities()`
+encodes those rules and
+[test/upsert-and-find-one-and.spec.ts](test/upsert-and-find-one-and.spec.ts)
+pins every one of them against the server. `$setOnInsert` exists only for this
+path — it never reaches the SQL expression.
+
 **Non-obvious detail — validation before writing, not during.** `$inc` rejects
 non-numeric targets with a SELECT that runs *before* the UPDATE
 (`Collection.assertIncApplies`), not with a guard inside the UPDATE itself.
