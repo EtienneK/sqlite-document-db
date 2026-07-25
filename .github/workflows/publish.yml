@@ -107,8 +107,21 @@ jobs:
           SMOKE
           node smoke.mjs
 
+      # Makes the workflow idempotent: re-running a tag, or tagging a version
+      # that was published by hand, skips rather than failing on npm's 403.
+      - name: Is this version already published?
+        id: published
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          if npm view "sqlite-document-db@$VERSION" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::sqlite-document-db@$VERSION is already on the registry - skipping publish"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.published.outputs.already == 'false'
         # --provenance records a verifiable link from the tarball back to this
         # commit and workflow. It needs `id-token: write` above and a public repo.
         run: npm publish --provenance --access public
