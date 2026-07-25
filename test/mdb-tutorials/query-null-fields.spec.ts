@@ -3,7 +3,7 @@ import type { Db as Mdb } from 'mongodb'
 import type { Db } from '../../src/index.js'
 import { seededDualDbs } from '../helpers/dual-dbs.js'
 
-describe('Query an Array - https://www.mongodb.com/docs/manual/tutorial/query-arrays/', () => {
+describe('Query for Null or Missing Fields - https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/', () => {
   const items = [{ item: null }, { }]
 
   const dbs = seededDualDbs(async ({ sqlite, mongo }) => {

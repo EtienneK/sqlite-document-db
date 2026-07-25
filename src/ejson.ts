@@ -24,14 +24,30 @@
 
 const DATE_KEY = '$date'
 
+/**
+ * How deeply a stored document may nest, counting the document itself as
+ * level 1 and each object or array below it as one more.
+ *
+ * This mirrors SQLite's `SQLITE_MAX_JSON_DEPTH`, which defaults to 1000: one
+ * level deeper and `json()` rejects the document with the bare message
+ * "malformed JSON", naming neither the limit nor the path. Checking it here
+ * turns that into an error that says what happened and where.
+ *
+ * The number is MEASURED against the boundary, not read off the SQLite docs -
+ * a document whose deepest container sits at level 1000 round-trips, and one at
+ * 1001 does not. A `Date` costs a level, because it is stored as the object
+ * `{"$date": ...}`; test/ejson.spec.ts pins both edges.
+ */
+export const MAX_DOCUMENT_DEPTH = 1000
+
 /** Serialize a document for storage. Throws on values JSON cannot hold. */
 export function stringify (doc: unknown): string {
-  return JSON.stringify(encode(doc, '$', new Set()))
+  return JSON.stringify(encode(doc, '$', new Set(), 1))
 }
 
 /** Encode a single value the way `stringify` encodes document fields. */
 export function encodeValue (value: unknown): unknown {
-  return encode(value, '$', new Set())
+  return encode(value, '$', new Set(), 1)
 }
 
 /** Parse a stored document, reviving `{"$date": ...}` wrappers into Dates. */
@@ -46,7 +62,7 @@ function isDateWrapper (value: any): value is { $date: string } {
     typeof value[DATE_KEY] === 'string' && Object.keys(value).length === 1
 }
 
-function encode (value: unknown, path: string, seen: Set<object>): unknown {
+function encode (value: unknown, path: string, seen: Set<object>, depth: number): unknown {
   if (value === null || value === undefined) return value
 
   switch (typeof value) {
@@ -60,6 +76,16 @@ function encode (value: unknown, path: string, seen: Set<object>): unknown {
     case 'function':
     case 'symbol':
       throw unsupported(path, typeof value)
+  }
+
+  // Everything below is stored as a JSON object or array - including a Date,
+  // which becomes its {"$date": ...} wrapper - so this is where a level is
+  // spent and where the depth limit applies.
+  if (depth > MAX_DOCUMENT_DEPTH) {
+    throw Error(
+      `document nests deeper than ${MAX_DOCUMENT_DEPTH} levels (at ${path}): ` +
+      'SQLite cannot store it, and would report only "malformed JSON"'
+    )
   }
 
   if (value instanceof Date) {
@@ -77,7 +103,7 @@ function encode (value: unknown, path: string, seen: Set<object>): unknown {
   try {
     if (Array.isArray(value)) {
       // JSON.stringify turns undefined array elements into null; keep that.
-      return value.map((element, i) => encode(element, `${path}.${i}`, seen) ?? null)
+      return value.map((element, i) => encode(element, `${path}.${i}`, seen, depth + 1) ?? null)
     }
 
     // A stored `{"$date": "<string>"}` is how a Date is written, so a document
@@ -94,7 +120,7 @@ function encode (value: unknown, path: string, seen: Set<object>): unknown {
     const encoded: Record<string, unknown> = Object.create(null)
     for (const [key, fieldValue] of Object.entries(value)) {
       if (fieldValue === undefined) continue // JSON.stringify drops these; keep that.
-      encoded[key] = encode(fieldValue, `${path}.${key}`, seen)
+      encoded[key] = encode(fieldValue, `${path}.${key}`, seen, depth + 1)
     }
     return encoded
   } finally {

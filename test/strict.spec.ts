@@ -160,6 +160,37 @@ describe('strict mode', () => {
     })
   })
 
+  describe('distinct() on a path that crosses an array', () => {
+    it('should read as missing by default', async () => {
+      const db = await open(false)
+      await seedEmbedded(db)
+      // MongoDB yields [5, 7] here.
+      expect(await db.collection('t').distinct('instock.qty')).toStrictEqual([])
+      await db.close()
+    })
+
+    it('should reject the path under strict', async () => {
+      const db = await open(true)
+      await seedEmbedded(db)
+      await expect(db.collection('t').distinct('instock.qty')).rejects.toThrow(/strict.*ARRAY/)
+      await db.close()
+    })
+
+    it('should still allow a top-level array field, which IS flattened correctly', async () => {
+      const db = await open(true)
+      await db.collection('t').insertOne({ tags: ['a', 'b'] })
+      expect(await db.collection('t').distinct('tags')).toStrictEqual(['a', 'b'])
+      await db.close()
+    })
+
+    it('should still allow a nested path no document holds an array in', async () => {
+      const db = await open(true)
+      await db.collection('t').insertOne({ size: { uom: 'cm' } })
+      expect(await db.collection('t').distinct('size.uom')).toStrictEqual(['cm'])
+      await db.close()
+    })
+  })
+
   it('should leave everything else exactly as it is', async () => {
     // strict is a boundary check, not a second set of semantics: a supported
     // query has to behave identically with it on.

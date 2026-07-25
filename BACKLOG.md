@@ -176,24 +176,59 @@ replacement".
 
 ## Priority summary
 
-| # | Item | Size | Why now |
+**What is left, in the order I would do it.** Everything above the rule is open;
+the closed items are listed after it for provenance.
+
+| Order | Item | Size | Why this position |
+| --- | --- | --- | --- |
+| 1 | [Transactions](#12-transactions) | M | **The last correctness gap**, and now the top of the list because everything cheaper is done. Everything below is surface area; this is the one thing a caller cannot work around, and `bulkWrite()` should wait for it so an ordered batch can actually be atomic. |
+| 2 | [`$lookup`](#16-aggregation-pipeline) | M | The most conspicuous hole in the pipeline and the one people ask for first. It is a join, which SQLite is good at. |
+| 3 | [Rest of item 15](#15-remaining-collection--db-api) | M | `bulkWrite()` (after item 1), `estimatedDocumentCount()`, `listCollections()`, `dropDatabase()`, `insertMany({ ordered: false })`, `countDocuments` with `limit`/`skip`. `bulkWrite` also closes the last tutorial gap in item 13. |
+| 4 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString` and friends. Only field paths, literals and `$literal` exist today, which is the pipeline's real ceiling once `$lookup` lands. |
+| 5 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 6 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 7 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. All rejected loudly today, so nobody is silently wrong. |
+| 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until it is exhausted, so this is a lifetime problem rather than a lookup one. |
+| 9 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow, so not the S it sits among. |
+
+**Everything S and under is now done** (2026-07-25): item 13's tutorial gaps,
+`distinct()`, `drop()`, `_id` types, and the document depth limit. Three of
+those turned out to be **already complete and merely unstruck** — the "Project
+Fields to Return" spec, benchmarks in CI, and the concurrency documentation.
+Re-read an item's blockers before estimating it; this list drifted in the
+direction of looking like more work than it was.
+
+**Not planned, and worth saying so:** multi-document atomicity beyond a single
+connection, change streams, replication, sharding, `$where`, server-side
+JavaScript, GridFS, the wire protocol. A process that needs those needs a server.
+
+---
+
+### Item history
+
+Every numbered item, with what actually landed. Items that are struck through
+are finished; the rest carry a note saying what remains, and appear in the
+priority table above.
+
+| # | Item | Size | Outcome |
 | --- | --- | --- | --- |
 | 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
 | 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
 | 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
-| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — core 2026-07-22; upsert + findOneAnd* 2026-07-25; array/field operators 2026-07-25 |
-| 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25** |
+| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — core 2026-07-22; upsert + findOneAnd* 2026-07-25; array/field operators 2026-07-25. `$position`/positional still open |
+| 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25**, extended for the array operators and `aggregate<T>()` |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
-| 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
+| 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; `$`-operators still open |
 | 8 | ~~[`$regex`, `$type`, `$mod`](#8-remaining-query-operators)~~ | M | **DONE 2026-07-22** — `$expr`/`$bits*`/`$text` still open |
 | 9 | ~~[Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation)~~ | M | **DONE 2026-07-22** — named params for all values; statement caching still open |
 | 10 | ~~[Error normalisation](#10-normalise-errors-to-mongodb-shapes)~~ | S | **DONE 2026-07-25** — `MongoServerError` with `code: 11000`, dual-engine verified |
 | 11 | ~~[Collection naming](#11-fix-collection-naming-restrictions)~~ | S | **DONE 2026-07-25** — case-sensitive, quoted identifiers |
-| 12 | [Transactions](#12-transactions) | M | Correctness for multi-document writes (pragmas DONE) |
-| 13 | [Missing tutorial coverage](#13-close-the-tutorial-coverage-gaps) | S | Array-of-documents tutorial **DONE 2026-07-25**; bulkWrite one waits on item 15 |
-| 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix |
-| 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | `distinct`, `drop`, `bulkWrite`, … |
+| 12 | [Transactions](#12-transactions) | M | Pragmas **DONE 2026-07-25**; the `withTransaction` API is still open |
+| 13 | ~~[Tutorial coverage](#13-close-the-tutorial-coverage-gaps)~~ | S | **DONE 2026-07-25** except Bulk Write, which needs `bulkWrite()` (item 15) |
+| 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix, plus a Deno job |
+| 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | **`distinct()` and `drop()` DONE 2026-07-25**; `bulkWrite()` and friends still open |
 | 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common-shapes subset DONE 2026-07-25** — `$lookup` and the expression operators still open |
+| 17 | [Smaller items](#17-smaller-items-and-nice-to-haves) | S each | Benchmarks, `_id` types, depth limits, concurrency docs **DONE**; statement cache and TypeDoc open |
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
@@ -890,31 +925,73 @@ since WAL mode still blocks on a writer.~~ **Pragmas DONE 2026-07-25:**
 `busy_timeout` is set from the new `busyTimeoutMs` option (default 5000) alongside
 `journal_mode=WAL`. The transaction API itself is still open.
 
+**Three things established since this item was written** that whoever picks it
+up should know:
+
+- **`aggregate()` creates and drops a TEMP table** for a `$match` that follows a
+  `$group` (`Collection.matchBatch`). SQLite allows that inside a transaction,
+  but the create/drop is not rolled back the way a data change is, so the
+  cleanup must stay in its `finally`. Iterating a pipeline inside a transaction
+  is fine; just do not assume a rollback tidies up after it.
+- **The API cannot be a session object** the way MongoDB's is. `node:sqlite` is
+  synchronous, so there is no interleaving to coordinate — `withTransaction(fn)`
+  is the honest shape, and anything that hands the caller a token to pass around
+  would be pretending to a concurrency model that does not exist here.
+- **`insertMany` must stay outside it.** It is deliberately non-transactional to
+  match MongoDB's *ordered* insert, and several specs assert that documents
+  written before a duplicate-key failure stay written. Wrapping it would be a
+  silent behaviour change.
+
 ---
 
 ## 13. Close the tutorial coverage gaps
 
-**Size: S.** You worked through the MongoDB CRUD tutorials in order and stopped partway.
-Missing ones:
+**Size: S — DONE 2026-07-25 except the one blocked entry.** Everything below is
+closed but Bulk Write, which needs `bulkWrite()` from item 15.
+
+Two of the entries here turned out to be **already done and never struck
+through**, which is worth noting as a pattern: an item that records "blocked on
+X" does not un-block itself when X lands, so this list drifted out of date in
+the direction of looking like more work than it was. Re-read the blockers before
+estimating.
+
+Original list:
 
 - ~~**[Query an Array of Embedded Documents](https://www.mongodb.com/docs/manual/tutorial/query-array-of-documents/)**~~
   **DONE 2026-07-25** — [test/mdb-tutorials/query-array-of-documents.spec.ts](test/mdb-tutorials/query-array-of-documents.spec.ts).
   Writing an example against this tutorial is what found the two bugs below; the
   answer to "exactly how much works" had been: less than the docs implied.
-- **[Iterate a Cursor](https://www.mongodb.com/docs/manual/tutorial/iterate-a-cursor/)**
-  — async iteration was added but has no dedicated spec. Pairs naturally with item 1.
+- ~~**[Iterate a Cursor](https://www.mongodb.com/docs/manual/tutorial/iterate-a-cursor/)**~~
+  **DONE 2026-07-25** —
+  [test/mdb-tutorials/iterate-a-cursor.spec.ts](test/mdb-tutorials/iterate-a-cursor.spec.ts),
+  dual-engine. [test/cursor.spec.ts](test/cursor.spec.ts) remains the
+  single-engine half (statement lifetime, partial iteration).
+  **It found a divergence:** after `close()`, the MongoDB driver keeps draining
+  the batch it had already buffered client-side, so `next()` still returns a
+  document; this library streams straight off a SQLite statement, so closing
+  finalises it and `next()` is null at once. Neither is wrong and there is no
+  shared answer to assert, so the parity spec documents it and asserts only what
+  both agree on.
 - **[Bulk Write Operations](https://www.mongodb.com/docs/manual/core/bulk-write-operations/)**
   — needs `bulkWrite()` (item 15).
-- **Project Fields to Return** — item 7.
+- ~~**Project Fields to Return**~~ **ALREADY DONE** — verified 2026-07-25:
+  [test/mdb-tutorials/project-fields.spec.ts](test/mdb-tutorials/project-fields.spec.ts)
+  is dual-engine and covers the tutorial. Item 7 closed this and the entry here
+  was never struck through.
 
 Two small cleanups while in there:
 
-- [test/mdb-tutorials/query-null-fields.spec.ts](test/mdb-tutorials/query-null-fields.spec.ts)
-  has a copy-pasted `describe` title claiming it's the "Query an Array" tutorial. It
-  should point at
+- ~~[test/mdb-tutorials/query-null-fields.spec.ts](test/mdb-tutorials/query-null-fields.spec.ts)
+  has a copy-pasted `describe` title~~ **DONE 2026-07-25** — it now names
   [Query for Null or Missing Fields](https://www.mongodb.com/docs/manual/tutorial/query-for-null-fields/).
-- The five `TODO: Perform an Update Based on Embedded Document Fields` comments in the
-  operator spec are all waiting on item 4.
+- ~~**The five `TODO: Perform an Update Based on Embedded Document Fields`
+  comments**~~ **DONE 2026-07-25.** They wanted
+  `updateMany({ 'carrier.fee': { $gt: 2 } }, { $set: { price: 9.99 } })`, which
+  has worked since item 4's core landed. Written as ONE test rather than five
+  inline assertions, because they WRITE and the reference examples all target
+  `carrier.fee` — running them inline would have changed the documents the
+  surrounding `find()` assertions compare against. The remaining two TODOs in
+  that file want `$expr` (item 8).
 
 ---
 
@@ -962,14 +1039,30 @@ tag. Needs an `NPM_TOKEN` repository secret (or npm trusted publishing).
 
 ## 15. Remaining `Collection` / `Db` API
 
-**Size: M.** Methods MongoDB users will reach for that don't exist yet:
+**Size: M — `distinct()` and `drop()` DONE 2026-07-25**, dual-engine verified in
+[test/distinct-and-drop.spec.ts](test/distinct-and-drop.spec.ts).
 
-`distinct()` · `drop()` · `estimatedDocumentCount()` · `bulkWrite()` ·
-`db.listCollections()` · `db.dropDatabase()` · `insertMany({ ordered: false })` ·
-`countDocuments()` with `limit`/`skip`.
+Still open: `estimatedDocumentCount()` · `bulkWrite()` · `db.listCollections()` ·
+`db.dropDatabase()` · `insertMany({ ordered: false })` · `countDocuments()` with
+`limit`/`skip`.
 
-Most are small once items 1–7 are in. `distinct()` maps to
-`SELECT DISTINCT json_extract(...)`; `drop()` to `DROP TABLE`.
+**What building the first two taught:**
+
+- **`drop()` exposed a creation-semantics divergence.** Collections are created
+  EAGERLY here — `db.collection(name)` runs `CREATE TABLE IF NOT EXISTS` — and
+  lazily on MongoDB, on first write. So after a drop, asking this library for
+  the collection's indexes returns `['_id_']` while MongoDB raises "ns does not
+  exist". The parity test recreates by INSERTING, which is the one path both
+  engines agree on. `db.listCollections()` will run into the same thing: an
+  opened-but-never-written collection exists here and does not there.
+- **`distinct()` needed the array rule and the text-dedup trick**, both of which
+  were guessed wrong first. See the note added to
+  [CLAUDE.md](CLAUDE.md#distinct-and-drop).
+
+The rest are small. `estimatedDocumentCount()` is `SELECT COUNT(*)` with no
+filter; `db.dropDatabase()` is `DROP TABLE` per collection; `bulkWrite()` is the
+only one with real design in it, and it should wait for item 12 so an ordered
+batch can actually be atomic.
 
 ---
 
@@ -1024,18 +1117,41 @@ it differently.
   anything (it cannot see inside arrays); the union form only pays off when array
   rows are a minority or the scalar arm dominates. `$elemMatch` is the slowest
   operator measured (~99ms/20k: json_each + json_object per element per row).
-  Still open: run in CI to catch regressions (item 14 first).
-- **`_id` types.** Tests use numeric `_id`s and they work, but this isn't specified
-  anywhere. Decide what's supported, type it (item 5b), and document it.
+  ~~Still open: run in CI~~ **ALREADY DONE** — verified 2026-07-25: the `bench`
+  job in [ci.yml](.github/workflows/ci.yml) has been running `npm run bench`
+  since item 14 landed. No thresholds, deliberately: shared runners are far too
+  noisy to assert timings on, so it proves the suite still runs, not that it got
+  no slower.
+- ~~**`_id` types.**~~ **DONE 2026-07-25** —
+  [test/id-types.spec.ts](test/id-types.spec.ts) is the specification, and the
+  README has an `_id` values section. Supported: string, number, boolean, Date,
+  document. Rejected: an array (MongoDB forbids it too, but here the implicit
+  array-element rule additionally makes such a document ambiguous to address).
+  `undefined` AND `null` both mean "generate one" — checked against the driver,
+  which does the same, so `_id: null` does not store null.
+- ~~**Document size / depth limits.**~~ **DONE 2026-07-25.** Nesting is capped at
+  `MAX_DOCUMENT_DEPTH` (1000) in [src/ejson.ts](src/ejson.ts), mirroring
+  SQLite's `SQLITE_MAX_JSON_DEPTH`; without the guard the only symptom was
+  `json()` reporting a bare "malformed JSON". The number is MEASURED and
+  [test/ejson.spec.ts](test/ejson.spec.ts) pins BOTH edges, so it cannot drift
+  in either direction. There is no size limit worth enforcing (40MB documents
+  round-trip; SQLite's own is ~1GB) — **which is itself a divergence**: a
+  document over MongoDB's 16MB cap is accepted here and would be refused by a
+  real server. Documented in the README rather than enforced, because enforcing
+  it would reject documents this library can genuinely store.
 - **Statement cache.** Once item 9 lands, cache prepared statements per collection.
-- **Document size / depth limits.** SQLite has its own limits; find out what they are
-  and document them rather than letting users discover them.
+  **Not the S it looks like:** `find()` hands its statement to `iterate()` and
+  the cursor owns it until it is exhausted or closed, so a naive cache would let
+  two live cursors share one statement and interleave their rows. Any cache has
+  to key on "not currently iterating", which is a lifetime problem, not a lookup
+  problem. Size it M and do it after item 12.
 - **API documentation.** TypeDoc from the source, published to GitHub Pages.
 - ~~**Remove `backup/`.**~~ **DONE** — the directory is gone; the last stale
   references to it (in `.oxlintrc.json` and `CLAUDE.md`) were removed 2026-07-25.
-- **Concurrency story.** `node:sqlite` is synchronous, so the async API never yields
-  mid-operation. Document what that means for a server using this under load, and
-  whether a file-backed database is safe across multiple processes (WAL + `busy_timeout`).
+- ~~**Concurrency story.**~~ **ALREADY DONE** — verified 2026-07-25: the README's
+  "Concurrency" section covers all three questions (the async API never yields
+  mid-operation, do not write to a collection while iterating a cursor over it,
+  and file-backed databases across processes under WAL + `busyTimeoutMs`).
 
 ---
 

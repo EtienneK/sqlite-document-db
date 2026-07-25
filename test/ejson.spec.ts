@@ -1,5 +1,17 @@
-import { parse, stringify } from '../src/ejson.js'
+import { MAX_DOCUMENT_DEPTH, parse, stringify } from '../src/ejson.js'
 import { Db } from '../src/index.js'
+
+/** A chain of `levels` nested objects, as the value of one field. */
+function chain (levels: number, leaf?: unknown): any {
+  const root: any = {}
+  let node = root
+  for (let i = 0; i < levels; i++) {
+    node.a = {}
+    node = node.a
+  }
+  if (leaf !== undefined) node.d = leaf
+  return root
+}
 
 describe('EJSON storage encoding (DR-1)', () => {
   describe('round-trip', () => {
@@ -76,6 +88,49 @@ describe('EJSON storage encoding (DR-1)', () => {
     it('should allow the same object to appear twice non-circularly', () => {
       const shared = { v: 1 }
       expect(parse(stringify({ a: shared, b: shared }))).toStrictEqual({ a: { v: 1 }, b: { v: 1 } })
+    })
+  })
+
+  /**
+   * The nesting limit, pinned at BOTH edges.
+   *
+   * The upper edge is the one that matters: if MAX_DOCUMENT_DEPTH ever drifts
+   * above what SQLite accepts, the guard stops firing and users get "malformed
+   * JSON" again; if it drifts below, the library rejects documents it could
+   * perfectly well store. Only a test on each side catches both directions.
+   */
+  describe('nesting depth', () => {
+    // { deep: <root> } puts the chain's deepest object at 1 + 1 + levels.
+    const deepest = MAX_DOCUMENT_DEPTH - 2
+
+    it('should store a document at exactly the limit', () => {
+      expect(() => stringify({ deep: chain(deepest) })).not.toThrow()
+    })
+
+    it('should reject one level deeper, naming the limit and the path', () => {
+      expect(() => stringify({ deep: chain(deepest + 1) }))
+        .toThrow(new RegExp(`nests deeper than ${MAX_DOCUMENT_DEPTH} levels \\(at \\$\\.deep`))
+    })
+
+    it('should count a Date as a level, because it is stored as an object', () => {
+      expect(() => stringify({ deep: chain(deepest - 1, new Date(0)) })).not.toThrow()
+      expect(() => stringify({ deep: chain(deepest, new Date(0)) })).toThrow(/nests deeper/)
+    })
+
+    it('should count array nesting too', () => {
+      let nested: any = []
+      for (let i = 0; i < MAX_DOCUMENT_DEPTH; i++) nested = [nested]
+      expect(() => stringify({ deep: nested })).toThrow(/nests deeper/)
+    })
+
+    it('should agree with what SQLite actually accepts', async () => {
+      // The guard is only worth having if it fires exactly where SQLite would.
+      const db = await Db.fromUrl(':memory:')
+      const col = db.collection('t')
+      await col.insertOne({ _id: 'ok', deep: chain(deepest) })
+      expect(await col.countDocuments({ _id: 'ok' })).toStrictEqual(1)
+      await expect(col.insertOne({ _id: 'too-deep', deep: chain(deepest + 1) })).rejects.toThrow(/nests deeper/)
+      await db.close()
     })
   })
 

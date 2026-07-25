@@ -32,9 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sorting a field that holds an array, and an aggregation path that runs
   through an array. Intended for suites that test against this library rather
   than a real `mongod`.
+- **`distinct()`**, which follows the implicit-array rule (an array field
+  contributes its elements) and returns values in BSON type order.
+- **`drop()`**, which removes the collection with its indexes and evicts the
+  cached `Collection` so the name is usable again immediately.
+- **A clear error when a document nests too deeply.** SQLite caps JSON nesting
+  at 1000 levels and reports only "malformed JSON"; the storage encoder now
+  checks the limit itself and names the offending path.
 - Types for all of the above: the array operators are restricted to array paths
   and their element type, `$mul` to numeric paths, and `aggregate<TResult>()`
   threads the result shape through.
+
+### Fixed
+
+- `distinct` and `drop` were listed as missing in the README; they now exist.
+- Two backlog entries claimed work that was already done (the "Project Fields to
+  Return" tutorial spec, and benchmarks in CI).
 
 ### Changed
 

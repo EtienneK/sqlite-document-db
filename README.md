@@ -193,6 +193,27 @@ for await (const item of db.collection('items').find({ status: 'A' })) {
 }
 ```
 
+One divergence worth knowing: after `cursor.close()`, this library yields nothing
+more, because the cursor streams straight off a SQLite statement and closing
+finalises it. The MongoDB driver has already buffered a batch client-side and
+keeps draining it, so `next()` there can still return a document. If you close
+a cursor early, do not rely on either behaviour.
+
+### Distinct values, and dropping a collection
+
+```javascript
+await db.collection('items').distinct('status')                  // ['A', 'D', 'P']
+await db.collection('items').distinct('status', { qty: { $gt: 50 } })
+await db.collection('items').drop()
+```
+
+`distinct` follows the same implicit-array rule queries do: an **array field
+contributes its elements**, so `distinct('tags')` over `{ tags: ['a','b'] }`
+yields `'a'` and `'b'`, not the array. Values come back in MongoDB's BSON type
+order (`null` < numbers < strings < objects < arrays < booleans < dates); the
+server does not promise an order at all, so this one is stricter than MongoDB
+rather than different from it.
+
 ### Project fields to return
 
 ```javascript
@@ -486,10 +507,11 @@ Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
 `$project` `$addFields`/`$set` `$unwind`. Accumulators: `$sum` `$avg` `$min`
 `$max` `$first` `$last` `$push` `$addToSet` `$count`.
 
-Methods: `find()` `findOne()` `countDocuments()` `aggregate()` `insertOne()`
-`insertMany()` `updateOne()` `updateMany()` `deleteOne()` `deleteMany()`
-`replaceOne()` `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()`
-`createIndex()` `dropIndex()` `indexes()` `listIndexes()`.
+Methods: `find()` `findOne()` `countDocuments()` `distinct()` `aggregate()`
+`insertOne()` `insertMany()` `updateOne()` `updateMany()` `deleteOne()`
+`deleteMany()` `replaceOne()` `findOneAndUpdate()` `findOneAndReplace()`
+`findOneAndDelete()` `createIndex()` `dropIndex()` `indexes()` `listIndexes()`
+`drop()`.
 
 Result objects match the official driver's shapes (`acknowledged`,
 `matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes
@@ -518,6 +540,32 @@ One field shape is reserved by that format: an object that is exactly
 `{ "$date": "<string>" }` is indistinguishable from a stored `Date`, so it is
 rejected on write too. Objects that merely *contain* a `$date` key
 (`{ $date: '…', tz: 'UTC' }`) store normally.
+
+### `_id` values
+
+Any storable value works as an `_id`: **string, number, boolean, `Date`, or a
+document**. Omit it (or pass `undefined`/`null`) and a MongoDB-compatible
+ObjectId hex string is generated. Ids are compared by value *and* type, so `42`
+and `'42'` are two different documents, and `_id` is immutable once written.
+
+An **array `_id` is rejected**. MongoDB forbids it too, but here it is worse
+than invalid: the implicit array-element rule would let `{ _id: [...] }` match a
+*different* document that merely contains the value, so `deleteOne` could remove
+the wrong row. Pinned in [test/id-types.spec.ts](test/id-types.spec.ts).
+
+### Document limits
+
+Measured against the SQLite `node:sqlite` bundles, and pinned by tests rather
+than quoted from documentation:
+
+| | Limit |
+| --- | --- |
+| Nesting depth | **1000 levels**, counting the document itself as one. A `Date` costs a level (it is stored as `{"$date": …}`). Exceeding it is a clear error naming the path, not SQLite's bare "malformed JSON". |
+| Document size | No practical limit — SQLite's is ~1GB, and 40MB documents store and read back fine. **There is no 16MB cap**, so a document that a real MongoDB would reject may be stored here. |
+| Array length | No practical limit; 100k elements is fine. |
+
+The size difference is the one to watch if you use this as a MongoDB test
+double: an oversized document passes here and fails on the server.
 
 ### Concurrency
 
@@ -550,7 +598,12 @@ how each piece would be implemented. The headlines:
 **Updating**
 
 - `$position` inside `$push`, and the positional operators `$` / `$[]` / `$[<id>]`
-- Bulk writes (`bulkWrite`) and `distinct`
+- Bulk writes (`bulkWrite`)
+
+**Collection / Db API**
+
+- `estimatedDocumentCount()`, `db.listCollections()`, `db.dropDatabase()`,
+  `insertMany({ ordered: false })`, `countDocuments()` with `limit`/`skip`
 
 **Aggregation** — the pipeline is a common-shapes subset, not the whole thing:
 

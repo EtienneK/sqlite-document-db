@@ -245,6 +245,29 @@ Each test asserts BOTH halves: the lenient default still behaves as documented,
 AND strict rejects. **When you find a new divergence, add a check here too** —
 the mode's value is that the known list is enforced, not just written down.
 
+### distinct() and drop()
+
+**Non-obvious detail — `distinct()` is not a `SELECT DISTINCT`.** An array field
+contributes its ELEMENTS (the same implicit-array rule queries follow), so it
+compiles to two statements: one over non-array values, and one over
+`json_each` of the array-valued rows. The filter is applied inside a DERIVED
+TABLE in the element arm, so `data` and `rowid` never have to resolve across
+the `json_each` join.
+
+**Non-obvious detail — values are deduped as TEXT, then decoded.** Every value
+comes back through `asJsonText()` as a JSON fragment; deduplication happens on
+that string and only the survivors go through `parseDocument`. Deduping decoded
+values would treat two equal `Date` objects as distinct. The same `CASE` is
+needed for booleans: `json_quote` renders JSON `true` as the integer 1.
+
+**`drop()` must evict the `Db` cache.** `Collection`'s constructor runs
+`CREATE TABLE IF NOT EXISTS`, so a cached instance whose table was dropped would
+keep being handed out and every call on it would fail with "no such table". The
+`onDrop` callback passed in by `Db.collection()` is what removes it. Related
+divergence: collections are created EAGERLY here (on `db.collection(name)`) and
+lazily on MongoDB (on first write), which is why the drop parity test recreates
+by inserting rather than by asking for indexes.
+
 ### SQL injection posture
 
 User-supplied **values** are bound as named parameters (`bindValue()` →
@@ -376,6 +399,13 @@ Mongodb variant flaky for reasons that are nobody's bug.
   matches the MongoDB driver, and several tests assert on the mutated objects.
 - `insertMany` is not transactional, matching MongoDB's *ordered* insert: on a
   duplicate `_id` the documents already written stay written.
+- **Document nesting is capped at `MAX_DOCUMENT_DEPTH` (1000)** in
+  [src/ejson.ts](src/ejson.ts), which mirrors SQLite's `SQLITE_MAX_JSON_DEPTH`.
+  Without the guard the only symptom is `json()` failing with a bare "malformed
+  JSON". The number is MEASURED, and [test/ejson.spec.ts](test/ejson.spec.ts)
+  pins both edges — one level under must store, one level over must throw — so
+  it cannot drift in either direction. There is no document SIZE limit, which
+  means a document a real MongoDB would refuse (>16MB) is accepted here.
 - **Storage is EJSON-for-Dates, not plain JSON** ([src/ejson.ts](src/ejson.ts), per
   DR-1). Dates are stored as `{"$date": "<ISO>"}` and revived on read; every other
   non-JSON type is rejected at write time with the offending path — **including a

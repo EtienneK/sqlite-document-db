@@ -60,7 +60,6 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
 
         // $gt- Examples from https://www.mongodb.com/docs/manual/reference/operator/query/gt/
         expect(await col.find({ quantity: { $gt: 20 } }).toArray()).toStrictEqual([i[0], i[1]])
-        // TODO: Perform an Update Based on Embedded Document Fields
         // Other
         expect(await col.find({ 'carrier.fee': { $gt: 3 } }).toArray()).toStrictEqual([i[1]])
         expect(await col.find({ 'carrier.fee': { $gt: 4 } }).toArray()).toStrictEqual([])
@@ -69,7 +68,6 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
 
         // $gte- Examples from https://www.mongodb.com/docs/manual/reference/operator/query/gte/
         expect(await col.find({ quantity: { $gte: 20 } }).toArray()).toStrictEqual([i[0], i[1]])
-        // TODO: Perform an Update Based on Embedded Document Fields
         // Other
         expect(await col.find({ 'carrier.fee': { $gte: 3 } }).toArray()).toStrictEqual([i[0], i[1]])
         expect(await col.find({ 'carrier.fee': { $gte: 5 } }).toArray()).toStrictEqual([])
@@ -78,7 +76,6 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
 
         // $lt - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/lt/
         expect(await col.find({ quantity: { $lt: 20 } }).toArray()).toStrictEqual([i[2]])
-        // TODO: Perform an Update Based on Embedded Document Fields
         // Other
         expect(await col.find({ 'carrier.fee': { $lt: 3 } }).toArray()).toStrictEqual([i[2]])
         expect(await col.find({ 'carrier.fee': { $lt: 1 } }).toArray()).toStrictEqual([])
@@ -87,7 +84,6 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
 
         // $lte - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/lte/
         expect(await col.find({ quantity: { $lte: 20 } }).toArray()).toStrictEqual([i[2]])
-        // TODO: Perform an Update Based on Embedded Document Fields
         // Other
         expect(await col.find({ 'carrier.fee': { $lte: 3 } }).toArray()).toStrictEqual([i[0], i[2]])
         expect(await col.find({ 'carrier.fee': { $lte: 0 } }).toArray()).toStrictEqual([])
@@ -96,12 +92,60 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
 
         // $ne - Examples from https://www.mongodb.com/docs/manual/reference/operator/query/ne/
         expect(await col.find({ quantity: { $ne: 20 } }).toArray()).toStrictEqual([i[0], i[1], i[2]])
-        // TODO: Perform an Update Based on Embedded Document Fields
         // Other
         expect(await col.find({ 'carrier.fee': { $ne: 3 } }).toArray()).toStrictEqual([i[1], i[2]])
         expect(await col.find({ real: { $ne: null } }).toArray()).toStrictEqual([i[0], i[2]])
         expect(await col.find({ real: { $ne: 4.123 } }).toArray()).toStrictEqual([i[1], i[2]])
         expect(await col.find({ item: { $ne: 'nuts' } }).toArray()).toStrictEqual([i[1], i[2]])
+      })
+
+      /**
+       * The "Perform an Update Based on Embedded Document Fields" block that
+       * appears under each comparison operator in the MongoDB reference.
+       *
+       * A separate test rather than assertions inside the one above: these
+       * WRITE, and the reference examples all target `carrier.fee`, so running
+       * them inline would change the documents the remaining find() assertions
+       * compare against.
+       */
+      it('should update based on embedded document fields, per each operator reference', async () => {
+        const seed = [
+          { _id: 1 as any, item: 'nuts', carrier: { name: 'Shipit', fee: 3 }, price: 1 },
+          { _id: 2 as any, item: 'bolts', carrier: { name: 'Shipit', fee: 4 }, price: 1 },
+          { _id: 3 as any, item: 'washers', carrier: { name: 'Shipit', fee: 1 }, price: 1 }
+        ]
+        const col = db().collection('i')
+        const priced = async (): Promise<any[]> =>
+          (await col.find({ price: 9.99 }).toArray()).map((d: any) => d._id)
+        const reset = async (): Promise<void> => { await col.updateMany({}, { $set: { price: 1 } }) }
+
+        await col.insertMany(seed)
+
+        // $gt - updateOne touches only the FIRST match in natural order.
+        expect((await col.updateOne({ 'carrier.fee': { $gt: 2 } }, { $set: { price: 9.99 } })).modifiedCount)
+          .toStrictEqual(1)
+        expect(await priced()).toStrictEqual([1])
+        await reset()
+
+        // $gte
+        await col.updateMany({ 'carrier.fee': { $gte: 3 } }, { $set: { price: 9.99 } })
+        expect(await priced()).toStrictEqual([1, 2])
+        await reset()
+
+        // $lt
+        await col.updateMany({ 'carrier.fee': { $lt: 4 } }, { $set: { price: 9.99 } })
+        expect(await priced()).toStrictEqual([1, 3])
+        await reset()
+
+        // $lte
+        await col.updateMany({ 'carrier.fee': { $lte: 1 } }, { $set: { price: 9.99 } })
+        expect(await priced()).toStrictEqual([3])
+        await reset()
+
+        // $ne - and note it also matches documents MISSING the path.
+        await col.insertOne({ _id: 4 as any, item: 'screws', price: 1 } as any)
+        await col.updateMany({ 'carrier.fee': { $ne: 3 } }, { $set: { price: 9.99 } })
+        expect(await priced()).toStrictEqual([2, 3, 4])
       })
 
       it('$in; $nin', async () => {

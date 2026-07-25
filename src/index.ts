@@ -7,6 +7,7 @@ import { toMongoError } from './errors.js'
 import type { Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
 import { compileStages, splitPipeline } from './aggregate.js'
+import { compareBson } from './bson-order.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 import { quoteIdentifier, toJson1PathString, toSortSql, toSql, type CompileOptions, type SqlParams } from './query/query.js'
 import { buildUpdateExpression, buildUpsertDocument, collectEqualities, type UpdateExpression } from './update.js'
@@ -173,6 +174,17 @@ function assertSkip (count: number): void {
 }
 
 /**
+ * One stored value as a JSON TEXT fragment, so a single decoder handles every
+ * type distinct() can return. The CASE is what keeps booleans and nulls from
+ * arriving as SQLite's 1/0/NULL - `json_quote` renders JSON `true` as the
+ * integer 1, which would come back from distinct() as the number.
+ */
+function asJsonText (typeExpr: string, valueExpr: string): string {
+  return `CASE ${typeExpr} WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' WHEN 'null' THEN 'null' ` +
+    `ELSE json_quote(${valueExpr}) END`
+}
+
+/**
  * Makes each `$match`-after-`$group` temp table uniquely named, so a pipeline
  * iterated while another one is mid-flight cannot drop the other's table.
  */
@@ -230,12 +242,15 @@ export class Collection<TSchema extends Document = Document> {
   private readonly table: string
   /** What every filter compiled against this collection is compiled with. */
   private readonly compileOptions: CompileOptions
+  /** Evicts this collection from its `Db`'s cache. See drop(). */
+  private readonly onDrop: () => void
 
-  constructor (name: string, db: DatabaseSync, dbOptions: DbOptions) {
+  constructor (name: string, db: DatabaseSync, dbOptions: DbOptions, onDrop: () => void = () => {}) {
     assertValidCollectionName(name)
 
     this.db = db
     this.dbOptions = dbOptions
+    this.onDrop = onDrop
     this.collectionName = name
     this.name = tableNameFor(name)
     this.table = quoteIdentifier(this.name)
@@ -669,6 +684,95 @@ export class Collection<TSchema extends Document = Document> {
     return { toArray: async () => await this.indexes() }
   }
 
+  /**
+   * The distinct values stored at `field` across the documents matching
+   * `filter`, in MongoDB's BSON sort order.
+   *
+   * Two rules make this more than a `SELECT DISTINCT`:
+   *
+   * - **An array field contributes its ELEMENTS, not the array.** `distinct`
+   *   follows the same implicit-array rule the query compiler does, so
+   *   `distinct('tags')` over `{ tags: ['a','b'] }` yields `'a'` and `'b'`.
+   *   That is why there are two arms below.
+   * - **Values are compared as stored, then decoded.** Deduplication happens on
+   *   the JSON text (where two equal Dates are one value, and `5` and `'5'` are
+   *   two), and only the survivors are revived - comparing decoded `Date`
+   *   objects would treat every one of them as distinct.
+   *
+   * Known divergence: a dotted path that crosses an array (`'instock.qty'`
+   * where `instock` is an array) yields nothing here, where MongoDB descends
+   * into it. `strict: true` rejects that rather than answering it.
+   */
+  async distinct (field: string, filter: Filter<TSchema> = {}): Promise<any[]> {
+    if (typeof field !== 'string' || field === '') throw Error('distinct requires a non-empty field name')
+    this.assertDistinctPath(field)
+
+    const path = toJson1PathString([field])
+    const compiled = toSql('data', filter, this.compileOptions)
+
+    const scalars = this.prepare(
+      `SELECT DISTINCT ${asJsonText(`json_type(data, ${path})`, `json_extract(data, ${path})`)} AS v ` +
+      `FROM ${this.table} WHERE (${compiled.sql}) ` +
+      `AND json_type(data, ${path}) IS NOT NULL AND json_type(data, ${path}) != 'array'`
+    ).all(compiled.params) as Array<{ v: string }>
+
+    // The filter is applied in a derived table so the element arm never has to
+    // resolve `data` or `rowid` across the json_each join.
+    const elements = this.prepare(
+      `SELECT DISTINCT ${asJsonText('json_each.type', 'json_each.value')} AS v ` +
+      `FROM (SELECT data FROM ${this.table} WHERE (${compiled.sql}) AND json_type(data, ${path}) = 'array') AS src, ` +
+      `json_each(src.data, ${path})`
+    ).all(compiled.params) as Array<{ v: string }>
+
+    const seen = new Set<string>()
+    const values: unknown[] = []
+    for (const row of [...scalars, ...elements]) {
+      if (seen.has(row.v)) continue
+      seen.add(row.v)
+      values.push(parseDocument(row.v))
+    }
+    return values.toSorted(compareBson)
+  }
+
+  /**
+   * Under `strict`, rejects a `distinct` whose path crosses an array.
+   *
+   * MongoDB descends into an array at every level of a dotted path, and
+   * `json_extract` does not, so `distinct('instock.qty')` over an array of
+   * embedded documents finds nothing here. Not statically knowable - like the
+   * sort check, this asks the data.
+   */
+  private assertDistinctPath (field: string): void {
+    if (this.dbOptions.strict !== true || !field.includes('.')) return
+    const segments = field.split('.')
+    for (let i = 1; i < segments.length; i++) {
+      const prefix = segments.slice(0, i).join('.')
+      const found = this.prepare(
+        `SELECT 1 AS found FROM ${this.table} WHERE json_type(data, ${toJson1PathString([prefix])}) = 'array' LIMIT 1`
+      ).get()
+      if (found !== undefined) {
+        throw Error(
+          `strict: cannot take distinct '${field}' - some documents hold an ARRAY at '${prefix}', ` +
+          'and MongoDB would descend into it where this library reads the path as missing'
+        )
+      }
+    }
+  }
+
+  /**
+   * Drops the collection, and its indexes with it.
+   *
+   * The cached `Collection` is evicted from the `Db` that made it (`onDrop`),
+   * because this instance is bound to a table that no longer exists - without
+   * that, `db.collection(name)` would hand back the same dead object and every
+   * call on it would fail with "no such table" rather than recreating it.
+   */
+  async drop (): Promise<boolean> {
+    this.exec(`DROP TABLE IF EXISTS ${this.table}`)
+    this.onDrop()
+    return true
+  }
+
   async countDocuments (filter?: Filter<TSchema>): Promise<number> {
     const compiled = toSql('data', filter ?? {}, this.compileOptions)
     const sql = `SELECT COUNT(*) AS count FROM ${this.table} WHERE (${compiled.sql})`
@@ -1039,7 +1143,7 @@ export class Db {
     // at different types get whatever is actually stored.
     let collection = this.collections.get(name)
     if (collection === undefined) {
-      collection = new Collection(name, this.db, this.options)
+      collection = new Collection(name, this.db, this.options, () => this.collections.delete(name))
       this.collections.set(name, collection)
     }
     return collection as Collection<TSchema>
