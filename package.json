@@ -1,6 +1,6 @@
 {
   "name": "sqlite-document-db",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Use SQLite as a JSON document database, with an API based on MongoDB's",
   "repository": {
     "type": "git",
