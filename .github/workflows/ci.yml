@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the in-flight run redundant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keeps the downloaded mongod inside the workspace so it can be cached.
+  MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.mongodb-binaries
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 22.13.0 is the floor declared in package.json's engines field - it is
+        # the first release with DatabaseSync.prototype.function ($regex) and
+        # StatementSync.prototype.iterate (the cursor). The newer entries are
+        # not redundant: node:sqlite bundles its own SQLite, and its query
+        # planner decides whether the expression indexes this library creates
+        # are actually used. test/query-plan.spec.ts is the guard, and it needs
+        # to run on every SQLite version users might have.
+        node: ['22.13.0', '24', '26']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # The mongod binary is ~100MB and the suite boots a real one; downloading
+      # it on every job would dominate the run.
+      - name: Cache the mongod binary
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MONGOMS_DOWNLOAD_DIR }}
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: mongodb-binaries-${{ runner.os }}-
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      # Every assertion runs twice: once against this library and once against
+      # a real MongoDB booted in-process. See README, "Development".
+      - run: npm test
+
+  bench:
+    name: benchmarks (smoke)
+    runs-on: ubuntu-latest
+    env:
+      # The benchmarks measure this library alone - no mongod is ever started,
+      # so don't spend a 100MB download fetching one during install.
+      MONGOMS_DISABLE_POSTINSTALL: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+
+      - run: npm ci
+
+      # No thresholds - shared runners are far too noisy to assert timings on.
+      # This only proves the benchmark suite still runs, which is a real check:
+      # it exercises 20k-document collections and every indexed query shape.
+      - run: npm run bench

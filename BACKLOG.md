@@ -191,7 +191,7 @@ replacement".
 | 11 | ~~[Collection naming](#11-fix-collection-naming-restrictions)~~ | S | **DONE 2026-07-25** — case-sensitive, quoted identifiers |
 | 12 | [Transactions](#12-transactions) | M | Correctness for multi-document writes (pragmas DONE) |
 | 13 | [Missing tutorial coverage](#13-close-the-tutorial-coverage-gaps) | S | Finishes the job you started |
-| 14 | [CI](#14-continuous-integration) | S | Nothing currently runs the suite |
+| 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix |
 | 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | `distinct`, `drop`, `bulkWrite`, … |
 | 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | Big; decide whether it's in scope at all |
 
@@ -806,13 +806,30 @@ Two small cleanups while in there:
 
 ## 14. Continuous integration
 
-**Size: S.** Nothing currently runs the suite automatically.
+**Size: S — DONE 2026-07-25.** [.github/workflows/ci.yml](.github/workflows/ci.yml)
+runs lint, typecheck, build and test on push, PR and manual dispatch.
 
-GitHub Actions running `npm run lint`, `npm run typecheck`, `npm run build` and
-`npm test` on Node 22 and 24, on Linux and Windows. The suite is ~4s now, so this is
-cheap. Cache the `mongodb-memory-server` binary between runs.
+The matrix is **{ubuntu, windows} × Node {22.13.0, 24, 26}**. The node axis is the
+load-bearing one, and 22.13.0 is there on purpose: it is the floor `engines`
+declares, so CI is what actually verifies that claim. The newer entries are not
+redundant either — `node:sqlite` bundles its own SQLite, and its query planner
+decides whether this library's expression indexes get used, which is precisely
+what [test/query-plan.spec.ts](test/query-plan.spec.ts) asserts. (That test was
+found failing on Node 26 during the 2026-07-25 review; a single-version CI would
+not have caught it.)
 
-Follow-ups: a `CHANGELOG.md` (2.0.0 is a breaking release — ESM-only, Node ≥ 22.5,
+The mongod binary is cached via `MONGOMS_DOWNLOAD_DIR` pointed inside the
+workspace. Verified against the resolver rather than assumed: `DOWNLOAD_DIR` is
+probed before the home and module caches, and wins as the download destination
+when nothing is found. The cache key hashes `package-lock.json`, which pins the
+`mongodb-memory-server` version that in turn selects the mongod version.
+
+A second job runs `npm run bench` with **no thresholds** — shared runners are far
+too noisy to assert timings on. It is a smoke test: the benchmarks build 20k-document
+collections and exercise every indexed query shape, so "it still runs" is worth
+knowing. It sets `MONGOMS_DISABLE_POSTINSTALL` since it never starts a mongod.
+
+Follow-ups: a `CHANGELOG.md` (2.0.0 is a breaking release — ESM-only, Node ≥ 22.13,
 `bson-objectid` dropped) and a publish workflow.
 
 ---
@@ -864,9 +881,8 @@ people from filing issues about it. The Postgres project doesn't do aggregation 
 - **Document size / depth limits.** SQLite has its own limits; find out what they are
   and document them rather than letting users discover them.
 - **API documentation.** TypeDoc from the source, published to GitHub Pages.
-- **Remove `backup/`.** Dead code from the original implementation, kept in git
-  history. `git rm -r backup/` — this was attempted during the 2026 modernization but
-  blocked by a tooling permission.
+- ~~**Remove `backup/`.**~~ **DONE** — the directory is gone; the last stale
+  references to it (in `.oxlintrc.json` and `CLAUDE.md`) were removed 2026-07-25.
 - **Concurrency story.** `node:sqlite` is synchronous, so the async API never yields
   mid-operation. Document what that means for a server using this under load, and
   whether a file-backed database is safe across multiple processes (WAL + `busy_timeout`).

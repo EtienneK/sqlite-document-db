@@ -16,6 +16,13 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 | `npm run lint` | oxlint |
 | `npm run typecheck` | `tsc` over `src` **and** `test` |
 | `npm run build` | Emits `dist/` from `src` only (`tsconfig.build.json`) |
+| `npm run bench` | Benchmarks over 20k docs; no mongod, own vitest config |
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck,
+build and test on
+{ubuntu, windows} × Node {22.13.0, 24, 26}. The Node axis matters more than it
+looks: `node:sqlite` bundles its own SQLite, so the query planner — and therefore
+[test/query-plan.spec.ts](test/query-plan.spec.ts) — differs per Node version.
 
 ## Architecture
 
@@ -116,10 +123,10 @@ Named, not positional, because fragments are reused — the same token appears i
 both arms of the implicit-array union and twice in `SET x WHERE data != x`.
 **If you add an operator, route every user-supplied value through
 `bindValue()`** — never interpolate. Field **paths** stay string literals
-through `quote()`/`toJson1PathString()` on purpose: SQLite only matches an
+through `quoteLiteral()`/`toJson1PathString()` on purpose: SQLite only matches an
 expression index whose indexed expression is textually identical, so a bound
 `json_extract(data, :path)` would never use an index. Identifiers go through
-`quote2()`; collection names are regex-validated. Booleans bind as 1/0
+`quoteIdentifier()`; collection names are additionally validated. Booleans bind as 1/0
 (SQLite cannot bind a bool); update values always go through `json(:u)` with
 the storage encoder so `$set: { x: true }` stores `true`, not `1`.
 Adversarial-value coverage: [test/injection.spec.ts](test/injection.spec.ts).
@@ -224,5 +231,3 @@ These are genuinely unimplemented features, not flaky tests.
   makes `$gt`/`$lt` work); `$in`/`$nin` with a Date rewrite to `$or`/`$nor` of
   equalities; and any future index over a date field must target the same `.$date`
   sub-path or it won't match.
-- `backup/` holds an older abandoned implementation. It is excluded from the
-  build, typecheck and lint. Don't treat it as live code.
