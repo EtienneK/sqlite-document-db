@@ -106,12 +106,15 @@ used to become an equality match against that object and return nothing). If you
 add an operator, add it to `OPS`, and add it to `TOP_LEVEL_OPS_KEYS` only if
 MongoDB accepts it as a filter-document key.
 
-**Non-obvious detail — `mdb_raise`.** `$inc` guards its target's type inside the
-UPDATE and calls this registered SQL function on the failing branch, because
-SQLite has no `RAISE` outside triggers. It is registered **without**
-`deterministic: true` on purpose: its argument is a constant, and SQLite hoists
-constant deterministic calls out of the row loop, which would make every update
-throw.
+**Non-obvious detail — validation before writing, not during.** `$inc` rejects
+non-numeric targets with a SELECT that runs *before* the UPDATE
+(`Collection.assertIncApplies`), not with a guard inside the UPDATE itself.
+The obvious alternative — a `CASE` calling a registered SQL function that
+throws — is **not portable**: on Node 22.13 (the `engines` floor) an exception
+thrown inside a `db.function()` callback is swallowed and the call yields NULL,
+so `json_set` wrote null over the value, causing the exact data loss the guard
+existed to prevent. Node 26 propagates it. Don't reintroduce that pattern, and
+don't assume a JS callback can fail a statement.
 
 ### SQL injection posture
 

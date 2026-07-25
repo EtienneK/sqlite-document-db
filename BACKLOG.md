@@ -218,10 +218,10 @@ here because several are the kind of thing that gets reintroduced by a plausible
   `{ $unset: { _id: '' } }` left a document with no id, unaddressable and
   invisible to the unique index (SQLite permits many NULLs).
 - `$inc` on a non-numeric field wrote a number over it — SQLite evaluates
-  `'hello' + 1` as `1`. It now raises, via an `mdb_raise()` SQL function
-  registered on the connection (SQLite has no `RAISE` outside triggers). It is
-  deliberately **not** marked deterministic: SQLite hoists constant deterministic
-  calls out of the row loop, which would fire it on every update.
+  `'hello' + 1` as `1`. It is rejected now, by a SELECT that runs *before* the
+  UPDATE. (The first attempt guarded inside the UPDATE with a SQL function that
+  threw; CI's oldest-Node job showed that does not work — see
+  [item 14](#14-continuous-integration).)
 - Operators conflicting on one path (`{ $set: { qty: 1 }, $inc: { qty: 1 } }`)
   silently resolved by the compiler's fixed operator order — `$inc` reads the
   original column, so the answer depended on an implementation detail. Rejected

@@ -155,13 +155,36 @@ function ensureParents (expr: string, field: string): string {
   return expr
 }
 
+interface UpdateExpression {
+  /** SQL computing the row's new `data` value. */
+  sql: string
+  params: SqlParams
+  /** The fields `$inc` targets, in the order incConflict indexes them. */
+  incFields: string[]
+  /**
+   * SQL yielding the INDEX into `incFields` of the first field this row holds
+   * a non-numeric value at, or NULL when `$inc` can apply. Callers must run it
+   * BEFORE the update (see Collection.assertIncApplies).
+   *
+   * Indexes rather than names so no user-supplied string is interpolated into
+   * SQL; the caller maps back through `incFields`.
+   */
+  incConflict?: string
+}
+
+/** True for a row whose `field` exists but is not a number - $inc's error case. */
+function nonNumericAt (field: string): string {
+  const path = toJson1PathString([field])
+  return `(json_type(data, ${path}) IS NOT NULL AND json_type(data, ${path}) NOT IN ('integer','real'))`
+}
+
 /**
  * Compiles a MongoDB update document ({ $set, $unset, $inc }) into a SQL
  * expression computing the new value of the `data` column, plus its named
  * parameters. Update params are prefixed 'u' so they can be merged with a
  * filter's 'p'-prefixed params in one statement without collisions.
  */
-function buildUpdateExpression (update: UpdateFilter): { sql: string, params: SqlParams } {
+function buildUpdateExpression (update: UpdateFilter): UpdateExpression {
   const keys = Object.keys(update)
   if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')
   for (const key of keys) {
@@ -176,6 +199,7 @@ function buildUpdateExpression (update: UpdateFilter): { sql: string, params: Sq
 
   let expr = 'data'
   const params: SqlParams = {}
+  const incFields: string[] = []
   let n = 0
 
   if (update.$inc != null) {
@@ -187,13 +211,12 @@ function buildUpdateExpression (update: UpdateFilter): { sql: string, params: Sq
       const path = toJson1PathString([field])
       const name = `u${n++}`
       params[name] = amount
-      // Missing fields start from 0, like MongoDB. Present-but-non-numeric
-      // fields are an error there, and used to be silent data loss here:
-      // SQLite coerced 'hello' + 1 to 1 and wrote the number back.
-      expr = `json_set(${expr}, ${path}, CASE ` +
-        `WHEN json_type(data, ${path}) IS NULL THEN :${name} ` +
-        `WHEN json_type(data, ${path}) IN ('integer','real') THEN json_extract(data, ${path}) + :${name} ` +
-        `ELSE mdb_raise('Cannot apply $inc to a value of non-numeric type (field ${field.replace(/'/g, "''")})') END)`
+      incFields.push(field)
+      // Missing fields start from 0, like MongoDB. A present-but-non-numeric
+      // field is an error there, and was silent data loss here (SQLite reads
+      // 'hello' + 1 as 1); incConflict below is what rejects those rows, and
+      // it runs as a separate SELECT before this expression is ever evaluated.
+      expr = `json_set(${expr}, ${path}, COALESCE(json_extract(data, ${path}), 0) + :${name})`
     }
   }
 
@@ -209,7 +232,11 @@ function buildUpdateExpression (update: UpdateFilter): { sql: string, params: Sq
     }
   }
 
-  return { sql: expr, params }
+  const incConflict = incFields.length === 0
+    ? undefined
+    : `CASE ${incFields.map((field, index) => `WHEN ${nonNumericAt(field)} THEN ${index}`).join(' ')} END`
+
+  return { sql: expr, params, incFields, ...(incConflict === undefined ? {} : { incConflict }) }
 }
 
 /** The driver's UpdateResult shape; upserts are not supported yet, hence the zeroes. */
@@ -328,6 +355,25 @@ export class Collection<TSchema extends Document = Document> {
 
   private mapError (error: unknown): unknown {
     return toMongoError(error, this.collectionName, name => this.mongoIndexName(name))
+  }
+
+  /**
+   * Rejects the update if any row it would touch holds a non-numeric value
+   * where `$inc` applies, the way MongoDB rejects it - before writing anything.
+   *
+   * This is a separate SELECT rather than a guard inside the UPDATE on purpose.
+   * The obvious alternative, a CASE that calls a registered SQL function to
+   * raise, is not portable: on Node 22.13 (the `engines` floor) an exception
+   * thrown inside a `db.function()` callback is SWALLOWED and the call yields
+   * NULL, so `json_set` wrote null over the value - the exact data loss the
+   * guard existed to prevent. Caught by CI's oldest-Node job.
+   */
+  private assertIncApplies (expr: UpdateExpression, scope: string, scopeParams: SqlParams): void {
+    if (expr.incConflict === undefined) return
+    const sql = `SELECT ${expr.incConflict} AS field FROM ${this.table} WHERE (${scope}) AND ${expr.incConflict} IS NOT NULL LIMIT 1`
+    const row = this.prepare(sql).get(scopeParams) as { field: number } | undefined
+    if (row === undefined) return
+    throw Error(`Cannot apply $inc to a value of non-numeric type (field ${expr.incFields[row.field]})`)
   }
 
   find (query: Filter = {}, options: FindOptions = {}): FindCursor<TSchema> {
@@ -613,6 +659,8 @@ export class Collection<TSchema extends Document = Document> {
     if (found === null) return updateResult(0, 0)
     const { rowid } = found
 
+    this.assertIncApplies(expr, 'rowid = :rowid', { rowid })
+
     // `data != <expr>` makes a no-op update report modifiedCount 0, like
     // MongoDB. Each 'u' parameter binds once for both occurrences of expr.
     const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE rowid = :rowid AND data != ${expr.sql}`
@@ -626,6 +674,13 @@ export class Collection<TSchema extends Document = Document> {
 
     const matchedCount = await this.countDocuments(filter)
     const compiled = toSql('data', filter, this.table)
+
+    // Checked across every matched row before anything is written, so a bad
+    // $inc target leaves the collection untouched rather than partially
+    // updated. (MongoDB applies until it hits the offending document; this is
+    // the safer divergence, and the one the rollback semantics already implied.)
+    this.assertIncApplies(expr, compiled.sql, compiled.params)
+
     // The expression's 'u' params and the filter's 'p' params merge without
     // collisions, by construction (see bindValue / buildUpdateExpression).
     const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE (${compiled.sql}) AND data != ${expr.sql}`
@@ -730,16 +785,6 @@ export class Db {
         regexCache.set(key, regex)
       }
       return regex.test(value) ? 1 : 0
-    })
-
-    // Lets a compiled UPDATE expression abort its statement with a real error;
-    // SQLite has no RAISE outside triggers. $inc uses it to reject non-numeric
-    // fields rather than silently overwriting them (buildUpdateExpression).
-    // Deliberately NOT deterministic: its argument is a constant, and SQLite
-    // hoists constant deterministic calls out of the row loop - which would
-    // raise on every update rather than only on the branch that reaches it.
-    db.function('mdb_raise', (message) => {
-      throw Error(String(message))
     })
 
     const pragmas = [
