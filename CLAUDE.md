@@ -16,11 +16,11 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 | `npm run lint` | oxlint |
 | `npm run typecheck` | `tsc` over `src` **and** `test` |
 | `npm run build` | Emits `dist/` from `src` only (`tsconfig.build.json`) |
+| `npm run test:types` | Type-level assertions (`vitest --typecheck`), own config |
 | `npm run bench` | Benchmarks over 20k docs; no mongod, own vitest config |
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck,
-build and test on
-{ubuntu, windows} × Node {22.13.0, 24, 26}. The Node axis matters more than it
+test:types, build and test on {ubuntu, windows} × Node {22.13.0, 24, 26}. The Node axis matters more than it
 looks: `node:sqlite` bundles its own SQLite, so the query planner — and therefore
 [test/query-plan.spec.ts](test/query-plan.spec.ts) — differs per Node version.
 
@@ -34,6 +34,8 @@ Source files, and the second one is where all the interesting logic lives:
 - [src/ejson.ts](src/ejson.ts) — storage serialization (see the EJSON gotcha below).
 - [src/projection.ts](src/projection.ts) — MongoDB projection semantics, applied in JS.
 - [src/errors.ts](src/errors.ts) — `MongoServerError` / `DUPLICATE_KEY_ERROR` (11000).
+- [src/filter-types.ts](src/filter-types.ts) — `Filter<TSchema>` / `UpdateFilter<TSchema>`
+  and the dot-notation path algebra behind them. Types only; no runtime code.
 - [src/object-id.ts](src/object-id.ts) — generates MongoDB-compatible ObjectId hex strings.
 
 ### Storage model
@@ -197,6 +199,21 @@ Other things to know:
   collects the compiler's edge cases — empty arrays, scalars where arrays were
   expected, malformed operators. When a query "returns nothing" or dies with a
   raw SQLite error, that is the file to extend.
+
+[test/types.test-d.ts](test/types.test-d.ts) is where the type layer is pinned.
+**The `@ts-expect-error` cases are the feature** — each asserts that a mistake
+FAILS to compile, and tsc reports an unused directive, so a type that goes slack
+turns those into errors. Verified by mutation: slackening `Filter` back to
+`Record<string, any>` fails 6 of them. Two invariants to preserve when editing
+[src/filter-types.ts](src/filter-types.ts):
+
+- **Never add an operator the compiler does not implement.** A type that says
+  "this compiles" about a query that throws is worse than no type. This is why
+  the driver's `Filter` is not adopted wholesale — it promises `$expr`,
+  `$where`, `$text` and the geo operators.
+- **`Collection<Document>` must stay permissive.** `Document` has an index
+  signature; `IsAny` and `keyof T & string` widening are what make an untyped
+  collection behave exactly as it did before the types existed.
 
 Some assertions are commented out with `// TODO` (see
 [test/operators/query-operators.spec.ts](test/operators/query-operators.spec.ts)).

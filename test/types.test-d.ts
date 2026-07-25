@@ -1,0 +1,156 @@
+import { describe, expectTypeOf, it } from 'vitest'
+
+import type { Collection, Db, Document, Filter, UpdateFilter, WithId } from '../src/index.js'
+
+/**
+ * Type-level tests for BACKLOG item 5b.
+ *
+ * The NEGATIVE cases are the feature. A filter type that accepts everything is
+ * what this replaced, so every `@ts-expect-error` below is an assertion that a
+ * mistake now fails to compile - and if the types ever go slack again, the
+ * missing error turns `@ts-expect-error` itself into a compile error. The
+ * positive cases exist to prove the types did not overshoot and start rejecting
+ * queries that work.
+ *
+ * These run under `npm run test:types` (vitest --typecheck) and are also
+ * checked by `npm run typecheck`, since @ts-expect-error is a tsc feature.
+ */
+
+interface Size { h: number, w: number, uom: string }
+interface Stock { warehouse: string, qty: number }
+
+interface Item {
+  _id: string
+  item: string
+  qty: number
+  status: 'A' | 'D'
+  size: Size
+  tags: string[]
+  instock: Stock[]
+  shipped?: Date
+}
+
+declare const db: Db
+declare const col: Collection<Item>
+
+describe('Filter<TSchema>', () => {
+  it('types an operator against the field it applies to', async () => {
+    await col.find({ qty: { $lt: 30 } }).toArray()
+    await col.find({ qty: { $in: [10, 20] } }).toArray()
+    await col.find({ status: 'A' }).toArray()
+    await col.find({ item: /^p/ }).toArray() // regex on a string field
+    await col.find({ shipped: { $gte: new Date() } }).toArray()
+    await col.find({ qty: { $exists: true } }).toArray()
+    await col.find({ tags: { $size: 2 } }).toArray()
+    await col.find({ qty: { $mod: [4, 0] } }).toArray()
+    await col.find({ status: { $type: 'string' } }).toArray()
+  })
+
+  it('rejects a misspelled field', async () => {
+    // @ts-expect-error - 'qtyy' is not a field of Item
+    await col.find({ qtyy: { $lt: 30 } }).toArray()
+  })
+
+  it('rejects a value of the wrong type', async () => {
+    // @ts-expect-error - qty is a number
+    await col.find({ qty: { $lt: 'thirty' } }).toArray()
+    // @ts-expect-error - $in wants an array of the field's type
+    await col.find({ qty: { $in: ['ten'] } }).toArray()
+    // @ts-expect-error - status is a union of two literals
+    await col.find({ status: 'Z' }).toArray()
+    // @ts-expect-error - $exists is a boolean
+    await col.find({ qty: { $exists: 'yes' } }).toArray()
+    // @ts-expect-error - $size is a number
+    await col.find({ tags: { $size: 'two' } }).toArray()
+  })
+
+  it('rejects an unknown operator', async () => {
+    // @ts-expect-error - $gtt is not an operator
+    await col.find({ qty: { $gtt: 1 } }).toArray()
+    // @ts-expect-error - $where is deliberately not supported
+    await col.find({ $where: 'this.qty > 1' }).toArray()
+    // @ts-expect-error - $expr is not implemented
+    await col.find({ $expr: { $gt: ['$qty', 1] } }).toArray()
+  })
+
+  it('types dot-notation paths against the nested schema', async () => {
+    await col.find({ 'size.uom': 'cm' }).toArray()
+    await col.find({ 'size.h': { $gt: 10 } }).toArray()
+    await col.find({ 'tags.0': 'red' }).toArray()
+    // Into an array of embedded documents, with or without an index
+    await col.find({ 'instock.qty': { $gte: 5 } }).toArray()
+    await col.find({ 'instock.0.warehouse': 'A' }).toArray()
+
+    // @ts-expect-error - 'size.nope' is not a path
+    await col.find({ 'size.nope': 1 }).toArray()
+    // @ts-expect-error - size.h is a number
+    await col.find({ 'size.h': 'tall' }).toArray()
+  })
+
+  it('allows an element where the field is an array (implicit matching)', async () => {
+    await col.find({ tags: 'red' }).toArray() // matches an array containing 'red'
+    await col.find({ tags: ['red', 'blue'] }).toArray() // ...or the array itself
+    await col.find({ tags: /^r/ }).toArray()
+    // @ts-expect-error - elements are strings
+    await col.find({ tags: 42 }).toArray()
+  })
+
+  it('types the logical operators recursively', async () => {
+    await col.find({ $or: [{ qty: { $lt: 10 } }, { status: 'D' }] }).toArray()
+    await col.find({ $and: [{ $or: [{ qty: 1 }] }] }).toArray()
+    // @ts-expect-error - the nested filter is checked too
+    await col.find({ $or: [{ qtyy: 1 }] }).toArray()
+  })
+
+  it('leaves an untyped collection permissive', async () => {
+    // The default schema has an index signature, so nothing is constrained -
+    // this is what keeps existing untyped code compiling.
+    const loose = db.collection('anything')
+    await loose.find({ whatever: { $lt: 'mixed' } }).toArray()
+    await loose.find({ 'deeply.nested.unknown.path': 1 }).toArray()
+    expectTypeOf<Filter<Document>>().toExtend<Record<string, any>>()
+  })
+})
+
+describe('UpdateFilter<TSchema>', () => {
+  it('types $set values against their paths', async () => {
+    await col.updateOne({ item: 'x' }, { $set: { qty: 5, 'size.uom': 'in' } })
+    await col.updateOne({ item: 'x' }, { $unset: { shipped: '' } })
+    await col.updateOne({ item: 'x' }, { $inc: { qty: 1, 'size.h': -1 } })
+    await col.updateOne({ item: 'x' }, { $setOnInsert: { status: 'A' } }, { upsert: true })
+  })
+
+  it('rejects a $set value of the wrong type', async () => {
+    // @ts-expect-error - qty is a number
+    await col.updateOne({ item: 'x' }, { $set: { qty: 'five' } })
+    // @ts-expect-error - 'nope' is not a path
+    await col.updateOne({ item: 'x' }, { $set: { nope: 1 } })
+  })
+
+  it('restricts $inc to numeric paths', async () => {
+    // @ts-expect-error - $inc on a string field is a runtime error, so it must
+    // not compile either
+    await col.updateOne({ item: 'x' }, { $inc: { item: 1 } })
+  })
+
+  it('rejects _id in $set and unsupported update operators', async () => {
+    // @ts-expect-error - _id is immutable
+    await col.updateOne({ item: 'x' }, { $set: { _id: 'other' } })
+    // @ts-expect-error - $push is not implemented yet
+    await col.updateOne({ item: 'x' }, { $push: { tags: 'new' } })
+  })
+
+  it('leaves an untyped collection permissive', async () => {
+    const loose = db.collection('anything')
+    await loose.updateOne({ a: 1 }, { $set: { whatever: 'goes' } })
+    expectTypeOf<UpdateFilter<Document>>().toExtend<Record<string, any>>()
+  })
+})
+
+describe('result types', () => {
+  it('threads the schema through to the documents', async () => {
+    expectTypeOf(await col.findOne({ item: 'x' })).toEqualTypeOf<WithId<Item> | null>()
+    expectTypeOf(await col.find().toArray()).toEqualTypeOf<Array<WithId<Item>>>()
+    expectTypeOf(await col.findOneAndDelete({ item: 'x' })).toEqualTypeOf<WithId<Item> | null>()
+  })
+})

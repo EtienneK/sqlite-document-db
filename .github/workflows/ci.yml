@@ -55,6 +55,10 @@ jobs:
 
       - run: npm run typecheck
 
+      # Type-level assertions (BACKLOG item 5b). `typecheck` above already
+      # validates the @ts-expect-error directives; this reports each case.
+      - run: npm run test:types
+
       - run: npm run build
 
       # Every assertion runs twice: once against this library and once against

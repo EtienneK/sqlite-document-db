@@ -260,6 +260,30 @@ try {
 `MongoServerError` is also exported, but branch on `code` — `instanceof` cannot
 match the official driver's class without depending on `mongodb`.
 
+### Typed collections
+
+Pass a schema to `db.collection<T>()` and filters, update documents and results
+are all checked against it — including dot-notation paths:
+
+```typescript
+interface Item { _id: string, item: string, qty: number, size: { uom: string }, tags: string[] }
+const items = db.collection<Item>('items')
+
+await items.find({ qty: { $lt: 30 } })            // ok
+await items.find({ 'size.uom': 'cm' })            // ok - nested paths are typed
+await items.find({ tags: 'red' })                 // ok - matches an array element
+await items.updateOne({ item: 'x' }, { $inc: { qty: 1 } })
+
+await items.find({ qtyy: { $lt: 30 } })           // error: no such field
+await items.find({ qty: { $lt: 'thirty' } })      // error: qty is a number
+await items.find({ qty: { $gtt: 1 } })            // error: no such operator
+await items.updateOne({ item: 'x' }, { $inc: { item: 1 } })  // error: $inc needs a number
+```
+
+Only operators this library actually implements appear in the types, so
+anything that compiles will run. Collections opened without a schema stay
+completely permissive, so untyped code is unaffected.
+
 ### Collection names
 
 Names are **case-sensitive**, as MongoDB's are, and accept anything MongoDB
@@ -275,8 +299,9 @@ db.collection('users')  // ...this one
 
 ```
 npm install
-npm test        # runs every assertion against BOTH this library and a real MongoDB
-npm run bench   # benchmarks (indexed vs full-scan queries, writes) over 20k docs
+npm test         # runs every assertion against BOTH this library and a real MongoDB
+npm run test:types  # type-level assertions, including cases that must NOT compile
+npm run bench    # benchmarks (indexed vs full-scan queries, writes) over 20k docs
 npm run lint
 npm run build
 ```

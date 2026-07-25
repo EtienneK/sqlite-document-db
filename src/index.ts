@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { toMongoError } from './errors.js'
+import type { Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 import { bindValueAsJson, quoteIdentifier, toJson1PathString, toSortSql, toSql, type SqlParams } from './query/query.js'
@@ -21,10 +22,19 @@ export declare type WithId<TSchema extends Document = Document> = WithoutId<TSch
   _id: string
 }
 
-export type Filter = Record<string, any>
+export type {
+  BsonTypeAlias, Condition, Filter, FilterOperators, InferIdType,
+  Paths, PathValue, UpdateFilter
+} from './filter-types.js'
 
-// A subset of MongoDB's update document: { $set: {...}, $unset: {...}, $inc: {...} }
-export type UpdateFilter = Record<string, any>
+/**
+ * The loose filter/update shape the COMPILER works with.
+ *
+ * `Filter<TSchema>` is the public, checked type; everything below the API
+ * surface dispatches on the runtime shape of a filter object and has no schema
+ * to check against, so it takes this instead. Public methods narrow.
+ */
+type AnyFilter = Record<string, any>
 
 // Result shapes match the official MongoDB driver's (DR-2). `acknowledged` is
 // always true - node:sqlite is synchronous, so every write is acknowledged.
@@ -159,7 +169,7 @@ function updateOperand (operator: string, value: unknown, allowId = false): Arra
  * and $inc reads the ORIGINAL column, so a conflicting update would otherwise
  * produce a result that silently depends on that ordering.
  */
-function assertNoConflictingPaths (update: UpdateFilter): void {
+function assertNoConflictingPaths (update: AnyFilter): void {
   const seen: string[] = []
   for (const operator of UPDATE_OPERATORS) {
     for (const field of Object.keys((update[operator] ?? {}) as Record<string, unknown>)) {
@@ -198,11 +208,11 @@ function setPath (doc: Document, field: string, value: unknown): void {
  * `$and` is the exception: it is a conjunction, so each of its terms still
  * has to hold.
  */
-function collectEqualities (filter: Filter, into: Document): void {
+function collectEqualities (filter: AnyFilter, into: Document): void {
   for (const [key, value] of Object.entries(filter)) {
     if (key === '$and' && Array.isArray(value)) {
       for (const term of value) {
-        if (term !== null && typeof term === 'object') collectEqualities(term as Filter, into)
+        if (term !== null && typeof term === 'object') collectEqualities(term as AnyFilter, into)
       }
       continue
     }
@@ -229,7 +239,7 @@ function collectEqualities (filter: Filter, into: Document): void {
  * counts up from 0, as it does on a missing field). `$unset` is ignored -
  * there is nothing to remove from a document that does not exist yet.
  */
-function buildUpsertDocument (filter: Filter, update: UpdateFilter): Document {
+function buildUpsertDocument (filter: AnyFilter, update: AnyFilter): Document {
   const doc: Document = {}
   collectEqualities(filter, doc)
   for (const operator of ['$setOnInsert', '$set'] as const) {
@@ -288,7 +298,7 @@ function nonNumericAt (field: string): string {
  * parameters. Update params are prefixed 'u' so they can be merged with a
  * filter's 'p'-prefixed params in one statement without collisions.
  */
-function buildUpdateExpression (update: UpdateFilter): UpdateExpression {
+function buildUpdateExpression (update: AnyFilter): UpdateExpression {
   const keys = Object.keys(update)
   if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')
   for (const key of keys) {
@@ -489,7 +499,7 @@ export class Collection<TSchema extends Document = Document> {
     throw Error(`Cannot apply $inc to a value of non-numeric type (field ${expr.incFields[row.field]})`)
   }
 
-  find (query: Filter = {}, options: FindOptions = {}): FindCursor<TSchema> {
+  find (query: Filter<TSchema> = {}, options: FindOptions = {}): FindCursor<TSchema> {
     // The options form gets the same validation as the chainable setters -
     // limit and skip are interpolated into SQL, so a NaN arriving from
     // unvalidated caller input surfaced as "no such column: NaN".
@@ -613,12 +623,14 @@ export class Collection<TSchema extends Document = Document> {
     return cursor
   }
 
-  async findOne (filter: string | Filter = {}, options: FindOptions = {}): Promise<WithId<TSchema> | null> {
-    if (typeof filter === 'string') filter = { _id: filter }
+  async findOne (filter: string | Filter<TSchema> = {}, options: FindOptions = {}): Promise<WithId<TSchema> | null> {
+    // The string shorthand is an _id lookup; the cast is because a schema may
+    // declare _id as something other than a string (see InferIdType).
+    const query = typeof filter === 'string' ? { _id: filter } as Filter<TSchema> : filter
     // Delegates to find() with limit 1: same SQL shape (ORDER BY rowid LIMIT 1
     // returns the FIRST match in natural order, like MongoDB - updateOne/
     // deleteOne/replaceOne depend on this), plus sort/projection support.
-    const cursor = this.find(filter, { ...options, limit: 1 })
+    const cursor = this.find(query, { ...options, limit: 1 })
     const document = await cursor.next()
     await cursor.close()
     return document
@@ -705,7 +717,7 @@ export class Collection<TSchema extends Document = Document> {
     return { toArray: async () => await this.indexes() }
   }
 
-  async countDocuments (filter?: Filter): Promise<number> {
+  async countDocuments (filter?: Filter<TSchema>): Promise<number> {
     const compiled = toSql('data', filter ?? {}, this.table)
     const sql = `SELECT COUNT(*) AS count FROM ${this.table} WHERE (${compiled.sql})`
     const result = this.prepare(sql).get(compiled.params) as { count: number }
@@ -722,7 +734,7 @@ export class Collection<TSchema extends Document = Document> {
    * array-element rule made `{ _id: [...] }` match sibling documents too, so
    * `deleteOne` could remove more than one row.
    */
-  private findOneRow (filter: Filter, sort?: SortSpecification): { rowid: number, data: string } | null {
+  private findOneRow (filter: AnyFilter, sort?: SortSpecification): { rowid: number, data: string } | null {
     const compiled = toSql('data', filter, this.table)
     const normalizedSort = typeof sort === 'string' ? { [sort]: 1 } : sort
     const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
@@ -746,7 +758,7 @@ export class Collection<TSchema extends Document = Document> {
       result: { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 1, upsertedId },
       // Read back rather than reusing `doc`: the storage layer decides the
       // final shape (dropped `undefined`s, Date round-trip, key order).
-      document: (await this.findOne({ _id: upsertedId } as Filter))!
+      document: (await this.findOne({ _id: upsertedId } as AnyFilter))!
     }
   }
 
@@ -772,14 +784,14 @@ export class Collection<TSchema extends Document = Document> {
    * filter equalities are NOT carried over - a replacement document is meant
    * to be the whole document.
    */
-  private upsertReplacement (filter: Filter, doc: WithoutId<TSchema>, givenId: unknown): Document {
+  private upsertReplacement (filter: AnyFilter, doc: WithoutId<TSchema>, givenId: unknown): Document {
     const pinned: Document = {}
     collectEqualities(filter, pinned)
     const id = givenId ?? pinned._id
     return { ...(id == null ? {} : { _id: id }), ...doc }
   }
 
-  async deleteOne (filter: Filter): Promise<DeleteResult> {
+  async deleteOne (filter: Filter<TSchema>): Promise<DeleteResult> {
     const found = this.findOneRow(filter)
     if (found === null) return { acknowledged: true, deletedCount: 0 }
     const { rowid } = found
@@ -788,7 +800,7 @@ export class Collection<TSchema extends Document = Document> {
     return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
-  async deleteMany (filter: Filter): Promise<DeleteResult> {
+  async deleteMany (filter: Filter<TSchema>): Promise<DeleteResult> {
     const compiled = toSql('data', filter, this.table)
     const result = this.run(`DELETE FROM ${this.table} WHERE (${compiled.sql})`, compiled.params)
     return { acknowledged: true, deletedCount: Number(result.changes) }
@@ -803,7 +815,7 @@ export class Collection<TSchema extends Document = Document> {
     return doc._id
   }
 
-  async replaceOne (filter: Filter, doc: WithoutId<TSchema>, options: ReplaceOptions = {}): Promise<UpdateResult> {
+  async replaceOne (filter: Filter<TSchema>, doc: WithoutId<TSchema>, options: ReplaceOptions = {}): Promise<UpdateResult> {
     const givenId = Collection.replacementId(doc)
 
     const found = this.findOneRow(filter)
@@ -821,7 +833,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
-  async updateOne (filter: Filter, update: UpdateFilter, options: UpdateOptions = {}): Promise<UpdateResult> {
+  async updateOne (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
     const expr = buildUpdateExpression(update)
 
     const found = this.findOneRow(filter)
@@ -834,7 +846,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /** Updates every document matching `filter` with $set/$unset/$inc operators. */
-  async updateMany (filter: Filter, update: UpdateFilter, options: UpdateOptions = {}): Promise<UpdateResult> {
+  async updateMany (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
     const expr = buildUpdateExpression(update)
 
     const matchedCount = await this.countDocuments(filter)
@@ -867,7 +879,7 @@ export class Collection<TSchema extends Document = Document> {
    * returns the document that was inserted.
    */
   async findOneAndUpdate (
-    filter: Filter, update: UpdateFilter, options: FindOneAndUpdateOptions = {}
+    filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: FindOneAndUpdateOptions = {}
   ): Promise<WithId<TSchema> | null> {
     const expr = buildUpdateExpression(update)
     const found = this.findOneRow(filter, options.sort)
@@ -884,7 +896,7 @@ export class Collection<TSchema extends Document = Document> {
 
   /** As `findOneAndUpdate`, but with a whole replacement document. */
   async findOneAndReplace (
-    filter: Filter, replacement: WithoutId<TSchema>, options: FindOneAndReplaceOptions = {}
+    filter: Filter<TSchema>, replacement: WithoutId<TSchema>, options: FindOneAndReplaceOptions = {}
   ): Promise<WithId<TSchema> | null> {
     const givenId = Collection.replacementId(replacement)
     const found = this.findOneRow(filter, options.sort)
@@ -901,7 +913,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /** Deletes one document and returns it, or null when nothing matched. */
-  async findOneAndDelete (filter: Filter, options: FindOneAndDeleteOptions = {}): Promise<WithId<TSchema> | null> {
+  async findOneAndDelete (filter: Filter<TSchema>, options: FindOneAndDeleteOptions = {}): Promise<WithId<TSchema> | null> {
     const found = this.findOneRow(filter, options.sort)
     if (found === null) return null
 

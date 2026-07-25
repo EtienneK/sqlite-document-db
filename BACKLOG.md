@@ -182,7 +182,7 @@ replacement".
 | 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
 | 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
 | 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — 2026-07-22 core; upsert + findOneAnd* 2026-07-25 |
-| 5 | [TypeScript typing](#5-typescript-typing) | S then M | 5a **DONE 2026-07-22** (`Db.collection<TSchema>()`); 5b waits on items 4, 6, 7 |
+| 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25** |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
 | 8 | ~~[`$regex`, `$type`, `$mod`](#8-remaining-query-operators)~~ | M | **DONE 2026-07-22** — `$expr`/`$bits*`/`$text` still open |
@@ -544,7 +544,39 @@ contents, which is exactly how the MongoDB driver treats it too. Worth a comment
 saying so, and worth deciding what happens if two callers request the same collection
 at different types.
 
-### 5b. Typed filters and results — **Size: M, best done after items 4, 6 and 7**
+### 5b. Typed filters and results — **Size: M — DONE 2026-07-25**
+
+[src/filter-types.ts](src/filter-types.ts) (types only, no runtime code) gives
+`Filter<TSchema>` and `UpdateFilter<TSchema>`: operators typed against the field
+they apply to, dot-notation paths (including into arrays of embedded documents,
+with or without an index), `$inc` restricted to numeric paths, and `_id`
+excluded from `$set`. Pinned by [test/types.test-d.ts](test/types.test-d.ts),
+run as `npm run test:types` and in CI.
+
+Three things worth knowing:
+
+- **The negative cases are the feature.** Sixteen `@ts-expect-error` directives
+  assert that a mistake FAILS to compile. tsc errors on an *unused* directive,
+  so a type going slack turns each of them into a build error. Verified by
+  mutation: reverting `Filter` to `Record<string, any>` fails 6 type tests.
+- **The driver's `Filter` was deliberately NOT adopted wholesale**, exactly as
+  the gotcha below warned. It promises `$expr`, `$where`, `$text` and the geo
+  operators, none of which exist here — a type that says "this compiles" about
+  a query that throws is worse than no type. `AlternativeType`/`RegExpOrString`
+  ARE adapted from it (Apache-2.0, per DR-2), because they describe precisely
+  the implicit array-element and regex matching items 3 and 8 delivered.
+- **Untyped collections are untouched.** `Document` has an index signature, and
+  `IsAny` plus `keyof T & string` widening make `Filter<Document>` collapse to
+  the old `Record<string, any>`. The entire existing test suite typechecks
+  unchanged, which is the evidence.
+
+**Still open:** projection narrowing the result type (`{ projection: { item: 1 } }`
+should return a document with only `item`). It is the one piece of 5b left, and
+it is separable — it needs no change to the filter types.
+
+Original analysis follows.
+
+#### Original plan — **Size: M, best done after items 4, 6 and 7**
 
 > Depends on both decision records. [DR-2](#dr-2-how-mongodb-compatible-should-the-api-be)
 > decides whether these types are written from scratch or adopted from the driver;
