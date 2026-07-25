@@ -879,8 +879,12 @@ too noisy to assert timings on. It is a smoke test: the benchmarks build 20k-doc
 collections and exercise every indexed query shape, so "it still runs" is worth
 knowing. It sets `MONGOMS_DISABLE_POSTINSTALL` since it never starts a mongod.
 
-Follow-ups: a `CHANGELOG.md` (2.0.0 is a breaking release — ESM-only, Node ≥ 22.13,
-`bson-objectid` dropped) and a publish workflow.
+~~Follow-ups: a `CHANGELOG.md`~~ **DONE 2026-07-25** —
+[CHANGELOG.md](CHANGELOG.md) covers the 1.0.6 → 2.0.0 break (ESM-only, Node
+≥ 22.13, the `sqlite`/`sqlite3`/`bson-objectid` dependencies dropped,
+case-sensitive collection names, driver-shaped results, and the Date storage
+format change). Still open: a **publish workflow**, which would also give npm
+provenance — publishing is manual today.
 
 ---
 

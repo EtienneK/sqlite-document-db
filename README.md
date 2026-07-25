@@ -1,8 +1,12 @@
 # SQLite Document DB
 
-> **Status:** under construction. The querying features listed below work and are
-> verified against a real MongoDB, but plenty is still missing — see
-> [Missing Features](#missing-features).
+> **Status:** 2.0.0 is a rewrite on Node's built-in `node:sqlite` — zero
+> dependencies, ESM only, Node ≥ 22.13. The CRUD and query surface below is
+> substantial and every behaviour in it is verified against a real MongoDB, but
+> this is a **compatible subset, not a drop-in replacement** — most notably
+> there is no aggregation pipeline. See [Missing Features](#missing-features).
+>
+> Upgrading from 1.x is a breaking change: see [CHANGELOG.md](CHANGELOG.md).
 
 Use SQLite as a JSON Document Database.
 
