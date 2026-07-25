@@ -136,6 +136,51 @@ describe('Update Documents - https://www.mongodb.com/docs/manual/tutorial/update
           .rejects.toThrow()
       })
 
+      // Each case below silently DESTROYED data before: $unset/$inc were not
+      // checked against _id at all, an empty field name resolved to the JSON
+      // path '$' and replaced the whole document, and $inc on a non-numeric
+      // field coerced it (SQLite's 'hello' + 1 is 1) and wrote the result back.
+      it('should reject updates that would modify _id', async () => {
+        const col = db().collection('items')
+        await expect(col.updateOne({ item: 'journal' }, { $set: { _id: 'nope' } })).rejects.toThrow()
+        await expect(col.updateOne({ item: 'journal' }, { $unset: { _id: '' } })).rejects.toThrow()
+        await expect(col.updateOne({ item: 'journal' }, { $inc: { _id: 1 } })).rejects.toThrow()
+
+        // Every document still has its _id, and is still addressable by it
+        const doc = await col.findOne({ item: 'journal' })
+        expect(doc?._id).toBeDefined()
+        expect(await col.countDocuments({ _id: { $exists: true } })).toStrictEqual(items.length)
+      })
+
+      it('should reject an empty field name instead of overwriting the document', async () => {
+        const col = db().collection('items')
+        await expect(col.updateOne({ item: 'journal' }, { $set: { '': 1 } })).rejects.toThrow()
+        expect((await col.findOne({ item: 'journal' }))?.qty).toStrictEqual(25)
+      })
+
+      it('should reject $inc on a non-numeric field and leave the value alone', async () => {
+        const col = db().collection('items')
+        await expect(col.updateOne({ item: 'journal' }, { $inc: { status: 1 } })).rejects.toThrow()
+        expect((await col.findOne({ item: 'journal' }))?.status).toStrictEqual('A')
+
+        // updateMany over a mix of matching documents fails the same way
+        await expect(col.updateMany({ status: 'A' }, { $inc: { item: 1 } })).rejects.toThrow()
+      })
+
+      it('should reject operators that conflict on the same path', async () => {
+        const col = db().collection('items')
+        await expect(col.updateOne({ item: 'journal' }, { $set: { qty: 1 }, $inc: { qty: 1 } })).rejects.toThrow()
+        await expect(col.updateOne({ item: 'journal' }, { $set: { qty: 1 }, $unset: { qty: '' } })).rejects.toThrow()
+        await expect(col.updateOne({ item: 'journal' }, { $set: { 'size.h': 1 }, $unset: { size: '' } })).rejects.toThrow()
+        expect((await col.findOne({ item: 'journal' }))?.qty).toStrictEqual(25)
+      })
+
+      it('should reject an update operator whose operand is not a document', async () => {
+        const col = db().collection('items')
+        await expect(col.updateOne({ item: 'journal' }, { $set: 5 } as any)).rejects.toThrow()
+        await expect(col.updateOne({ item: 'journal' }, { $inc: 'qty' } as any)).rejects.toThrow()
+      })
+
       it('replaceOne() should reject a replacement document with operators', async () => {
         await expect(db().collection('items').replaceOne({ item: 'journal' }, { $set: { status: 'X' } } as any))
           .rejects.toThrow()

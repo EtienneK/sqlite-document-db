@@ -27,22 +27,19 @@ interface SqlContext {
   bindings: Bindings
 }
 
-function stringEscape (str: string): string {
-  return str.replace(/'/g, '\'\'')
-}
-
-function stringEscape2 (str: string): string {
-  return str.replace(/"/g, '""')
-}
-
 // Only PATHS are ever rendered as string literals. Values go through
-// bindValue - if you are about to quote() a user-supplied value, stop.
-function quote (str: string): string {
-  return "'" + stringEscape(str) + "'"
+// bindValue - if you are about to quoteLiteral() a user-supplied value, stop.
+function quoteLiteral (str: string): string {
+  return "'" + str.replace(/'/g, "''") + "'"
 }
 
-function quote2 (data: string): string {
-  return '"' + stringEscape2(data) + '"'
+/**
+ * Quotes a SQL identifier (table, column). Exported because table and index
+ * names are interpolated in src/index.ts too, and one escaping routine for the
+ * whole project is one place to get it right.
+ */
+export function quoteIdentifier (name: string): string {
+  return '"' + name.replace(/"/g, '""') + '"'
 }
 
 /**
@@ -59,6 +56,7 @@ function quote2 (data: string): string {
  * comparisons against stored values line up byte for byte.
  */
 function bindValue (ctx: SqlContext, value: any): string {
+  if (value === undefined) throw Error('cannot use undefined as a query value; use null instead')
   const name = `p${ctx.bindings.n++}`
   if (typeof value === 'boolean') {
     ctx.bindings.values[name] = value ? 1 : 0
@@ -92,12 +90,22 @@ export function bindValueAsJson (params: SqlParams, name: string, value: any): s
 // json_extract(data, :path) would never use an index.
 export function toJson1PathString (pathArr: string[]): string {
   const firstDot = (pathArr.length === 1 && pathArr[0] === '') ? '' : '.'
-  return quote(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
+  return quoteLiteral(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
 }
 
 function toJson1Extract (col: string, pathArr: string[]): string {
-  if (pathArr === undefined || pathArr.length === 0) return quote2(col)
-  return `json_extract(${quote2(col)}, ${toJson1PathString(pathArr)})`
+  if (pathArr === undefined || pathArr.length === 0) return quoteIdentifier(col)
+  return `json_extract(${quoteIdentifier(col)}, ${toJson1PathString(pathArr)})`
+}
+
+/** `json_extract(<col>, '$.<field>')` - the value stored at one field path. */
+function extract (ctx: SqlContext, field: string): string {
+  return toJson1Extract(ctx.col, [field])
+}
+
+/** `json_type(<col>, '$.<field>')` - NULL when the path is absent. */
+function jsonType (ctx: SqlContext, field: string): string {
+  return `json_type(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])})`
 }
 
 const OPS = {
@@ -128,6 +136,14 @@ const OPS = {
   $size: null
 }
 const OPS_KEYS = Object.keys(OPS)
+
+/**
+ * The only operators MongoDB accepts as a KEY of a filter document (as opposed
+ * to a key of a field's criterion object). `{ $gt: 5 }` or `{ $not: {...} }` at
+ * that position is "unknown top level operator" on the server - and here it was
+ * worse than an error: `$not` recursed into itself until the stack blew.
+ */
+const TOP_LEVEL_OPS_KEYS = new Set(['$and', '$or', '$nor'])
 
 /**
  * Normalizes $regex input (a RegExp or a pattern string, optionally with a
@@ -223,13 +239,13 @@ function countOps (keys: string[]): number {
  */
 function elementMatch (ctx: SqlContext, field: string, elemPred: string): string {
   const path = toJson1PathString([field])
-  const extract = toJson1Extract(ctx.col, [field])
+  const fieldValue = extract(ctx, field)
   // Leading bracket-range predicate: JSON arrays extract as text starting
   // with '[', so `>= '[' AND < '\'` selects exactly the array-valued rows
   // USING THE SAME expression index the scalar arm uses (numbers sort before
   // text, objects start with '{'). Strings that happen to start with '[' slip
   // into the range; the json_type check filters them back out.
-  return `(${extract} >= '[' AND ${extract} < '\\' AND json_type(${quote2(ctx.col)}, ${path}) = 'array' AND EXISTS (SELECT 1 FROM json_each(${quote2(ctx.col)}, ${path}) WHERE ${elemPred}))`
+  return `(${fieldValue} >= '[' AND ${fieldValue} < '\\' AND ${jsonType(ctx, field)} = 'array' AND EXISTS (SELECT 1 FROM json_each(${quoteIdentifier(ctx.col)}, ${path}) WHERE ${elemPred}))`
 }
 
 /**
@@ -268,7 +284,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
         throw Error(`Can't have RegEx as arg to ${op}`)
       }
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
-        throw Error(`$${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
+        throw Error(`${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
       // Dates are stored as {"$date": "<ISO>"} (see src/ejson.ts), so date
       // comparisons target the wrapped string one level down. ISO-8601 UTC
@@ -283,7 +299,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
         // MongoDB's $ne is the complement of the whole $eq match: it excludes
         // documents whose field equals the value AND documents whose array
         // field contains it, keeping everything else including missing fields.
-        const eqScalar = `${toJson1Extract(ctx.col, [extractField])} is ${boundValue}`
+        const eqScalar = `${extract(ctx, extractField)} is ${boundValue}`
         const eqElem = `${elemValue} is ${boundValue}`
         return `NOT (${withElementMatch(ctx, eqScalar, elementMatch(ctx, field, eqElem))})`
       }
@@ -296,17 +312,17 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       let elemTypeGuard = ''
       if (op !== '$eq' && !isDate) {
         if (typeof value === 'number') {
-          scalarTypeGuard = ` AND json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) IN ('integer','real')`
+          scalarTypeGuard = ` AND ${jsonType(ctx, field)} IN ('integer','real')`
           elemTypeGuard = " AND json_each.type IN ('integer','real')"
         } else if (typeof value === 'string') {
-          scalarTypeGuard = ` AND json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'text'`
+          scalarTypeGuard = ` AND ${jsonType(ctx, field)} = 'text'`
           elemTypeGuard = " AND json_each.type = 'text'"
         }
       }
 
       // Have to put this in for $not operator, otherwise $not doesn't work for null/undefined fields
-      const notNull = op === '$eq' ? '' : `AND ${toJson1Extract(ctx.col, [extractField])} IS NOT NULL`
-      const scalarPred = `${toJson1Extract(ctx.col, [extractField])} ${OPS[op]} ${boundValue} ${notNull}${scalarTypeGuard}`
+      const notNull = op === '$eq' ? '' : `AND ${extract(ctx, extractField)} IS NOT NULL`
+      const scalarPred = `${extract(ctx, extractField)} ${OPS[op]} ${boundValue} ${notNull}${scalarTypeGuard}`
       const elemPred = `${elemValue} ${OPS[op]} ${boundValue}${elemTypeGuard}`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
@@ -319,10 +335,11 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       if (value.some(element => element instanceof Date || element instanceof RegExp)) {
         return convert(ctx, { $or: value.map(element => ({ [field]: element })) })
       }
+      if (value.length === 0) return 'FALSE' // $in on an empty list matches nothing
       const list = `(${value.map(element => bindValue(ctx, element)).join(',')})`
-      const scalarNull = value.includes(null) ? ` OR ${toJson1Extract(ctx.col, [field])} IS NULL` : ''
+      const scalarNull = value.includes(null) ? ` OR ${extract(ctx, field)} IS NULL` : ''
       const elemNull = value.includes(null) ? ' OR value IS NULL' : ''
-      const scalarPred = `${toJson1Extract(ctx.col, [field])} IN ${list}${scalarNull}`
+      const scalarPred = `${extract(ctx, field)} IN ${list}${scalarNull}`
       const elemPred = `value IN ${list}${elemNull}`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
@@ -339,13 +356,17 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     case '$nor':
     case '$or':
     case '$and': {
-      if (!Array.isArray(value)) throw Error(`$${op} expects value to be of type: array; but got: ${typeof value}`)
+      if (!Array.isArray(value)) throw Error(`${op} expects value to be of type: array; but got: ${typeof value}`)
+      // MongoDB rejects an empty list; without this the join below emits `(())`.
+      if (value.length === 0) throw Error(`${op} expects a non-empty array`)
       return `${op === '$nor' ? 'NOT' : ''} ((${value
         .map(q => convert(ctx, q))
         .join(`) ${OPS[op]} (`)}))`
     }
     case '$not': {
-      if (Array.isArray(value) || typeof value !== 'object') throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
+      if (value === null || Array.isArray(value) || typeof value !== 'object') {
+        throw Error(`${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
+      }
       return `${OPS[op]}(${convert(ctx, { [field]: value })})`
     }
     // ---------------------- Evaluation Query Operators ----------------------
@@ -357,7 +378,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       // connection. The 'text' guards keep objects/arrays/numbers away from
       // it: json_extract renders compound values as JSON text, which MongoDB
       // would never regex-match.
-      const scalarPred = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'text' AND mdb_regexp(${pattern}, ${flags}, ${toJson1Extract(ctx.col, [field])})`
+      const scalarPred = `${jsonType(ctx, field)} = 'text' AND mdb_regexp(${pattern}, ${flags}, ${extract(ctx, field)})`
       const elemPred = `json_each.type = 'text' AND mdb_regexp(${pattern}, ${flags}, value)`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
@@ -376,7 +397,7 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       if (divisor === 0) throw Error('divisor cannot be 0')
       const boundDivisor = bindValue(ctx, divisor)
       const boundRemainder = bindValue(ctx, remainder)
-      const scalarPred = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) IN ('integer','real') AND CAST(${toJson1Extract(ctx.col, [field])} AS INTEGER) % ${boundDivisor} = ${boundRemainder}`
+      const scalarPred = `${jsonType(ctx, field)} IN ('integer','real') AND CAST(${extract(ctx, field)} AS INTEGER) % ${boundDivisor} = ${boundRemainder}`
       const elemPred = `json_each.type IN ('integer','real') AND CAST(value AS INTEGER) % ${boundDivisor} = ${boundRemainder}`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
@@ -384,8 +405,8 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     case '$type': {
       const aliases = (Array.isArray(value) ? value : [value]).map(resolveTypeAlias)
       if (aliases.length === 0) throw Error('$type must match at least one type')
-      const typeExpr = `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])})`
-      const valueExpr = toJson1Extract(ctx.col, [field])
+      const typeExpr = jsonType(ctx, field)
+      const valueExpr = extract(ctx, field)
       // The document is always well-formed JSON, so the scalar side can
       // extract the .$date sub-path directly. json_each.value is NOT: a text
       // element is a bare string that json_extract rejects as malformed JSON,
@@ -399,15 +420,25 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     }
     case '$exists': {
       if (typeof value !== 'boolean') throw Error(`$exists expects value to be of type: boolean; but got: ${typeof value}`)
-      return `select count(*) ${value ? '>' : '='} 0 from json_each(${quote2(ctx.col)}, ${toJson1PathString([field])})`
+      // json_type is NULL for an absent path and non-NULL for every present
+      // one - including JSON null, which MongoDB also counts as existing.
+      // (The previous json_each form counted ROWS, so an empty array or
+      // empty object reported as not existing, and it could not be indexed.)
+      return `${jsonType(ctx, field)} IS ${value ? 'NOT NULL' : 'NULL'}`
     }
     // ---------------------- Array Query Operators ----------------------
     case '$all': {
       if (!Array.isArray(value)) throw Error(`$all expects value to be of type: array; but got: ${typeof value}`)
-      return `(select count(*) from json_each(${toJson1Extract(ctx.col, [field])}) where value in (select value from json_each(${bindValue(ctx, value)}))) = ${bindValue(ctx, new Set(value).size)}`
+      if (value.length === 0) return 'FALSE' // MongoDB: $all: [] matches nothing
+      // $all is defined as an $and of the values, each matched with the
+      // ordinary implicit-array semantics. Delegating gets Dates, regexes and
+      // $elemMatch criteria for free, keeps the query index-eligible, and
+      // avoids feeding json_each an EXTRACTED value - which raised "malformed
+      // JSON" as soon as any row held a bare string at that path.
+      return convert(ctx, { $and: value.map(element => ({ [field]: element })) })
     }
     case '$elemMatch': {
-      if (Array.isArray(value) || typeof value !== 'object' || value === null) throw Error(`$${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
+      if (Array.isArray(value) || typeof value !== 'object' || value === null) throw Error(`${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
       // Each array element is re-wrapped as { "f": <element> } so the normal
       // field-path machinery can address it. An operator key ($gte, $lt, ...)
       // constrains the element itself, so it targets "f"; any other key is a
@@ -433,11 +464,24 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       // element is re-wrapped with json_quote, not json(): a string element's
       // value is bare text - also malformed JSON - while json_quote encodes
       // scalars and passes objects/arrays through via the JSON subtype.
-      return `json_type(${quote2(ctx.col)}, ${toJson1PathString([field])}) = 'array' AND EXISTS (select json_object('f', json_quote(value)) as valueJson from json_each(${quote2(ctx.col)}, ${toJson1PathString([field])}) where (${convert({ col: 'valueJson', bindings: ctx.bindings }, { $and })}))`
+      // An empty criterion is an object match against every element, which
+      // only a document or an array can satisfy - verified against MongoDB,
+      // which returns nothing for [1] and matches [{}], [{a:1}] and [[1]].
+      // (A stored Date is an 'object' here but a scalar there, so exclude the
+      // wrapper. json_extract is safe once the type is known to be object.)
+      const elemPred = $and.length === 0
+        ? "(json_each.type = 'array' OR (json_each.type = 'object' AND json_extract(json_each.value, '$.$date') IS NULL))"
+        : convert({ col: 'valueJson', bindings: ctx.bindings }, { $and })
+      return `(${jsonType(ctx, field)} = 'array' AND EXISTS (select json_object('f', json_quote(value)) as valueJson from json_each(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) where (${elemPred})))`
     }
     case '$size': {
-      if (typeof value !== 'number') throw Error(`$size expects value to be of type: number; but got: ${typeof value}`)
-      return `json_array_length(${quote2(ctx.col)}, ${toJson1PathString([field])}) = ${bindValue(ctx, value)}`
+      // MongoDB requires a non-negative whole number, and only ever matches
+      // arrays - json_array_length answers 0 for a scalar, so without the type
+      // guard `$size: 0` matched every non-array (and every missing) field.
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+        throw Error(`$size expects value to be a non-negative whole number; but got: ${String(value)}`)
+      }
+      return `(${jsonType(ctx, field)} = 'array' AND json_array_length(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) = ${bindValue(ctx, value)})`
     }
   }
 
@@ -452,7 +496,13 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
   const [field, valueOrOp] = entries[0]!
   let value = valueOrOp
   if (entries.length === 1) {
-    const opEqualsField = OPS_KEYS.includes(field)
+    // A $-prefixed KEY here is a top-level operator, and only the logical ones
+    // are legal there. Anything else is a typo the server would reject, so
+    // reject it too rather than searching for a field literally called '$gt'.
+    if (field.startsWith('$') && !TOP_LEVEL_OPS_KEYS.has(field)) {
+      throw Error(`unknown top level operator: ${field} (expected a field name, or one of ${[...TOP_LEVEL_OPS_KEYS].join(', ')})`)
+    }
+    const opEqualsField = TOP_LEVEL_OPS_KEYS.has(field)
     let op = opEqualsField ? field : '$eq'
 
     // A bare RegExp value pattern-matches: { field: /re/ } is MongoDB's
@@ -474,11 +524,23 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
         return `(${regexSql}) AND (${convert(ctx, { [field]: rest })})`
       }
       const valueOrOpKeys = Object.keys(valueOrOp)
-      if (valueOrOpKeys.length === 1 && countOps(valueOrOpKeys) === 1) {
+      // A criterion object either matches the whole value ({ size: { h: 8 } })
+      // or applies operators to it - never both. MongoDB decides by whether it
+      // sees $-prefixed keys, and errors on any it does not recognise; without
+      // that check a typo like { qty: { $gtt: 5 } } silently became an equality
+      // match against the object `{ $gtt: 5 }` and quietly returned nothing.
+      const unknownOp = valueOrOpKeys.find(key => key.startsWith('$') && !OPS_KEYS.includes(key))
+      if (unknownOp !== undefined) throw Error(`unknown operator: ${unknownOp}`)
+      const opCount = countOps(valueOrOpKeys)
+      if (opCount > 0 && opCount !== valueOrOpKeys.length) {
+        const plainKey = valueOrOpKeys.find(key => !OPS_KEYS.includes(key))!
+        throw Error(`unknown operator: ${plainKey} (operators cannot be mixed with plain fields in one criterion)`)
+      }
+      if (valueOrOpKeys.length === 1 && opCount === 1) {
         // Expressions in the form: { field: { $operator: value } }, where field is not an operator and value is an object
         op = valueOrOpKeys[0]!
         value = value[op]
-      } else if (valueOrOpKeys.length > 1 && countOps(valueOrOpKeys) === valueOrOpKeys.length) {
+      } else if (valueOrOpKeys.length > 1 && opCount === valueOrOpKeys.length) {
         // Expressions in the form: { field: { $operator1: value, $operator2: value } }
         return `(${valueOrOpKeys.map(opKey => ({ [field]: { [opKey]: value[opKey] } }))
           .map(q => convert(ctx, q))
@@ -536,8 +598,8 @@ export function toSortSql (columnName: string, sort: Record<string, number>): st
     }
     const path = toJson1PathString([field])
     const datePath = toJson1PathString([`${field}.$date`])
-    const type = `json_type(${quote2(columnName)}, ${path})`
-    const dateValue = `json_extract(${quote2(columnName)}, ${datePath})`
+    const type = `json_type(${quoteIdentifier(columnName)}, ${path})`
+    const dateValue = `json_extract(${quoteIdentifier(columnName)}, ${datePath})`
     const rank = `CASE WHEN ${type} IS NULL OR ${type} = 'null' THEN 0 ` +
       `WHEN ${type} IN ('integer','real') THEN 1 ` +
       `WHEN ${type} = 'text' THEN 2 ` +
@@ -546,7 +608,7 @@ export function toSortSql (columnName: string, sort: Record<string, number>): st
       `WHEN ${type} = 'array' THEN 4 ` +
       'ELSE 5 END' // 'true'/'false'
     const value = `CASE WHEN ${type} = 'object' AND ${dateValue} IS NOT NULL THEN ${dateValue} ` +
-      `ELSE json_extract(${quote2(columnName)}, ${path}) END`
+      `ELSE json_extract(${quoteIdentifier(columnName)}, ${path}) END`
     const dir = direction === 1 ? 'ASC' : 'DESC'
     terms.push(`${rank} ${dir}`, `${value} ${dir}`)
   }

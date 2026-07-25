@@ -19,19 +19,29 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 
 ## Architecture
 
-Three source files, and the middle one is where all the interesting logic lives:
+Source files, and the second one is where all the interesting logic lives:
 
 - [src/index.ts](src/index.ts) — the public API: `Db`, `Collection`, `FindCursor`.
 - [src/query/query.ts](src/query/query.ts) — **the heart of the project.** Compiles
   MongoDB filter objects into SQLite `WHERE` clauses.
+- [src/ejson.ts](src/ejson.ts) — storage serialization (see the EJSON gotcha below).
+- [src/projection.ts](src/projection.ts) — MongoDB projection semantics, applied in JS.
+- [src/errors.ts](src/errors.ts) — `MongoServerError` / `DUPLICATE_KEY_ERROR` (11000).
 - [src/object-id.ts](src/object-id.ts) — generates MongoDB-compatible ObjectId hex strings.
 
 ### Storage model
 
-Each collection is a table `collection_<name>` with a single `data JSON` column —
-one document per row. A unique index on `json_extract(data, '$._id')` enforces
-`_id` uniqueness. Collection names are validated against `/^[a-z_]+[a-z0-9_]*$/`
-and lowercased, because they are interpolated straight into SQL.
+Each collection is a table with a single `data JSON` column — one document per
+row. A unique index on `json_extract(data, '$._id')` enforces `_id` uniqueness.
+
+Collection names are **case-sensitive** and validated only against MongoDB's own
+rules. Every identifier is quoted via the exported `quoteIdentifier()`. The
+physical table name comes from `tableNameFor()`: a `/^[a-z0-9_]+$/` name maps to
+the readable `collection_<name>`, everything else to
+`collectionx_<slug>_<sha256-16>`. **That digest is load-bearing** — SQLite
+compares identifiers case-insensitively, so `"collection_Users"` and
+`"collection_users"` are one table, and quoting alone would have kept the
+data-merging bug it was meant to fix.
 
 User indexes (`createIndex`) are SQLite expression indexes named
 `ix_<table>_<mongoName>`; single-field indexes get a `ixd_` companion on
@@ -76,10 +86,32 @@ and `findOne()` have `ORDER BY rowid` for natural order — safe ONLY because
 predicates are rowid-subquery-shaped; a bare scalar predicate plus ORDER BY rowid
 would make SQLite drop the field index (measured — don't "simplify" this).
 
+**Non-obvious detail — `$all` delegates.** `$all` is defined as an `$and` of its
+values, so it compiles to exactly that rather than to its own `json_each` form.
+That is not a stylistic choice: feeding `json_each` an *extracted* value fails
+with "malformed JSON" the moment any row holds a bare string at that path, and
+delegating also inherits implicit array matching, Dates and index eligibility.
+
+**Non-obvious detail — operators are validated, not guessed.** An unrecognised
+`$`-key is an error, in both filter-document position (`{ $not: ... }` — which
+used to recurse forever) and criterion position (`{ qty: { $gtt: 5 } }` — which
+used to become an equality match against that object and return nothing). If you
+add an operator, add it to `OPS`, and add it to `TOP_LEVEL_OPS_KEYS` only if
+MongoDB accepts it as a filter-document key.
+
+**Non-obvious detail — `mdb_raise`.** `$inc` guards its target's type inside the
+UPDATE and calls this registered SQL function on the failing branch, because
+SQLite has no `RAISE` outside triggers. It is registered **without**
+`deterministic: true` on purpose: its argument is a constant, and SQLite hoists
+constant deterministic calls out of the row loop, which would make every update
+throw.
+
 ### SQL injection posture
 
 User-supplied **values** are bound as named parameters (`bindValue()` →
 `:p0`..., update expressions use `:u0`... so the two merge in one UPDATE).
+`limit`/`skip` are the exception — they are interpolated, so `find()` validates
+them (`assertLimit`/`assertSkip`) rather than trusting the TypeScript signature.
 Named, not positional, because fragments are reused — the same token appears in
 both arms of the implicit-array union and twice in `SET x WHERE data != x`.
 **If you add an operator, route every user-supplied value through
@@ -91,6 +123,14 @@ expression index whose indexed expression is textually identical, so a bound
 (SQLite cannot bind a bool); update values always go through `json(:u)` with
 the storage encoder so `$set: { x: true }` stores `true`, not `1`.
 Adversarial-value coverage: [test/injection.spec.ts](test/injection.spec.ts).
+
+**Prototype safety.** Anywhere a user-supplied key is used to index an object,
+that object is built with `Object.create(null)` — the projection path tree
+([src/projection.ts](src/projection.ts)) and the storage encoder's accumulator
+([src/ejson.ts](src/ejson.ts)) — and `Db`'s collection cache is a `Map`. This is
+not decoration: a projection of `{ '__proto__.x': 1 }` used to write to
+`Object.prototype`, and a document field named `toString` used to find a function
+where a subtree was expected.
 
 ## Testing approach
 
@@ -128,11 +168,19 @@ Other things to know:
   also imports `Db as Mdb` as a **value** (not `import type`) because its
   assertions use `instanceof Mdb`.
 
+- Two specs deliberately run against this library **alone**, and say so at the
+  top: [test/cursor.spec.ts](test/cursor.spec.ts) (statement lifetime has no
+  MongoDB analogue) and the rejection half of
+  [test/collections.spec.ts](test/collections.spec.ts) (the driver defers name
+  validation to the server). Everything else is dual-engine.
+- [test/operators/operator-edge-cases.spec.ts](test/operators/operator-edge-cases.spec.ts)
+  collects the compiler's edge cases — empty arrays, scalars where arrays were
+  expected, malformed operators. When a query "returns nothing" or dies with a
+  raw SQLite error, that is the file to extend.
+
 Some assertions are commented out with `// TODO` (see
 [test/operators/query-operators.spec.ts](test/operators/query-operators.spec.ts)).
-These are genuinely unimplemented features, not flaky tests — the largest is
-implicit array-element matching (`{ tags: 'B' }` matching an array containing
-`'B'`).
+These are genuinely unimplemented features, not flaky tests.
 
 ## Toolchain notes
 
@@ -153,13 +201,23 @@ implicit array-element matching (`{ tags: 'B' }` matching an array containing
 - `Db.fromUrl()` and the `Collection` methods are `async` for API compatibility,
   but `node:sqlite` is **synchronous** — there is no real concurrency underneath.
   Keep the async signatures; callers and the MongoDB parity tests depend on them.
+  The one thing callers *can* interleave is a `for await` over a cursor: writing
+  to the same collection inside that loop is unspecified in SQLite. Documented in
+  the README rather than prevented.
+- Single-document writes (`deleteOne`, `updateOne`, `replaceOne`) locate their
+  target with `findOneRow()` and then address it **by rowid**. Do not "simplify"
+  this back to a second filter on `_id`: the id's type changes how that filter
+  compiles, and an array `_id` made `deleteOne` delete two documents.
 - `insertMany` **mutates the input documents**, assigning `_id` in place. This
   matches the MongoDB driver, and several tests assert on the mutated objects.
 - `insertMany` is not transactional, matching MongoDB's *ordered* insert: on a
   duplicate `_id` the documents already written stay written.
 - **Storage is EJSON-for-Dates, not plain JSON** ([src/ejson.ts](src/ejson.ts), per
   DR-1). Dates are stored as `{"$date": "<ISO>"}` and revived on read; every other
-  non-JSON type is rejected at write time with the offending path. Consequences:
+  non-JSON type is rejected at write time with the offending path — **including a
+  plain object of exactly that wrapper shape**, which would otherwise be revived as
+  a Date (an *Invalid* Date, serialising to `null`, when the string is not one).
+  Consequences:
   documents must go through `stringifyDocument`/`parseDocument`, never raw
   `JSON.stringify`/`parse`; date comparisons in [src/query/query.ts](src/query/query.ts)
   target the `field.$date` sub-path (ISO strings order lexicographically, which is what

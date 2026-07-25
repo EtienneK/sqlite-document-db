@@ -31,8 +31,9 @@ dependencies kept); other non-JSON types are rejected at write time with the off
 path. Query support: `$eq/$ne/$gt/$gte/$lt/$lte` target the `field.$date` sub-path,
 `$in/$nin` with Dates rewrite to `$or/$nor` of equalities, whole-object/array equality
 encodes query values through the same encoder. Verified dual-engine in
-[test/dates.spec.ts](test/dates.spec.ts). Not yet date-aware: `$all` and `$elemMatch`
-on date elements (niche; revisit with item 3). Full EJSON (option B) remains open —
+[test/dates.spec.ts](test/dates.spec.ts). `$all` became date-aware on 2026-07-25
+(see [the review notes](#review-2026-07-25)); `$elemMatch` on date elements is
+still not (niche; revisit with item 3). Full EJSON (option B) remains open —
 the wire format is identical. Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
 [5b](#5-typescript-typing) and [6](#6-cursor-sort-limit-and-skip), and caps DR-2.
 
@@ -186,9 +187,9 @@ replacement".
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
 | 8 | ~~[`$regex`, `$type`, `$mod`](#8-remaining-query-operators)~~ | M | **DONE 2026-07-22** — `$expr`/`$bits*`/`$text` still open |
 | 9 | ~~[Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation)~~ | M | **DONE 2026-07-22** — named params for all values; statement caching still open |
-| 10 | [Error normalisation](#10-normalise-errors-to-mongodb-shapes) | S | Callers currently catch raw SQLite errors |
-| 11 | [Collection naming](#11-fix-collection-naming-restrictions) | S | Silent data-merging bug |
-| 12 | [Transactions](#12-transactions) | M | Correctness for multi-document writes |
+| 10 | ~~[Error normalisation](#10-normalise-errors-to-mongodb-shapes)~~ | S | **DONE 2026-07-25** — `MongoServerError` with `code: 11000`, dual-engine verified |
+| 11 | ~~[Collection naming](#11-fix-collection-naming-restrictions)~~ | S | **DONE 2026-07-25** — case-sensitive, quoted identifiers |
+| 12 | [Transactions](#12-transactions) | M | Correctness for multi-document writes (pragmas DONE) |
 | 13 | [Missing tutorial coverage](#13-close-the-tutorial-coverage-gaps) | S | Finishes the job you started |
 | 14 | [CI](#14-continuous-integration) | S | Nothing currently runs the suite |
 | 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | `distinct`, `drop`, `bulkWrite`, … |
@@ -197,6 +198,98 @@ replacement".
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
 format); items 5b, 15 and 16 depend on **[DR-2](#dr-2-how-mongodb-compatible-should-the-api-be)**
 (compatibility target). Item 1 is independent — it can start today.
+
+---
+
+## Review 2026-07-25
+
+A full read of the source turned up defects that no backlog item covered. All are
+fixed, each with a dual-engine assertion (MongoDB is the oracle, so the tests
+record what the server actually does rather than what seemed reasonable). Recorded
+here because several are the kind of thing that gets reintroduced by a plausible
+"simplification".
+
+**Silent data loss.** These wrote the wrong bytes and reported success:
+
+- `{ $set: { '': 1 } }` REPLACED THE WHOLE DOCUMENT. `toJson1PathString([''])` is
+  `'$'` — the JSON root — so `json_set(data, '$', …)` overwrote everything. Empty
+  field names are rejected in every update operator now.
+- `$unset`/`$inc` were never checked against `_id` (only `$set` was), so
+  `{ $unset: { _id: '' } }` left a document with no id, unaddressable and
+  invisible to the unique index (SQLite permits many NULLs).
+- `$inc` on a non-numeric field wrote a number over it — SQLite evaluates
+  `'hello' + 1` as `1`. It now raises, via an `mdb_raise()` SQL function
+  registered on the connection (SQLite has no `RAISE` outside triggers). It is
+  deliberately **not** marked deterministic: SQLite hoists constant deterministic
+  calls out of the row loop, which would fire it on every update.
+- Operators conflicting on one path (`{ $set: { qty: 1 }, $inc: { qty: 1 } }`)
+  silently resolved by the compiler's fixed operator order — `$inc` reads the
+  original column, so the answer depended on an implementation detail. Rejected
+  now, as MongoDB rejects it.
+- A document field shaped exactly like the stored Date wrapper
+  (`{ $date: '<string>' }`) came back as a `Date` — an *Invalid* Date if the
+  string was not a date, which then serialised to `null`. Rejected at write time.
+- A field literally named `__proto__` vanished: `encoded[key] = …` on a normal
+  object sets the prototype instead of a property. The encoder accumulates into
+  an `Object.create(null)` object now.
+- `deleteOne` could delete TWO documents. It re-queried its target by `_id`, and
+  with an array `_id` the implicit array-element rule made `{ _id: [...] }` match
+  a sibling document that merely *contained* that array. Single-document writes
+  address rows by `rowid` now, and an array `_id` is rejected on insert as
+  MongoDB rejects it.
+
+**Wrong answers.**
+
+- `$exists` counted `json_each` ROWS, so an empty array or empty object reported
+  as *not existing*. It is `json_type(...) IS [NOT] NULL` now — also far cheaper,
+  since the old form ran a correlated subquery per row.
+- `$size: 0` matched every non-array and missing field (`json_array_length`
+  answers 0 for a scalar). Type-guarded now, and non-integer/negative sizes are
+  errors as on the server.
+- A misspelled operator was treated as an equality match against the criterion
+  object: `{ qty: { $gtt: 5 } }` quietly returned `[]`. Unknown `$`-operators —
+  and operators mixed with plain field names — are errors now.
+
+**Crashes on ordinary input.** Each of these surfaced a raw SQLite error:
+
+- `$all` fed `json_each` an *extracted* value, so a collection where any row held
+  a bare string at that path failed the whole query with "malformed JSON". `$all`
+  is defined as an `$and` of its values, so it delegates to that now — which also
+  makes it index-eligible and Date-aware for free.
+- `{ $or: [] }` and `{ $elemMatch: {} }` emitted `(())`, a SQL syntax error. The
+  first is rejected (as on the server); the second is an object match, verified
+  against MongoDB to mean "an element that is a document or an array".
+- A top-level `{ $not: … }` recursed into itself until the stack overflowed. Only
+  `$and`/`$or`/`$nor` are legal filter-document keys, as on the server.
+- `find({}, { limit: NaN })` reached SQL as `LIMIT NaN` ("no such column: NaN") —
+  the chainable `.limit()` validated, the options form did not.
+
+**Prototype pollution.** `compileProjection()` builds a path tree keyed by
+user-supplied field names and then looks it up with the *document's* field names,
+so a plain `{}` answered both from `Object.prototype`:
+
+- `find({}, { projection: { '__proto__.polluted': 1 } })` walked into
+  `Object.prototype` and **wrote to it** — process-wide pollution from a value
+  that, in a web application, often comes straight off a query string.
+- A document field named `toString` (or `constructor`, …) found a function where
+  a subtree was expected, and was emitted as `{}` in a projection that never
+  asked for it.
+
+Both are fixed by building every tree node with `Object.create(null)`. The same
+class of bug lived in `Db`'s collection cache, where `db.collection('__proto__')`
+returned `Object.prototype` cast as a `Collection`; it is a `Map` now.
+
+**Robustness.** The `$regex` pattern cache was unbounded (a DoS vector for
+patterns built from user input) and is now capped; `busy_timeout` is set from a
+new `busyTimeoutMs` option.
+
+**One test was wrong, not the code.** The `.$date` plan-regression test ran
+`ANALYZE` on its mirror table. With statistics over a synthetic all-distinct
+column, SQLite costs an open-ended `> ?` range at a quarter of the table and picks
+a scan — a sound decision that says nothing about whether the SQL is
+index-eligible, which is what the test exists to check. Removing `ANALYZE` restores
+the intended question; the `ORDER BY rowid` regression it guards is still caught
+(measured), and both tests now also assert that no full scan appears at all.
 
 ---
 
@@ -323,7 +416,8 @@ indexing; `IN` dedups anyway). Range operators gained MongoDB-style type bracket
 otherwise made `> 25` true for every array). `ORDER BY rowid` is restored in
 `find()`/`findOne()` — safe now that index work happens inside the rowid subqueries.
 Still open: implicit matching inside `$elemMatch` nesting uses the unindexed flat
-form (fine), `$all` on dates. Original analysis follows. it single-handedly unblocks all four
+form (fine). `$all` on dates was closed 2026-07-25 - see
+[the review notes](#review-2026-07-25). Original analysis follows. it single-handedly unblocks all four
 commented-out assertions in
 [test/operators/query-operators.spec.ts](test/operators/query-operators.spec.ts#L29-L34).
 
@@ -369,8 +463,11 @@ documents; update methods reject operator-less documents. Dual-engine verified i
 [test/mdb-tutorials/update-documents.spec.ts](test/mdb-tutorials/update-documents.spec.ts).
 **Still open:** `upsert` option, `$mul`/`$min`/`$max`/`$rename`/`$push`/`$pull`/
 `$addToSet`/`$pop`, `findOneAndUpdate`/`findOneAndReplace`/`findOneAndDelete`.
-Known divergences (documented, not tested): `$inc` on a non-numeric field coerces
-instead of erroring; `$unset` of an array element removes it instead of nulling it.
+Known divergences: `$unset` of an array element removes it instead of nulling it;
+`$set`/`$inc` through a SCALAR parent (`$set: { 'qty.x': 1 }` where `qty` is a
+number) silently no-ops where MongoDB errors. (`$inc` on a non-numeric field used
+to coerce instead of erroring — fixed 2026-07-25, see
+[the review notes](#review-2026-07-25).)
 Original analysis follows. only `replaceOne` exists, so there is no way
 to modify a field without rewriting the whole document.
 From the README, and the
@@ -611,7 +708,17 @@ operator against real MongoDB. Add a test with adversarial values (`'`, `"`, `\`
 
 ## 10. Normalise errors to MongoDB shapes
 
-**Size: S.** A duplicate `_id` currently surfaces as a raw SQLite
+**Size: S — DONE 2026-07-25.** [src/errors.ts](src/errors.ts) exports
+`MongoServerError` and `DUPLICATE_KEY_ERROR` (= 11000); `Collection` translates
+SQLite's `SQLITE_CONSTRAINT_UNIQUE`/`_PRIMARYKEY` on every write, mapping the
+physical index name in the message back to the MongoDB one (`_id_`, `email_1`).
+Verified dual-engine in [test/errors.spec.ts](test/errors.spec.ts) for duplicate
+`_id` (insertOne and insertMany), unique-index violations on insert AND update,
+and the negative case. `instanceof` against the driver's class is impossible
+without depending on `mongodb`, so callers branch on `code` — which is what
+they do anyway. Original analysis follows.
+
+A duplicate `_id` currently surfaces as a raw SQLite
 `SQLITE_CONSTRAINT_UNIQUE` error. MongoDB throws a `MongoServerError` with
 `code: 11000`, and callers routinely branch on that code.
 
@@ -625,7 +732,21 @@ existing assertions to check the code on both engines.
 
 ## 11. Fix collection naming restrictions
 
-**Size: S.** `Db.collection()` lowercases the name, and the `Collection` constructor
+**Size: S — DONE 2026-07-25.** Names are case-sensitive and validated only
+against MongoDB's own rules (non-empty, no `$`, no NUL, not `system.`/`sqlite_`,
+≤ 200 chars); every identifier is quoted through `quoteIdentifier()`, which
+[src/query/query.ts](src/query/query.ts) now exports so one routine escapes them
+all. Dual-engine verified in [test/collections.spec.ts](test/collections.spec.ts).
+
+**The trap worth knowing:** quoting alone was not enough. SQLite compares
+identifiers case-INSENSITIVELY, so `"collection_Users"` and `"collection_users"`
+are the same table — the silent merge would simply have moved down a layer. The
+physical name is therefore derived by `tableNameFor()`: `/^[a-z0-9_]+$/` names
+keep the readable `collection_<name>` form, and everything else lands in a
+disjoint `collectionx_<slug>_<sha256-16>` namespace where the digest of the
+EXACT name is what distinguishes casings. Original analysis follows.
+
+`Db.collection()` lowercases the name, and the `Collection` constructor
 rejects anything not matching `/^[a-z_]+[a-z0-9_]*$/`.
 
 So `db.collection('Users')` and `db.collection('users')` **silently return the same
@@ -651,9 +772,10 @@ group operations atomically.
 `await db.withTransaction(async () => { ... })`, closer to SQLite's strengths than
 MongoDB's session API.
 
-While here, set sensible pragmas for file-backed databases — `busy_timeout` especially,
-since WAL mode still blocks on a writer. Currently only `journal_mode=WAL` is set, which
-is a no-op for `:memory:` databases.
+~~While here, set sensible pragmas for file-backed databases — `busy_timeout` especially,
+since WAL mode still blocks on a writer.~~ **Pragmas DONE 2026-07-25:**
+`busy_timeout` is set from the new `busyTimeoutMs` option (default 5000) alongside
+`journal_mode=WAL`. The transaction API itself is still open.
 
 ---
 

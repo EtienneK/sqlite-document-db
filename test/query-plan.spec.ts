@@ -28,19 +28,28 @@ async function capture (use: (db: Db) => Promise<void>): Promise<string[]> {
   return logs.filter(l => typeof l === 'string')
 }
 
-/** EXPLAINs the captured SELECT on a mirror table populated with `docs` and the captured indexes. */
+/**
+ * EXPLAINs the captured SELECT on a mirror table populated with `docs` and the
+ * captured indexes.
+ *
+ * Deliberately no `ANALYZE`: these tests ask whether the emitted SQL is
+ * index-ELIGIBLE, and sqlite_stat1 answers a different question. With stats
+ * over this mirror's synthetic all-distinct column, SQLite estimates an
+ * open-ended `> ?` range at a quarter of the table and picks a scan on cost -
+ * a reasonable choice that says nothing about the SQL's shape, and one the
+ * library never triggers anyway (it does not run ANALYZE).
+ */
 function explain (logs: string[], docs: object[]): string {
-  const select = logs.findLast(l => l.startsWith('SELECT data FROM collection_items'))
+  const select = logs.findLast(l => l.startsWith('SELECT data FROM'))
   expect(select).toBeDefined()
 
   const mirror = new DatabaseSync(':memory:')
-  mirror.exec('CREATE TABLE collection_items (data JSON)')
-  const ins = mirror.prepare('INSERT INTO collection_items VALUES(json(?))')
+  mirror.exec('CREATE TABLE "collection_items" (data JSON)')
+  const ins = mirror.prepare('INSERT INTO "collection_items" VALUES(json(?))')
   for (const doc of docs) ins.run(JSON.stringify(doc))
   for (const create of logs.filter(l => l.startsWith('CREATE') && l.includes('INDEX') && !l.includes('doc_id'))) {
     mirror.exec(create)
   }
-  mirror.exec('ANALYZE')
 
   const plan = mirror.prepare(`EXPLAIN QUERY PLAN ${select as string}`).all()
     .map(row => (row as { detail: string }).detail).join(' | ')
@@ -56,7 +65,11 @@ describe('find() query plans', () => {
       await db.collection('items').find({ qty: { $gt: 1 } }).next()
     })
     const docs = Array.from({ length: 1000 }, (_, i) => ({ _id: String(i), qty: i }))
-    expect(explain(logs, docs)).toContain('INDEX ix_collection_items_qty_1')
+    const plan = explain(logs, docs)
+    expect(plan).toContain('INDEX ix_collection_items_qty_1')
+    // Both arms of the implicit-array union must be served by the index - a
+    // plan containing a full scan means only one of them was.
+    expect(plan).not.toContain('SCAN collection_items')
   })
 
   it('a Date-range find() should use the .$date companion index', async () => {
@@ -67,6 +80,8 @@ describe('find() query plans', () => {
     })
     const docs = Array.from({ length: 1000 }, (_, i) =>
       ({ _id: String(i), at: { $date: new Date(1_500_000_000_000 + i * 60_000).toISOString() } }))
-    expect(explain(logs, docs)).toContain('INDEX ixd_collection_items_at_1')
+    const plan = explain(logs, docs)
+    expect(plan).toContain('INDEX ixd_collection_items_at_1')
+    expect(plan).not.toContain('SCAN collection_items')
   })
 })

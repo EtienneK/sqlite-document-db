@@ -14,6 +14,12 @@
  *
  * `undefined` keeps JSON.stringify's behaviour (dropped from objects, null in
  * arrays) because document identity in the existing API depends on it.
+ *
+ * One consequence of the wrapper format: a document field that is itself an
+ * object of exactly the shape `{ "$date": "<string>" }` is indistinguishable
+ * from a stored Date, so it is rejected at write time too. This is the only
+ * place the library reserves a field name, and it is the alternative to
+ * handing that document back with an Invalid Date in it.
  */
 
 const DATE_KEY = '$date'
@@ -74,7 +80,18 @@ function encode (value: unknown, path: string, seen: Set<object>): unknown {
       return value.map((element, i) => encode(element, `${path}.${i}`, seen) ?? null)
     }
 
-    const encoded: Record<string, unknown> = {}
+    // A stored `{"$date": "<string>"}` is how a Date is written, so a document
+    // field of exactly that shape would be revived as a Date - or, if the
+    // string is not a date, as an Invalid Date that serialises back to null.
+    // Reject it at write time rather than corrupt it on read.
+    if (isDateWrapper(value)) {
+      throw unsupported(path, 'object shaped like the stored Date wrapper ({ "$date": "..." })')
+    }
+
+    // A null prototype, so that a field literally named __proto__ (which
+    // JSON.parse produces as an ordinary own property) is stored as data
+    // instead of silently vanishing into a prototype assignment.
+    const encoded: Record<string, unknown> = Object.create(null)
     for (const [key, fieldValue] of Object.entries(value)) {
       if (fieldValue === undefined) continue // JSON.stringify drops these; keep that.
       encoded[key] = encode(fieldValue, `${path}.${key}`, seen)

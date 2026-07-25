@@ -1,7 +1,43 @@
 import type { Db as Mdb } from 'mongodb'
 
 import type { Db } from '../../src/index.js'
-import { seededDualDbs } from '../helpers/dual-dbs.js'
+import { freshDualDbs, seededDualDbs } from '../helpers/dual-dbs.js'
+
+/**
+ * The compiled projection tree is keyed by user-supplied field names and looked
+ * up with the DOCUMENT's field names, so an ordinary `{}` answers both from
+ * Object.prototype.
+ */
+describe('Projection and Object.prototype', () => {
+  const dbs = freshDualDbs()
+
+  for (const dbName of ['Sqlite', 'Mongodb']) {
+    const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
+
+    describe(dbName, () => {
+      it('should not confuse a field named after an Object.prototype member', async () => {
+        const col = db().collection('i')
+        await col.insertOne({ _id: 1, a: 1, toString: { b: 2 }, constructor: 'c' } as any)
+
+        // `toString: {}` used to appear in the output: the tree lookup found
+        // Object.prototype.toString and recursed into it as if it were a subtree.
+        expect(await col.find({}, { projection: { a: 1 } }).toArray())
+          .toStrictEqual([{ _id: 1, a: 1 }])
+        expect(await col.find({}, { projection: { a: 0 } }).toArray())
+          .toStrictEqual([{ _id: 1, toString: { b: 2 }, constructor: 'c' }])
+      })
+
+      it('should not pollute Object.prototype through a projection path', async () => {
+        const col = db().collection('i')
+        await col.insertOne({ _id: 1, a: 1 } as any)
+
+        // A projection spec can arrive straight from a request query string.
+        await col.find({}, { projection: { '__proto__.polluted': 1 } }).toArray().catch(() => [])
+        expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+      })
+    })
+  }
+})
 
 describe('Project Fields to Return - https://www.mongodb.com/docs/manual/tutorial/project-fields-from-query-results/', () => {
   const items = [

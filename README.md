@@ -208,6 +208,38 @@ await db.collection('items').updateMany({ qty: { $lt: 50 } }, { $set: { status: 
 await db.collection('items').updateOne({ item: 'paper' }, { $unset: { status: '' } })
 ```
 
+Updates are validated the way MongoDB validates them, rather than being applied
+loosely: `_id` is immutable, a field cannot be targeted by two operators in one
+update, and `$inc` on a non-numeric field is an error.
+
+### Handle errors
+
+Write failures carry MongoDB's error codes, so the usual `catch` works unchanged:
+
+```javascript
+import { DUPLICATE_KEY_ERROR } from 'sqlite-document-db' // === 11000
+
+try {
+  await db.collection('users').insertOne({ _id: 'taken' })
+} catch (error) {
+  if (error.code === DUPLICATE_KEY_ERROR) { /* already exists */ }
+}
+```
+
+`MongoServerError` is also exported, but branch on `code` — `instanceof` cannot
+match the official driver's class without depending on `mongodb`.
+
+### Collection names
+
+Names are **case-sensitive**, as MongoDB's are, and accept anything MongoDB
+accepts (`my-data`, `audit.log`, `Items`). Rejected: an empty name, a `$`, a NUL
+byte, and the `system.` / `sqlite_` prefixes.
+
+```javascript
+db.collection('Users')  // a different collection from...
+db.collection('users')  // ...this one
+```
+
 ## Development
 
 ```
@@ -238,7 +270,8 @@ Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
 `createIndex()` `dropIndex()` `indexes()` `listIndexes()`.
 
 Update operators: `$set` `$unset` `$inc`. Result objects match the official
-driver's shapes (`acknowledged`, `matchedCount`, `modifiedCount`, ...).
+driver's shapes (`acknowledged`, `matchedCount`, `modifiedCount`, ...), and
+errors match its codes (`11000` for a duplicate key).
 
 ### Supported value types
 
@@ -258,6 +291,27 @@ naming the offending path, rather than silently corrupted the way `JSON.stringif
 would. (`RegExp` still works fine as a *query* value via `$regex` — it just cannot
 be stored in documents.) Design notes in
 [DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
+
+One field shape is reserved by that format: an object that is exactly
+`{ "$date": "<string>" }` is indistinguishable from a stored `Date`, so it is
+rejected on write too. Objects that merely *contain* a `$date` key
+(`{ $date: '…', tz: 'UTC' }`) store normally.
+
+### Concurrency
+
+`node:sqlite` is synchronous, so the `async` API never actually yields mid-operation
+— there is no interleaving within a single call. Two things follow:
+
+- **Do not write to a collection while iterating a cursor over it.** SQLite leaves
+  the result of modifying a table mid-`SELECT` unspecified; rows may be visited
+  twice or skipped. Materialise with `toArray()` first.
+- **File-backed databases across processes** work under WAL, but writers still
+  serialise. `busyTimeoutMs` (default 5000) controls how long a write waits for a
+  competing writer before failing:
+
+  ```javascript
+  const db = await Db.fromUrl('./data.db', { busyTimeoutMs: 10_000 })
+  ```
 
 ### Still missing
 

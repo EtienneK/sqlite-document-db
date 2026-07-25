@@ -12,7 +12,22 @@
 
 export type ProjectionSpec = Record<string, any>
 
+/**
+ * A node of the compiled path tree.
+ *
+ * ALWAYS built with `Object.create(null)`. The tree is keyed by user-supplied
+ * field names and looked up with the DOCUMENT's field names, so an ordinary
+ * object would answer both from `Object.prototype`: a document field called
+ * `toString` would find a function where a subtree was expected and be
+ * projected as `{}`, and a projection of `{ '__proto__.x': 1 }` would walk into
+ * `Object.prototype` and write to it - prototype pollution from a projection
+ * spec, which in a web application can come straight from a query string.
+ */
 interface Tree { [key: string]: true | Tree }
+
+function emptyTree (): Tree {
+  return Object.create(null) as Tree
+}
 
 /** A value projection can descend into (excludes Dates, which decode as objects). */
 function isProjectable (value: unknown): value is Record<string, unknown> {
@@ -25,7 +40,7 @@ function addPath (tree: Tree, field: string): void {
   for (const segment of segments.slice(0, -1)) {
     const existing = node[segment]
     if (existing === true) throw Error(`Path collision at ${field}`) // e.g. { a: 1, 'a.b': 1 }
-    if (existing === undefined) node[segment] = {}
+    if (existing === undefined) node[segment] = emptyTree()
     node = node[segment] as Tree
   }
   const leaf = segments[segments.length - 1]!
@@ -99,7 +114,7 @@ export function compileProjection (spec: ProjectionSpec): (doc: any) => any {
   const include = includeCount > 0 || (excludeCount === 0 && Boolean(idValue ?? false))
   const keepId = idValue === undefined ? true : Boolean(idValue)
 
-  const tree: Tree = {}
+  const tree: Tree = emptyTree()
   for (const [field, value] of entries) {
     if (field === '_id') continue
     if (Boolean(value) === include) addPath(tree, field)

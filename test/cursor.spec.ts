@@ -60,6 +60,18 @@ describe('FindCursor', () => {
     expect(await db.collection('items').countDocuments()).toStrictEqual(50)
   })
 
+  it('should validate limit and skip in the options form, not just the chainable one', async () => {
+    // Both are interpolated into SQL, so an unvalidated NaN used to surface as
+    // SQLite's "no such column: NaN" several calls later.
+    const col = db.collection('items')
+    expect(() => col.find({}, { limit: NaN })).toThrow(/limit/)
+    expect(() => col.find({}, { limit: Infinity })).toThrow(/limit/)
+    expect(() => col.find({}, { skip: -1 })).toThrow(/skip/)
+    expect(() => col.find({}, { skip: '5' as any })).toThrow(/skip/)
+    expect(() => col.find().limit(NaN)).toThrow(/limit/)
+    expect(() => col.find().skip(-1)).toThrow(/skip/)
+  })
+
   it('two cursors on the same collection should iterate independently', async () => {
     const a = db.collection('items').find({ even: true })
     const b = db.collection('items').find({ even: false })
