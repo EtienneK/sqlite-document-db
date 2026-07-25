@@ -1,0 +1,134 @@
+name: Publish
+
+# Publishing is irreversible: npm only allows unpublishing within 72 hours, and
+# a version number can NEVER be reused. Everything here exists to make it hard
+# to ship something broken by accident.
+#
+# A real publish happens only from a version tag:
+#
+#     npm version 2.1.0        # bumps package.json and creates the tag
+#     git push --follow-tags
+#
+# Running this workflow by hand is always a rehearsal - it packs, installs and
+# smoke-tests the tarball, then stops short of publishing.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # The full CI matrix - {ubuntu, windows} x Node {22.13.0, 24, 26} - not a
+  # copy of it. A release is exactly when you want every job to have run.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write # to create the GitHub release
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+        env:
+          MONGOMS_DISABLE_POSTINSTALL: '1' # no mongod needed; verify already ran the suite
+
+      # The classic release footgun: tagging v2.0.1 while package.json still
+      # says 2.0.0 publishes the wrong version, and the number is then spent.
+      - name: Check the tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p 'require("./package.json").version')"
+          echo "tag=$TAG package.json=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $PKG"
+            exit 1
+          fi
+
+      - run: npm run build
+
+      # Unit tests cannot catch a broken `files` list, a wrong `exports` map or
+      # a .d.ts that only resolves inside this repo. Installing the real tarball
+      # into a clean project can, and that is the failure mode that reaches users.
+      - name: Smoke-test the packed tarball
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination "$RUNNER_TEMP"
+          TARBALL="$(ls "$RUNNER_TEMP"/sqlite-document-db-*.tgz)"
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm pkg set type=module
+          npm install "$TARBALL"
+
+          # Zero runtime dependencies is a headline feature - assert it.
+          INSTALLED="$(ls node_modules | grep -v '^\.' | tr '\n' ' ')"
+          echo "installed: $INSTALLED"
+          if [ "$INSTALLED" != "sqlite-document-db " ]; then
+            echo "::error::expected no transitive dependencies, got: $INSTALLED"
+            exit 1
+          fi
+
+          cat > smoke.mjs <<'SMOKE'
+          import Db, { DUPLICATE_KEY_ERROR } from 'sqlite-document-db'
+          import assert from 'node:assert/strict'
+
+          const db = await Db.fromUrl(':memory:')
+          const items = db.collection('items')
+          await items.insertMany([
+            { item: 'journal', qty: 25, tags: ['blank', 'red'], at: new Date('2020-06-15') },
+            { item: 'planner', qty: 75, tags: ['red'] }
+          ])
+          await items.createIndex({ qty: 1 })
+
+          assert.deepEqual((await items.find({ qty: { $gt: 30 } }).toArray()).map(d => d.item), ['planner'])
+          assert.deepEqual((await items.find({ tags: 'red' }).toArray()).map(d => d.item), ['journal', 'planner'])
+          assert.ok((await items.findOne({ item: 'journal' })).at instanceof Date)
+          assert.equal((await items.updateOne({ item: 'new' }, { $set: { qty: 1 } }, { upsert: true })).upsertedCount, 1)
+          assert.equal((await items.findOneAndUpdate({ item: 'journal' }, { $inc: { qty: 5 } }, { returnDocument: 'after' })).qty, 30)
+          assert.deepEqual(await items.findOne({ item: 'planner' }, { projection: { item: 1, _id: 0 } }), { item: 'planner' })
+          assert.deepEqual((await items.indexes()).map(i => i.name), ['_id_', 'qty_1'])
+
+          await items.insertOne({ _id: 'x' })
+          await assert.rejects(items.insertOne({ _id: 'x' }), e => e.code === DUPLICATE_KEY_ERROR)
+
+          await db.close()
+          console.log('tarball smoke test OK')
+          SMOKE
+          node smoke.mjs
+
+      - name: Publish to npm
+        if: github.event_name == 'push'
+        # --provenance records a verifiable link from the tarball back to this
+        # commit and workflow. It needs `id-token: write` above and a public repo.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create the GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)." \
+            "$RUNNER_TEMP"/sqlite-document-db-*.tgz
+
+      - name: Rehearsal summary
+        if: github.event_name != 'push'
+        run: |
+          echo "### Rehearsal only" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The package was built, packed, installed into a clean project and smoke-tested." >> "$GITHUB_STEP_SUMMARY"
+          echo "Nothing was published — a real publish runs only from a \`v*\` tag." >> "$GITHUB_STEP_SUMMARY"

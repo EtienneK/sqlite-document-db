@@ -20,7 +20,11 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 | `npm run bench` | Benchmarks over 20k docs; no mongod, own vitest config |
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck,
-test:types, build and test on {ubuntu, windows} × Node {22.13.0, 24, 26}. The Node axis matters more than it
+test:types, build and test on {ubuntu, windows} × Node {22.13.0, 24, 26}.
+Releases go through [.github/workflows/publish.yml](.github/workflows/publish.yml),
+which **reuses** that workflow via `workflow_call` rather than copying the
+matrix, then packs the tarball and smoke-tests it from a clean project before
+publishing. `npm version <x> && git push --follow-tags` is the whole release. The Node axis matters more than it
 looks: `node:sqlite` bundles its own SQLite, so the query planner — and therefore
 [test/query-plan.spec.ts](test/query-plan.spec.ts) — differs per Node version.
 

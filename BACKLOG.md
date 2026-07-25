@@ -883,8 +883,16 @@ knowing. It sets `MONGOMS_DISABLE_POSTINSTALL` since it never starts a mongod.
 [CHANGELOG.md](CHANGELOG.md) covers the 1.0.6 → 2.0.0 break (ESM-only, Node
 ≥ 22.13, the `sqlite`/`sqlite3`/`bson-objectid` dependencies dropped,
 case-sensitive collection names, driver-shaped results, and the Date storage
-format change). Still open: a **publish workflow**, which would also give npm
-provenance — publishing is manual today.
+format change). **Publish workflow DONE 2026-07-25** —
+[.github/workflows/publish.yml](.github/workflows/publish.yml) publishes on a
+`v*` tag with npm provenance, after reusing the full CI matrix via
+`workflow_call` (no duplicated matrix to drift). Two gates worth keeping:
+it fails if the tag and `package.json` version disagree — the classic way to
+spend a version number on the wrong build — and it packs the tarball, installs
+it into a clean project, asserts ZERO transitive dependencies and smoke-tests
+the public API, which is the only way to catch a broken `files` list or
+`exports` map. Running it by hand is always a rehearsal; a real publish needs a
+tag. Needs an `NPM_TOKEN` repository secret (or npm trusted publishing).
 
 ---
 
