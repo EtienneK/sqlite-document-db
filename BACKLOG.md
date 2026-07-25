@@ -190,7 +190,7 @@ replacement".
 | 10 | ~~[Error normalisation](#10-normalise-errors-to-mongodb-shapes)~~ | S | **DONE 2026-07-25** — `MongoServerError` with `code: 11000`, dual-engine verified |
 | 11 | ~~[Collection naming](#11-fix-collection-naming-restrictions)~~ | S | **DONE 2026-07-25** — case-sensitive, quoted identifiers |
 | 12 | [Transactions](#12-transactions) | M | Correctness for multi-document writes (pragmas DONE) |
-| 13 | [Missing tutorial coverage](#13-close-the-tutorial-coverage-gaps) | S | Finishes the job you started |
+| 13 | [Missing tutorial coverage](#13-close-the-tutorial-coverage-gaps) | S | Array-of-documents tutorial **DONE 2026-07-25**; bulkWrite one waits on item 15 |
 | 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix |
 | 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | `distinct`, `drop`, `bulkWrite`, … |
 | 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | Big; decide whether it's in scope at all |
@@ -278,6 +278,34 @@ so a plain `{}` answered both from `Object.prototype`:
 Both are fixed by building every tree node with `Object.create(null)`. The same
 class of bug lived in `Db`'s collection cache, where `db.collection('__proto__')`
 returned `Object.prototype` cast as a `Collection`; it is a `Map` now.
+
+**Dotted paths across arrays (found 2026-07-25, while writing the examples).**
+Two bugs, both silent:
+
+- `{ 'instock.qty': 5 }` matched NOTHING when `instock` is an array of
+  documents. `json_extract(data,'$.instock.qty')` is NULL there, and MongoDB
+  descends into arrays at every level of a path, not just the last. Now each
+  split of the path contributes an `$elemMatch` arm on the prefix, joined
+  through the same rowid union as implicit array matching so the plain arm
+  keeps its index. Bounded at two array levels (`MAX_ARRAY_PATH_DEPTH`): the
+  expansion is self-similar and would not otherwise terminate.
+- **Nested `$elemMatch` matched nothing at all.** Every level named its
+  computed column `valueJson`, so an inner `$elemMatch` shadowed its parent's
+  alias. Aliases are numbered per level now. This one was pre-existing and
+  independent of the above — the array-path work only surfaced it because it
+  depends on nesting `$elemMatch`.
+
+`$ne` now delegates to `NOT($eq)` rather than rebuilding the same predicate,
+which is both less duplication and how it inherits the path expansion.
+
+**Known cost, and the follow-up.** The array arm cannot use an index — an index
+over `json_extract(data,'$.size.uom')` says nothing about elements of an array
+at `$.size`. A dotted query is therefore ~3x faster indexed rather than the ~67x
+a plain field gets (measured, 20k docs); the plain arm is still index-served, so
+nothing regressed for array-free data. The fix would be a companion index on
+each PREFIX of a dotted path, letting the array arm lead with the same
+bracket-range probe `elementMatch` uses. That is MongoDB's multikey index in
+miniature and is worth doing before anyone leans on dotted paths at scale.
 
 **Robustness.** The `$regex` pattern cache was unbounded (a DoS vector for
 patterns built from user input) and is now capped; `busy_timeout` is set from a
@@ -834,9 +862,10 @@ since WAL mode still blocks on a writer.~~ **Pragmas DONE 2026-07-25:**
 **Size: S.** You worked through the MongoDB CRUD tutorials in order and stopped partway.
 Missing ones:
 
-- **[Query an Array of Embedded Documents](https://www.mongodb.com/docs/manual/tutorial/query-array-of-documents/)**
-  — no spec file. Partly works already via `$elemMatch` (fixed during the 2026
-  modernization); write the spec to find out exactly how much.
+- ~~**[Query an Array of Embedded Documents](https://www.mongodb.com/docs/manual/tutorial/query-array-of-documents/)**~~
+  **DONE 2026-07-25** — [test/mdb-tutorials/query-array-of-documents.spec.ts](test/mdb-tutorials/query-array-of-documents.spec.ts).
+  Writing an example against this tutorial is what found the two bugs below; the
+  answer to "exactly how much works" had been: less than the docs implied.
 - **[Iterate a Cursor](https://www.mongodb.com/docs/manual/tutorial/iterate-a-cursor/)**
   — async iteration was added but has no dedicated spec. Pairs naturally with item 1.
 - **[Bulk Write Operations](https://www.mongodb.com/docs/manual/core/bulk-write-operations/)**

@@ -35,11 +35,9 @@ console.log('dim.1 > 25          ', await names({ 'dim.1': { $gt: 25 } }))
 console.log('one elem 15<qty<40  ', await names({ instock: { $elemMatch: { qty: { $gt: 15, $lt: 40 } } } }))
 console.log('elem in warehouse A ', await names({ instock: { $elemMatch: { warehouse: 'A', qty: { $gt: 20 } } } }))
 
-// A specific position works with an index in the path.
+// A dotted path descends into the array: this matches any element's qty,
+// which is NOT the same as the $elemMatch above once there are two conditions.
+console.log('any elem qty = 5    ', await names({ 'instock.qty': 5 }))
 console.log('instock.0.qty = 5   ', await names({ 'instock.0.qty': 5 }))
-
-// KNOWN GAP: `{ 'instock.qty': 5 }` - a dotted path THROUGH an array, with no
-// index - does not match here yet, though MongoDB matches any element. Use
-// $elemMatch, or an explicit index, until that lands.
 
 await db.close()

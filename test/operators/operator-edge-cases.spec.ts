@@ -148,6 +148,25 @@ describe('Query operator edge cases', () => {
         expect(await col.find({ qty: { nope: 2 } }).toArray()).toStrictEqual([])
       })
 
+      it('nested $elemMatch should not shadow its parent', async () => {
+        // Every $elemMatch level used to name its computed column `valueJson`,
+        // so an inner one shadowed the outer alias and the whole query matched
+        // nothing - silently, which is the worst way for it to be wrong.
+        // any[]: mixed document shapes don't unify for the driver's insertMany
+        const i: any[] = [
+          { _id: 1, a: [{ b: [{ c: 9 }] }] },
+          { _id: 2, a: [{ b: [{ c: 1 }] }] },
+          { _id: 3, a: [{ b: { c: 9 } }] } // b is not an array here
+        ]
+        const col = db().collection('i')
+        await col.insertMany(i)
+
+        expect((await col.find({ a: { $elemMatch: { b: { $elemMatch: { c: 9 } } } } }).toArray()).map(d => d._id))
+          .toStrictEqual([1])
+        expect((await col.find({ a: { $elemMatch: { 'b.c': 9 } } }).toArray()).map(d => d._id))
+          .toStrictEqual([1, 3])
+      })
+
       it('should reject an array _id', async () => {
         // MongoDB forbids it outright. Here it also made a document ambiguous
         // to address: the implicit array-element rule let { _id: ['x','y'] }

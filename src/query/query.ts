@@ -25,6 +25,10 @@ interface SqlContext {
   col: string
   table?: string
   bindings: Bindings
+  /** How many array levels of a dotted path have already been expanded. */
+  arrayPathDepth?: number
+  /** $elemMatch nesting level, which keeps each level's column alias unique. */
+  elemMatchDepth?: number
 }
 
 // Only PATHS are ever rendered as string literals. Values go through
@@ -261,12 +265,76 @@ function elementMatch (ctx: SqlContext, field: string, elemPred: string): string
  * The rowid set also sidesteps three-valued logic: a row is either in it or
  * not, so `NOT (...)` behaves exactly like MongoDB's complement semantics.
  */
-function withElementMatch (ctx: SqlContext, scalarPred: string, elemArm: string): string {
-  if (ctx.table === undefined) return `(${scalarPred} OR ${elemArm})`
-  return `rowid IN (SELECT rowid FROM ${ctx.table} WHERE ${scalarPred} UNION ALL SELECT rowid FROM ${ctx.table} WHERE ${elemArm})`
+function withElementMatch (ctx: SqlContext, scalarPred: string, ...elemArms: string[]): string {
+  const arms = [scalarPred, ...elemArms]
+  if (arms.length === 1) return `(${arms[0]!})`
+  if (ctx.table === undefined) return `(${arms.join(' OR ')})`
+  return `rowid IN (${arms.map(arm => `SELECT rowid FROM ${ctx.table} WHERE ${arm}`).join(' UNION ALL ')})`
 }
 
+/**
+ * MongoDB descends into arrays at EVERY level of a dotted path, not just the
+ * last: `{ 'instock.qty': 5 }` matches a document whose `instock` is an array
+ * of documents one of which has `qty: 5`. `json_extract(data,'$.instock.qty')`
+ * is NULL for that document, so the plain path alone finds nothing.
+ *
+ * Each split of the path contributes one arm, expressed as `$elemMatch` on the
+ * prefix - which already means "some element of this array matches" and is
+ * already tested. `{ 'a.b.c': X }` therefore also tries
+ * `{ a: { $elemMatch: { 'b.c': X } } }` and `{ 'a.b': { $elemMatch: { c: X } } }`.
+ *
+ * The arms join through withElementMatch, so this stays a rowid union rather
+ * than a flat OR and the plain arm remains index-eligible - a dotted path over
+ * an indexed field must not lose its index just because an array MIGHT be
+ * there.
+ *
+ * Arms expand again, once, so a path can cross TWO array levels
+ * (`a: [{ b: [{ c: 9 }] }]`). It must be bounded: $elemMatch re-wraps its
+ * element as `{ f: ... }`, so the inner path is `f.b.c` and splitting it at
+ * `f` regenerates the same shape forever. MAX_ARRAY_PATH_DEPTH is what stops
+ * that; deeper nesting than this needs an explicit $elemMatch.
+ */
+function arrayPathArms (ctx: SqlContext, field: string, op: string, value: any): string[] {
+  const segments = field.split('.')
+  const criterion = op === '$eq' ? value : { [op]: value }
+  const inner: SqlContext = { ...ctx, arrayPathDepth: (ctx.arrayPathDepth ?? 0) + 1 }
+  const arms: string[] = []
+  for (let i = 1; i < segments.length; i++) {
+    // A numeric segment is an array INDEX, which addresses one element rather
+    // than asking for any of them - json_extract already handles it.
+    if (/^\d+$/.test(segments[i]!)) continue
+    arms.push(convertOp(inner, segments.slice(0, i).join('.'), '$elemMatch', {
+      [segments.slice(i).join('.')]: criterion
+    }))
+  }
+  return arms
+}
+
+/**
+ * How many array levels a dotted path may cross. Two covers
+ * `a: [{ b: [{ c: 1 }] }]`; the bound exists because the expansion is
+ * self-similar and would otherwise not terminate (see arrayPathArms).
+ */
+const MAX_ARRAY_PATH_DEPTH = 2
+
+/** Operators that address a field's VALUE, and so follow the array-path rule. */
+const ARRAY_PATH_OPS = new Set([
+  '$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$regex', '$mod', '$type', '$exists', '$size', '$all', '$elemMatch'
+])
+
 function convertOp (ctx: SqlContext, field: string, op: string, value: any): string {
+  // A dotted path may cross an array at any level (see arrayPathArms). The
+  // negative operators are deliberately absent from ARRAY_PATH_OPS: they are
+  // the complement of their positive twin and already delegate to it, so
+  // expanding them here would OR arms into a negation and invert the meaning.
+  if ((ctx.arrayPathDepth ?? 0) < MAX_ARRAY_PATH_DEPTH && field.includes('.') && ARRAY_PATH_OPS.has(op)) {
+    const arms = arrayPathArms(ctx, field, op, value)
+    if (arms.length > 0) {
+      const plain = convertOp({ ...ctx, arrayPathDepth: MAX_ARRAY_PATH_DEPTH }, field, op, value)
+      return withElementMatch(ctx, plain, ...arms)
+    }
+  }
+
   switch (op) {
     // ---------------------- Comparison Query Operators ----------------------
     case '$gt':
@@ -286,6 +354,15 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
         throw Error(`${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
+      // MongoDB's $ne is the exact complement of the whole $eq match: it
+      // excludes documents whose field equals the value AND documents whose
+      // array field contains it, keeping everything else including missing
+      // fields. Delegating rather than rebuilding that predicate also gives
+      // $ne the dotted-array-path expansion for free. This has to happen
+      // BEFORE any bindValue call below, or the parameter allocated here is
+      // orphaned and SQLite rejects the statement with "unknown parameter".
+      if (op === '$ne') return `NOT (${convertOp(ctx, field, '$eq', value)})`
+
       // Dates are stored as {"$date": "<ISO>"} (see src/ejson.ts), so date
       // comparisons target the wrapped string one level down. ISO-8601 UTC
       // strings order lexicographically, which makes range operators work.
@@ -295,14 +372,6 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       const elemValue = isDate ? `json_extract(value, '$.$date')` : 'value'
       const boundValue = bindValue(ctx, extractValue)
 
-      if (op === '$ne') {
-        // MongoDB's $ne is the complement of the whole $eq match: it excludes
-        // documents whose field equals the value AND documents whose array
-        // field contains it, keeping everything else including missing fields.
-        const eqScalar = `${extract(ctx, extractField)} is ${boundValue}`
-        const eqElem = `${elemValue} is ${boundValue}`
-        return `NOT (${withElementMatch(ctx, eqScalar, elementMatch(ctx, field, eqElem))})`
-      }
 
       // Range operators need type bracketing, like MongoDB's: a number query
       // must not match strings/arrays/objects. Without this, SQLite's type
@@ -469,10 +538,15 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       // which returns nothing for [1] and matches [{}], [{a:1}] and [[1]].
       // (A stored Date is an 'object' here but a scalar there, so exclude the
       // wrapper. json_extract is safe once the type is known to be object.)
+      // The alias is numbered per nesting level. It used to be plain
+      // `valueJson` at every level, so a nested $elemMatch shadowed its
+      // parent's alias and matched nothing at all - silently.
+      const depth = (ctx.elemMatchDepth ?? 0) + 1
+      const alias = `valueJson${depth}`
       const elemPred = $and.length === 0
         ? "(json_each.type = 'array' OR (json_each.type = 'object' AND json_extract(json_each.value, '$.$date') IS NULL))"
-        : convert({ col: 'valueJson', bindings: ctx.bindings }, { $and })
-      return `(${jsonType(ctx, field)} = 'array' AND EXISTS (select json_object('f', json_quote(value)) as valueJson from json_each(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) where (${elemPred})))`
+        : convert({ col: alias, bindings: ctx.bindings, arrayPathDepth: ctx.arrayPathDepth, elemMatchDepth: depth }, { $and })
+      return `(${jsonType(ctx, field)} = 'array' AND EXISTS (select json_object('f', json_quote(value)) as ${alias} from json_each(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) where (${elemPred})))`
     }
     case '$size': {
       // MongoDB requires a non-negative whole number, and only ever matches

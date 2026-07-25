@@ -117,6 +117,22 @@ used to become an equality match against that object and return nothing). If you
 add an operator, add it to `OPS`, and add it to `TOP_LEVEL_OPS_KEYS` only if
 MongoDB accepts it as a filter-document key.
 
+**Non-obvious detail — dotted paths cross arrays.** MongoDB descends into an
+array at EVERY level of a path, so `{ 'instock.qty': 5 }` must match an element
+of `instock`. Each split of the path contributes an `$elemMatch` arm on the
+prefix (`arrayPathArms`), joined through `withElementMatch` so the plain arm
+keeps its index. `MAX_ARRAY_PATH_DEPTH` is load-bearing: the expansion is
+self-similar — `$elemMatch` re-wraps its element as `{ f: ... }`, so the inner
+path is `f.b.c` and splitting at `f` regenerates the same shape forever.
+The negative operators are absent from `ARRAY_PATH_OPS` on purpose: they
+delegate to their positive twin, so expanding them would OR arms into a
+negation and invert the meaning.
+
+**Non-obvious detail — `$elemMatch` aliases are numbered.** Each nesting level
+names its computed column `valueJson<depth>`. A single shared `valueJson` meant
+an inner `$elemMatch` shadowed its parent and the query silently matched
+nothing; the alias number is the only thing preventing that.
+
 **Non-obvious detail — what an upsert inserts.** When nothing matched, the new
 document is built in JS by `buildUpsertDocument()`, not in SQL: MongoDB seeds it
 from the filter's **equality** conditions only, and "equality" is narrower than

@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-07-25
+
+### Fixed
+
+- **A dotted path into an array of embedded documents matched nothing.**
+  `{ 'instock.qty': 5 }` returned no documents where `instock` is an array,
+  though MongoDB descends into arrays at every level of a path. `$elemMatch`
+  and an explicit index (`'instock.0.qty'`) were the only forms that worked.
+  Paths may now cross up to two array levels.
+- **Nested `$elemMatch` matched nothing.** Every level named its computed
+  column the same thing, so an inner `$elemMatch` shadowed its parent — 
+  `{ a: { $elemMatch: { b: { $elemMatch: { c: 9 } } } } }` was always empty.
+
+Both were silent: they returned an empty result rather than an error. A dotted
+query over an indexed field still uses its index for documents where the path
+holds no array, but the array case necessarily scans — see
+[the backlog](BACKLOG.md#review-2026-07-25) for the companion-index follow-up.
+
 ## [2.0.0] — 2026-07-25
 
 A rewrite of the storage and query layers on top of Node's built-in
@@ -118,4 +136,5 @@ rejected on write. Objects that merely *contain* a `$date` key are unaffected.
 - The `$regex` pattern cache was unbounded, which could grow without limit when
   patterns are built from user input.
 
+[2.0.1]: https://github.com/EtienneK/sqlite-document-db/releases/tag/v2.0.1
 [2.0.0]: https://github.com/EtienneK/sqlite-document-db/releases/tag/v2.0.0
