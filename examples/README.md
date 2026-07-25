@@ -26,6 +26,8 @@ code the import is just `import Db from 'sqlite-document-db'`.
 | [09-errors.mjs](09-errors.mjs) | Duplicate keys (`11000`), and the mistakes that are refused |
 | [10-persistence.mjs](10-persistence.mjs) | File-backed databases, `debug`, and the one concurrency caveat |
 | [11-typed.ts](11-typed.ts) | TypeScript schemas — including what deliberately does *not* compile |
+| [12-array-updates.mjs](12-array-updates.mjs) | `$push`/`$pull`/`$addToSet`/`$pop`, and the `$each`+`$sort`+`$slice` capped-list idiom |
+| [13-aggregate.mjs](13-aggregate.mjs) | `$group`, `$unwind`, `$project`, and `explain()` on which stages reach SQLite |
 | [deno.ts](deno.ts) | The same quickstart, run by Deno |
 
 ## Deno

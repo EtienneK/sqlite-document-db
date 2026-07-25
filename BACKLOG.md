@@ -181,7 +181,7 @@ replacement".
 | 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
 | 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
 | 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
-| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — 2026-07-22 core; upsert + findOneAnd* 2026-07-25 |
+| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — core 2026-07-22; upsert + findOneAnd* 2026-07-25; array/field operators 2026-07-25 |
 | 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25** |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; JS-side |
@@ -193,11 +193,19 @@ replacement".
 | 13 | [Missing tutorial coverage](#13-close-the-tutorial-coverage-gaps) | S | Array-of-documents tutorial **DONE 2026-07-25**; bulkWrite one waits on item 15 |
 | 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix |
 | 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | `distinct`, `drop`, `bulkWrite`, … |
-| 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | Big; decide whether it's in scope at all |
+| 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common-shapes subset DONE 2026-07-25** — `$lookup` and the expression operators still open |
+| 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
-format); items 5b, 15 and 16 depend on **[DR-2](#dr-2-how-mongodb-compatible-should-the-api-be)**
-(compatibility target). Item 1 is independent — it can start today.
+format); items 5b, 15, 16 and 18 depend on
+**[DR-2](#dr-2-how-mongodb-compatible-should-the-api-be)** (compatibility target).
+
+**DR-2 is now settled in one direction worth recording:** the answer to "how
+MongoDB-compatible?" is *a subset that is honest about being one*. Everything
+outside the subset raises rather than being ignored, the subset itself is
+verified against a real server, and the places where the two are known to differ
+are enforced by item 18 rather than merely documented. That is what makes the
+README able to claim familiarity without claiming interchangeability.
 
 ---
 
@@ -511,7 +519,34 @@ exactly ONE document - "many" describes what is updated, not what is created.
 no earlier version. The driver's v6+ shape is used: the document itself, not the
 `{ value, ok }` wrapper.
 
-**Still open:** `$mul`/`$min`/`$max`/`$rename`/`$push`/`$pull`/`$addToSet`/`$pop`.
+**The remaining operators landed 2026-07-25** (`$mul`, `$min`, `$max`, `$rename`,
+`$push` with `$each`/`$slice`/`$sort`, `$addToSet` with `$each`, `$pop`, `$pull`,
+`$pullAll`), compiled to SQL in [src/update.ts](src/update.ts) and dual-engine
+verified in
+[test/operators/update-operators.spec.ts](test/operators/update-operators.spec.ts).
+Three things there are worth knowing before touching it:
+
+- **An array rebuild loses type information twice.** `json_each.value` carries a
+  JSON subtype that does not survive a nested SELECT, so objects came back as
+  strings; and a boolean element decodes to the INTEGER 1, so `[true]` rebuilt
+  as `[1]`. `restoreJson()` repairs both from the carried `type` column, and
+  every operator that rebuilds an array must go through it.
+- **A large `$each` cannot be appended value by value.** One `json_insert` per
+  element nests one SQL call per element, and SQLite's parser stops at a few
+  hundred ("Recursion limit"); `$push`/`$addToSet` bind the whole list as one
+  JSON array and append it with a `UNION ALL`, which is flat at any size
+  (verified to 20k).
+- **`$addToSet` deduplicates its `$each` list in JavaScript** (`equalsBson`)
+  so each candidate is only compared against the ORIGINAL array. Checking
+  against the array as it grows would nest the whole expression once per value,
+  which is exponential in the size of `$each`.
+- **`$pull` uses `json_replace`, not `json_set`**, because a `$pull` against a
+  missing field is a no-op — `json_replace` only writes where the path exists,
+  which avoids a `CASE` that would duplicate the whole expression.
+
+**Still open:** `$position` inside `$push` (it needs a rebuild that renumbers
+around the insert point, and is rejected with a clear error rather than
+half-implemented), and the positional operators `$`/`$[]`/`$[<id>]`.
 Known divergences: `$unset` of an array element removes it instead of nulling it;
 `$set`/`$inc` through a SCALAR parent (`$set: { 'qty.x': 1 }` where `qty` is a
 number) silently no-ops where MongoDB errors. (`$inc` on a non-numeric field used
@@ -940,15 +975,39 @@ Most are small once items 1–7 are in. `distinct()` maps to
 
 ## 16. Aggregation pipeline
 
-**Size: L.** `$match`, `$group`, `$sort`, `$project`, `$limit`, `$unwind`, `$lookup`.
+**Size: L — the common-shapes subset DONE 2026-07-25.** `$match`, `$sort`,
+`$limit`, `$skip`, `$count`, `$group`, `$project`, `$addFields`/`$set` and
+`$unwind`, with the accumulators `$sum`, `$avg`, `$min`, `$max`, `$first`,
+`$last`, `$push`, `$addToSet` and `$count`. Implemented in
+[src/aggregate.ts](src/aggregate.ts), dual-engine verified in
+[test/aggregate.spec.ts](test/aggregate.spec.ts).
 
-Genuinely feasible — `$unwind` is `json_each`, `$lookup` is a join, `$group` is
-`GROUP BY`, and `$match` reuses the existing compiler — but it is comfortably the
-biggest item here and arguably a different project.
+**The decision that shaped it: where each stage RUNS.** A leading run of
+`$match`/`$sort`/`$skip`/`$limit` is pushed into SQLite through the existing
+query compiler, so a pipeline that starts with `$match` is index-eligible —
+pinned by a plan-regression test in
+[test/query-plan.spec.ts](test/query-plan.spec.ts), which is the only thing that
+would notice if the pushdown silently regressed to "materialise, then filter".
+Everything after that runs in JavaScript. Compiling `$group` to SQL would mean
+re-implementing BSON comparison order inside `GROUP BY` and each accumulator,
+for a stage that is nearly always fed a few thousand rows; running it in JS
+reuses [src/bson-order.ts](src/bson-order.ts), which the SQL side already agrees
+with. `cursor.explain()` reports the boundary rather than leaving it to guesswork.
 
-**Decide explicitly whether this is in scope**, and say so in the README either way.
-"Query and CRUD only, no aggregation" is a perfectly respectable position that saves
-people from filing issues about it. The Postgres project doesn't do aggregation either.
+**A mid-pipeline `$match` goes back through SQLite via a TEMP table**, rather
+than through a JavaScript re-implementation of the filter language. A second
+matcher would be a second set of semantics to keep in step with the first, and
+every quirk pinned down in the specs (implicit array matching, the
+dotted-array-path rule, Date comparison through `.$date`) would eventually drift.
+
+**Still open:** `$lookup` (a join, and the obvious next one), `$facet`,
+`$bucket`, `$replaceRoot`, `$out`/`$merge`, `$sample`, `$graphLookup`; and the
+expression operator families — only field paths, literals and `$literal` are
+supported today, so `$add`/`$concat`/`$cond`/`$dateToString` and friends are
+all absent. Known divergence: a field path does NOT map over an array the way
+MongoDB's does (`'$instock.qty'` reads as missing rather than yielding an
+array); `$unwind` first. `strict: true` rejects that case rather than answering
+it differently.
 
 ---
 
@@ -977,3 +1036,27 @@ people from filing issues about it. The Postgres project doesn't do aggregation 
 - **Concurrency story.** `node:sqlite` is synchronous, so the async API never yields
   mid-operation. Document what that means for a server using this under load, and
   whether a file-backed database is safe across multiple processes (WAL + `busy_timeout`).
+
+---
+
+## 18. Strict mode
+
+**Size: S — DONE 2026-07-25.** `Db.fromUrl(url, { strict: true })` rejects the
+constructs whose answer is KNOWN to differ from MongoDB's, instead of quietly
+returning the different answer. Verified in [test/strict.spec.ts](test/strict.spec.ts),
+which is deliberately single-engine: every case is one where a real server and
+this library disagree, so there is nothing to run against MongoDB.
+
+Four checks today: a dotted path that could cross more than
+`MAX_ARRAY_PATH_DEPTH` array levels; `$type` naming a BSON type the storage
+layer cannot hold (which compiles to FALSE, so "no results" is an artefact);
+a sort whose key holds an array in some document (checked against the DATA, since
+it is not statically knowable); and an aggregation field path that runs through
+an array.
+
+It is a boundary check, not a proof of equivalence. **When a new divergence is
+found, add a check here as well as documenting it** — the point of the mode is
+that the list of known divergences is enforced rather than merely written down.
+Each spec asserts BOTH halves: that the lenient default still behaves as
+documented, and that strict rejects. A check that fires on something the lenient
+path never got wrong would be noise.

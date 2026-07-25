@@ -37,9 +37,16 @@ looks: `node:sqlite` bundles its own SQLite, so the query planner — and theref
 
 Source files, and the second one is where all the interesting logic lives:
 
-- [src/index.ts](src/index.ts) — the public API: `Db`, `Collection`, `FindCursor`.
+- [src/index.ts](src/index.ts) — the public API: `Db`, `Collection`, `FindCursor`,
+  `AggregationCursor`.
 - [src/query/query.ts](src/query/query.ts) — **the heart of the project.** Compiles
   MongoDB filter objects into SQLite `WHERE` clauses.
+- [src/update.ts](src/update.ts) — compiles update documents (`$set`, `$inc`,
+  `$push`, `$pull`, …) into ONE SQL expression for the new `data` value.
+- [src/aggregate.ts](src/aggregate.ts) — the aggregation pipeline, and the
+  decision about which stages run in SQL and which in JS.
+- [src/bson-order.ts](src/bson-order.ts) — MongoDB's BSON comparison order in JS;
+  the twin of `bsonRankSql`/`bsonValueSql` in query.ts, which it must agree with.
 - [src/ejson.ts](src/ejson.ts) — storage serialization (see the EJSON gotcha below).
 - [src/projection.ts](src/projection.ts) — MongoDB projection semantics, applied in JS.
 - [src/errors.ts](src/errors.ts) — `MongoServerError` / `DUPLICATE_KEY_ERROR` (11000).
@@ -144,14 +151,99 @@ pins every one of them against the server. `$setOnInsert` exists only for this
 path — it never reaches the SQL expression.
 
 **Non-obvious detail — validation before writing, not during.** `$inc` rejects
-non-numeric targets with a SELECT that runs *before* the UPDATE
-(`Collection.assertIncApplies`), not with a guard inside the UPDATE itself.
+non-numeric targets (and `$push` non-array ones) with a SELECT that runs *before*
+the UPDATE (`Collection.assertUpdateApplies`, over the `UpdateGuard` list
+src/update.ts builds), not with a guard inside the UPDATE itself.
 The obvious alternative — a `CASE` calling a registered SQL function that
 throws — is **not portable**: on Node 22.13 (the `engines` floor) an exception
 thrown inside a `db.function()` callback is swallowed and the call yields NULL,
 so `json_set` wrote null over the value, causing the exact data loss the guard
 existed to prevent. Node 26 propagates it. Don't reintroduce that pattern, and
 don't assume a JS callback can fail a statement.
+
+### Update operators (src/update.ts)
+
+Everything compiles to ONE expression dropped into a single UPDATE, rather than
+reading documents into JS and writing them back — that is what keeps
+`updateMany` one statement over an indexed scan. Two rules hold throughout:
+every operator reads **`data`**, the original column, never the partially-built
+expression (safe only because `assertNoConflictingPaths` rejects overlapping
+paths); and anything that can fail is checked **before** the UPDATE, as a guard.
+
+**Non-obvious detail — a rebuilt array loses type information twice.** Any
+operator that rebuilds an array (`$pull`, `$addToSet`, `$push` with
+`$sort`/`$slice`) streams elements through a nested SELECT, and
+`json_each.value` loses its JSON subtype crossing that boundary, so objects came
+back as strings (`["{\"x\":1}"]`). Separately, a boolean element decodes to the
+INTEGER 1, so `[true]` rebuilt as `[1]`. `restoreJson()` repairs both from the
+carried `type` column. **Route every rebuild through `groupArray()`**, which
+applies it.
+
+**Non-obvious detail — `arrayAt()` cannot be a COALESCE.** `json_quote(NULL)` is
+the JSON value `null`, not SQL NULL, so
+`COALESCE(json_quote(json_extract(...)), json_array())` never fires its fallback
+and every array operator saw `null` instead of `[]`. It has to be a CASE on
+`json_type(...) IS NULL`.
+
+**Non-obvious detail — `$each` is bound as ONE json array, not appended value
+by value.** The obvious `json_insert` chain nests one SQL call per element and
+SQLite's parser gives up at a few hundred ("Recursion limit"), so
+`$push: { a: { $each: [...900 items] } }` failed. Both `$push` and `$addToSet`
+bind the list and append it with a `UNION ALL`, which is flat however long it
+is. Don't "simplify" either back to a chain.
+
+**Non-obvious detail — `$addToSet` dedupes its `$each` list in JS.** With the
+list deduped by `equalsBson` first, each candidate only has to be compared
+against the ORIGINAL array. Comparing against the array as it grows would nest
+the whole expression once per value — exponential in the size of `$each`. The
+SQL presence check compares `e.value IS c.value AND e.type = c.type`; without
+the type test a boolean `true` (which decodes to 1) is found by `$addToSet: 1`.
+
+**Non-obvious detail — `$pull` uses `json_replace`, not `json_set`.** A `$pull`
+against a missing field is a no-op in MongoDB, and `json_replace` only writes
+where the path already exists — which avoids a `CASE` duplicating the whole
+expression. `$pop` relies on the same idea: `json_remove` on `'$.a[0]'` or
+`'$.a[#-1]'` is a no-op for a missing field AND an empty array.
+
+`$position` inside `$push` is deliberately **rejected**, not implemented: it
+needs a rebuild that renumbers around the insert point, and a clear error beats
+a half-implementation.
+
+### How aggregation is split (src/aggregate.ts)
+
+A LEADING run of `$match`/`$sort`/`$skip`/`$limit` is pushed into SQLite via the
+ordinary query compiler — so a pipeline starting with `$match` is
+index-eligible, which is pinned by a plan-regression test in
+[test/query-plan.spec.ts](test/query-plan.spec.ts). Everything after runs in JS.
+`splitPipeline` stops the pushdown wherever reordering would change the answer
+(a `$match` after a `$sort`, a `$skip` after a `$limit`). `cursor.explain()`
+reports the boundary; **that method is the contract**, so keep it accurate.
+
+**Non-obvious detail — a mid-pipeline `$match` goes back through SQLite** via a
+TEMP table (`Collection.matchBatch`), not through a JS re-implementation of the
+filter language. A second matcher would be a second set of semantics to keep in
+step, and every quirk the specs pin down would eventually drift apart. If you
+are tempted to write `matchesFilter(doc, filter)` in JavaScript, don't.
+
+**Non-obvious detail — `setPathImmutable`, not a shallow copy.** `$unwind`
+emits several documents from one source; `{ ...doc }` shares its nested objects,
+so writing each element into the same nested object left every emitted document
+holding the last one.
+
+**Non-obvious detail — the strict `$sort` check runs before sorting.**
+`Array.prototype.sort` never calls the comparator for a one-element list, so a
+check inside the comparator missed a `$group` that produced a single row.
+
+### strict mode
+
+`Db.fromUrl(url, { strict: true })` rejects constructs whose answer is KNOWN to
+differ from MongoDB's (over-deep dotted array paths, `$type` on an unstorable
+type, sorting an array-valued field, an aggregation path through an array).
+[test/strict.spec.ts](test/strict.spec.ts) is single-engine on purpose — every
+case is one where a real server disagrees, so there is nothing to check against.
+Each test asserts BOTH halves: the lenient default still behaves as documented,
+AND strict rejects. **When you find a new divergence, add a check here too** —
+the mode's value is that the known list is enforced, not just written down.
 
 ### SQL injection posture
 
@@ -243,6 +335,16 @@ turns those into errors. Verified by mutation: slackening `Filter` back to
 Some assertions are commented out with `// TODO` (see
 [test/operators/query-operators.spec.ts](test/operators/query-operators.spec.ts)).
 These are genuinely unimplemented features, not flaky tests.
+
+Two more specs are worth knowing about:
+[test/operators/update-operators.spec.ts](test/operators/update-operators.spec.ts)
+covers the array and field update operators, where the oracle earns its keep —
+what `$pull` does with a document criterion, whether `$addToSet` counts `1` and
+`true` as equal, what `$mul` does to a missing field are all rules nobody would
+guess right. [test/aggregate.spec.ts](test/aggregate.spec.ts) covers the
+pipeline; **every grouping test there ends with a `$sort`**, because `$group`'s
+output order is unspecified on the server and an unsorted expectation makes the
+Mongodb variant flaky for reasons that are nobody's bug.
 
 ## Toolchain notes
 

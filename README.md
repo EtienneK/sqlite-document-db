@@ -1,30 +1,69 @@
 # SQLite Document DB
 
-> **Status:** 2.0.0 is a rewrite on Node's built-in `node:sqlite` — zero
-> dependencies, ESM only, Node ≥ 22.13. The CRUD and query surface below is
-> substantial and every behaviour in it is verified against a real MongoDB, but
-> this is a **compatible subset, not a drop-in replacement** — most notably
-> there is no aggregation pipeline. See [Missing Features](#missing-features).
->
-> Upgrading from 1.x is a breaking change: see [CHANGELOG.md](CHANGELOG.md).
+**An embedded document database for Node, with a query language you already
+know.** Documents in, documents out; no schema, no migrations, no server — and
+no native module to compile. It is the local-first, CLI, desktop and edge
+counterpart to a document store, backed by a single SQLite file.
 
-Use SQLite as a JSON Document Database.
+The query and update language is MongoDB's, because it is the one people
+already write for document-shaped data. That makes this **familiar**, not
+**interchangeable**: it implements a well-defined subset, verified operator by
+operator against a real MongoDB, and it says so wherever the subset ends.
+If your goal is to move an application off MongoDB unchanged, this is the
+wrong tool — read [Is this the right tool?](#is-this-the-right-tool) first.
 
-API based on MongoDB's JavaScript API.
+```javascript
+import Db from 'sqlite-document-db'
 
-Documents are stored one-per-row in a `data JSON` column, and Mongo-style filter
-objects are compiled into SQLite [JSON functions](https://www.sqlite.org/json1.html)
-so that querying happens inside the database rather than in JavaScript.
+const db = await Db.fromUrl('./app.db')            // or ':memory:'
+const users = db.collection('users')
 
-**Zero runtime dependencies** — it uses Node's built-in
-[`node:sqlite`](https://nodejs.org/api/sqlite.html) module, so there is nothing
-to compile and no native binaries to install.
+await users.insertOne({ name: 'Ada', tags: ['admin'], logins: 0 })
+await users.updateOne({ name: 'Ada' }, { $push: { tags: 'owner' }, $inc: { logins: 1 } })
+await users.find({ tags: 'admin' }).toArray()
+```
+
+## Why it exists
+
+- **Queries run in the database, not in JavaScript.** Filter objects are
+  compiled into SQLite [JSON functions](https://www.sqlite.org/json1.html), so
+  `find({ qty: { $gt: 25 } })` becomes a `WHERE` clause that a real index can
+  serve — measured at 40× faster than a scan on 20k documents. The
+  document-store libraries that filter in JS cannot do that at any size.
+- **Zero runtime dependencies.** It uses Node's built-in
+  [`node:sqlite`](https://nodejs.org/api/sqlite.html): nothing to compile, no
+  prebuilt binaries, no `node-gyp`. It runs unchanged on Deno.
+- **Behaviour is checked against a real MongoDB.** Every assertion in the test
+  suite runs twice — once against this library and once against a MongoDB
+  booted in-process — so the semantics are copied rather than guessed. Where
+  the two are known to differ, [`strict: true`](#strict-mode) turns the
+  difference into an error instead of a surprise.
+
+## Is this the right tool?
+
+**A good fit for** an app that wants a real document store on a single file:
+CLI tools, desktop and Electron apps, local-first sync targets, edge functions,
+test fixtures, small services. Anywhere "just use SQLite" is right but modelling
+documents as columns is not.
+
+**A poor fit for** lifting an existing MongoDB application over unchanged. This
+is a subset — no `$lookup`, no transactions, no change streams, no sharding, and
+an aggregation pipeline that covers the common shapes rather than all of them.
+[Missing Features](#missing-features) is the exact list.
+
+**Using it as a MongoDB test double** works, and is a deliberate use case — it
+starts in milliseconds where `mongodb-memory-server` takes seconds. Turn on
+[`strict: true`](#strict-mode) if you do: it fails the constructs whose answer
+is known to differ, so a passing test means more.
 
 ## Requirements
 
 Node.js **22.13 or newer** (`node:sqlite` appeared in 22.5 and only became
 stable in Node 24; the custom SQL function behind `$regex` needs
-`DatabaseSync.prototype.function`, added in 22.13).
+`DatabaseSync.prototype.function`, added in 22.13). Deno works too — the
+[examples](examples/) run under both in CI.
+
+> Upgrading from 1.x is a breaking change: see [CHANGELOG.md](CHANGELOG.md).
 
 ## Getting started
 
@@ -221,11 +260,85 @@ so JS regex syntax applies. MongoDB's `x` (extended) option is not supported.
 await db.collection('items').updateOne({ item: 'paper' }, { $set: { status: 'P' } })
 await db.collection('items').updateMany({ qty: { $lt: 50 } }, { $set: { status: 'P' }, $inc: { qty: 5 } })
 await db.collection('items').updateOne({ item: 'paper' }, { $unset: { status: '' } })
+await db.collection('items').updateOne({ item: 'paper' }, { $mul: { qty: 2 }, $max: { seen: new Date() } })
+await db.collection('items').updateOne({ item: 'paper' }, { $rename: { status: 'state' } })
 ```
 
 Updates are validated the way MongoDB validates them, rather than being applied
 loosely: `_id` is immutable, a field cannot be targeted by two operators in one
-update, and `$inc` on a non-numeric field is an error.
+update, and `$inc` on a non-numeric field is an error. Each check runs *before*
+anything is written, so a rejected update leaves the collection untouched.
+
+### Update arrays
+
+```javascript
+const tasks = db.collection('tasks')
+
+await tasks.updateOne({ _id: id }, { $push: { tags: 'urgent' } })
+await tasks.updateOne({ _id: id }, { $push: { tags: { $each: ['a', 'b'] } } })
+await tasks.updateOne({ _id: id }, { $addToSet: { tags: 'urgent' } })   // only if absent
+await tasks.updateOne({ _id: id }, { $pop: { tags: 1 } })               // -1 for the first
+await tasks.updateOne({ _id: id }, { $pull: { tags: 'urgent' } })
+await tasks.updateOne({ _id: id }, { $pullAll: { tags: ['a', 'b'] } })
+```
+
+`$push` takes `$each` with `$sort` and `$slice`, which together are the capped
+leaderboard idiom — keep the top three scores and nothing else:
+
+```javascript
+await db.collection('players').updateOne(
+  { _id: id },
+  { $push: { scores: { $each: [{ points: 88 }], $sort: { points: -1 }, $slice: 3 } } }
+)
+```
+
+`$pull` takes a value or a criterion, and a criterion document is matched
+against each element the way `$elemMatch` matches one:
+
+```javascript
+await db.collection('orders').updateOne({ _id: id }, { $pull: { items: { qty: { $lt: 1 } } } })
+```
+
+`$addToSet` compares by value, not identity, so pushing an equal document twice
+adds it once. Pushing onto a field that exists and is not an array is an error,
+as it is on the server; onto a missing field it creates the array.
+
+### Aggregate
+
+A narrow pipeline: `$match`, `$sort`, `$limit`, `$skip`, `$count`, `$group`,
+`$project`, `$addFields`/`$set` and `$unwind`.
+
+```javascript
+const revenue = await db.collection('orders').aggregate([
+  { $match: { status: 'complete' } },
+  { $unwind: '$items' },
+  { $group: { _id: '$items.sku', sold: { $sum: '$items.qty' }, customers: { $addToSet: '$cust' } } },
+  { $sort: { sold: -1 } },
+  { $limit: 10 }
+]).toArray()
+```
+
+Accumulators: `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`, `$push`,
+`$addToSet`, `$count`. Expressions are field paths (`'$item'`), literals and
+`{ $literal: … }` — the arithmetic and conditional operators (`$add`, `$cond`,
+`$concat`, …) are not implemented, and an unrecognised one is an error rather
+than a silent null.
+
+**Where the work happens.** A leading run of `$match`/`$sort`/`$skip`/`$limit`
+is compiled into a single SELECT — the same SQL `find()` emits, so it uses the
+same indexes. Everything after that point runs in JavaScript over the results.
+`explain()` reports exactly where the boundary fell, which is the difference
+between an indexed pipeline and a full scan you did not notice:
+
+```javascript
+const cursor = db.collection('orders').aggregate([{ $match: { status: 'x' } }, { $group: { _id: '$sku' } }])
+cursor.explain()   // { sql: 'SELECT data FROM ...', pushedDown: 1, inJavaScript: ['$group'] }
+```
+
+Put `$match` first. A `$match` after a `$sort` or `$limit` cannot be reordered
+without changing the answer, so it stays in JavaScript — still correct, just not
+index-assisted. (It is still compiled by the same filter engine, via a temporary
+table, so a mid-pipeline `$match` matches exactly like `find()` does.)
 
 ### Upsert, and find-and-modify
 
@@ -299,6 +412,30 @@ Only operators this library actually implements appear in the types, so
 anything that compiles will run. Collections opened without a schema stay
 completely permissive, so untyped code is unaffected.
 
+### Strict mode
+
+Everything outside the supported subset is already an error. `strict: true`
+handles the harder case: the constructs that *are* accepted, *do* return
+something, and return something a real server would not.
+
+```javascript
+const db = await Db.fromUrl(':memory:', { strict: true })
+```
+
+It rejects, rather than silently answering differently:
+
+| Construct | Lenient behaviour | Why it differs |
+| --- | --- | --- |
+| `{ 'a.b.c.d': 1 }` | matches fewer documents | only two array levels of a dotted path are expanded — use `$elemMatch` |
+| `{ x: { $type: 'objectId' } }` | matches nothing | the type cannot be stored here, so "nothing" is an artefact, not a fact about your data |
+| `.sort({ v: 1 })` where some `v` is an array | orders arrays as a group | MongoDB orders them by their smallest (asc) or largest (desc) element |
+| `'$instock.qty'` in a pipeline | reads as missing | MongoDB maps the path over the array — `$unwind` first |
+
+This is a boundary check, not a proof of equivalence: it catches the divergences
+that are known and detectable. It is off by default, and the intended use is a
+test suite that runs against this library instead of a real `mongod` — a passing
+suite under `strict` is a much stronger signal than one without it.
+
 ### Collection names
 
 Names are **case-sensitive**, as MongoDB's are, and accept anything MongoDB
@@ -329,23 +466,34 @@ therefore downloads a `mongod` binary the first time.
 
 ## Missing Features
 
-Many MongoDB features are missing - either because I have not gotten time to implement them (feel free to help out!) or SQLite can't support them.
+This library implements a subset of MongoDB's API. The subset is listed exactly
+below, and everything outside it **throws** rather than being quietly ignored —
+an unknown operator, stage or accumulator is an error, so you find the edge at
+the call site instead of in a wrong result.
 
 ### What is supported
 
-Operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
+Query operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 `$not` `$nor` `$exists` `$type` `$regex` (with `$options`) `$mod` `$all`
 `$elemMatch` `$size`.
 
-Methods: `find()` `findOne()` `countDocuments()` `insertOne()` `insertMany()`
-`updateOne()` `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()`
-`findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()`
+Update operators: `$set` `$unset` `$inc` `$mul` `$min` `$max` `$rename`
+`$setOnInsert` `$push` (with `$each`, `$slice`, `$sort`) `$addToSet` (with
+`$each`) `$pop` `$pull` `$pullAll`, plus the `upsert` option on
+`updateOne`/`updateMany`/`replaceOne`.
+
+Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
+`$project` `$addFields`/`$set` `$unwind`. Accumulators: `$sum` `$avg` `$min`
+`$max` `$first` `$last` `$push` `$addToSet` `$count`.
+
+Methods: `find()` `findOne()` `countDocuments()` `aggregate()` `insertOne()`
+`insertMany()` `updateOne()` `updateMany()` `deleteOne()` `deleteMany()`
+`replaceOne()` `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()`
 `createIndex()` `dropIndex()` `indexes()` `listIndexes()`.
 
-Update operators: `$set` `$unset` `$inc` `$setOnInsert`, and the `upsert`
-option on `updateOne`/`updateMany`/`replaceOne`. Result objects match the
-official driver's shapes (`acknowledged`, `matchedCount`, `modifiedCount`,
-`upsertedId`, ...), and errors match its codes (`11000` for a duplicate key).
+Result objects match the official driver's shapes (`acknowledged`,
+`matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes
+(`11000` for a duplicate key).
 
 ### Supported value types
 
@@ -392,17 +540,32 @@ rejected on write too. Objects that merely *contain* a `$date` key
 The planned work is tracked in [BACKLOG.md](BACKLOG.md), prioritised and with notes on
 how each piece would be implemented. The headlines:
 
-#### Querying documents
+**Querying**
 
 - Projection `$`-operators: `$slice`, `$elemMatch`, `$` positional
 - Remaining [Evaluation Query Operators](https://www.mongodb.com/docs/manual/reference/operator/query-evaluation/) —
   `$expr`, `$text`, and the `$bits*` operators. `$where` will **not** be supported
   (it executes arbitrary JavaScript).
 
-#### Updating documents
+**Updating**
 
-- The remaining update operators: `$mul`, `$min`, `$max`, `$rename`, `$push`,
-  `$pull`, `$addToSet`, `$pop`
+- `$position` inside `$push`, and the positional operators `$` / `$[]` / `$[<id>]`
+- Bulk writes (`bulkWrite`) and `distinct`
+
+**Aggregation** — the pipeline is a common-shapes subset, not the whole thing:
+
+- Stages: `$lookup`, `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`,
+  `$sample`, `$graphLookup`
+- Expression operators: the arithmetic, string, date, array and conditional
+  families (`$add`, `$concat`, `$cond`, `$dateToString`, `$size`, …). Only field
+  paths, literals and `$literal` are supported
+- `$group` accumulators beyond the nine listed above
+
+**Not planned**
+
+- Transactions and multi-document atomicity, change streams, replication,
+  sharding, `$where`, server-side JavaScript, GridFS, the wire protocol.
+  A process that needs those needs a server.
 
 ## Thanks
 

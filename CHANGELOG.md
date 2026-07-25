@@ -5,6 +5,45 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The array update operators.** `$push` (with `$each`, `$slice` and `$sort`),
+  `$addToSet` (with `$each`), `$pop`, `$pull` and `$pullAll`. Previously the
+  only way to change one element of an array was to read the document, edit it
+  in JavaScript and `replaceOne` it back — which is not atomic. `$push` with
+  `$each`+`$sort`+`$slice` gives the capped top-N list in one statement.
+- **The remaining field update operators:** `$mul`, `$min`, `$max` and
+  `$rename`. `$min`/`$max` compare in MongoDB's BSON type order, so a Date
+  compares chronologically and a number ranks below any string.
+- **An aggregation pipeline** — `aggregate()`, with `$match`, `$sort`, `$limit`,
+  `$skip`, `$count`, `$group`, `$project`, `$addFields`/`$set` and `$unwind`,
+  and the accumulators `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`,
+  `$push`, `$addToSet` and `$count`. A LEADING run of
+  `$match`/`$sort`/`$skip`/`$limit` compiles to the same SQL `find()` emits and
+  uses the same indexes; the rest runs in JavaScript, and `cursor.explain()`
+  reports where the boundary fell. Expressions are field paths, literals and
+  `$literal` only — the arithmetic and conditional families are not implemented,
+  and an unrecognised one is an error.
+- **`strict: true`** on `Db.fromUrl`, which rejects the constructs whose answer
+  is known to differ from MongoDB's instead of quietly returning the different
+  answer: over-deep dotted array paths, `$type` naming an unstorable BSON type,
+  sorting a field that holds an array, and an aggregation path that runs
+  through an array. Intended for suites that test against this library rather
+  than a real `mongod`.
+- Types for all of the above: the array operators are restricted to array paths
+  and their element type, `$mul` to numeric paths, and `aggregate<TResult>()`
+  threads the result shape through.
+
+### Changed
+
+- The update-document compiler moved out of `src/index.ts` into `src/update.ts`,
+  and BSON comparison order is now shared between SQL and JavaScript through
+  `src/bson-order.ts`.
+- The README leads with what this is — an embedded document database with a
+  familiar query language — rather than with how close it gets to MongoDB.
+
 ## [2.0.1] — 2026-07-25
 
 ### Fixed

@@ -136,14 +136,57 @@ describe('UpdateFilter<TSchema>', () => {
   it('rejects _id in $set and unsupported update operators', async () => {
     // @ts-expect-error - _id is immutable
     await col.updateOne({ item: 'x' }, { $set: { _id: 'other' } })
-    // @ts-expect-error - $push is not implemented yet
+    // @ts-expect-error - $bit is not implemented
+    await col.updateOne({ item: 'x' }, { $bit: { qty: { and: 1 } } })
+  })
+
+  it('types the array operators against the array they apply to', async () => {
     await col.updateOne({ item: 'x' }, { $push: { tags: 'new' } })
+    await col.updateOne({ item: 'x' }, { $push: { tags: { $each: ['a', 'b'], $slice: -5 } } })
+    await col.updateOne({ item: 'x' }, { $push: { instock: { $each: [{ warehouse: 'A', qty: 1 }], $sort: { qty: -1 } } } })
+    await col.updateOne({ item: 'x' }, { $addToSet: { tags: { $each: ['a'] } } })
+    await col.updateOne({ item: 'x' }, { $pop: { tags: -1 } })
+    await col.updateOne({ item: 'x' }, { $pull: { instock: { qty: { $lt: 5 } } } })
+    await col.updateOne({ item: 'x' }, { $pullAll: { tags: ['a', 'b'] } })
+    await col.updateOne({ item: 'x' }, { $mul: { qty: 2 }, $rename: { status: 'state' } })
+    await col.updateOne({ item: 'x' }, { $min: { qty: 1 }, $max: { shipped: new Date() } })
+  })
+
+  it('restricts the array operators to array paths and element types', async () => {
+    // @ts-expect-error - qty is a number, not an array
+    await col.updateOne({ item: 'x' }, { $push: { qty: 1 } })
+    // @ts-expect-error - tags holds strings
+    await col.updateOne({ item: 'x' }, { $push: { tags: 5 } })
+    // @ts-expect-error - $each takes an array of the element type
+    await col.updateOne({ item: 'x' }, { $addToSet: { tags: { $each: [1] } } })
+    // @ts-expect-error - $pop takes 1 or -1
+    await col.updateOne({ item: 'x' }, { $pop: { tags: 2 } })
+    // @ts-expect-error - $position is a runtime error, so it must not compile
+    await col.updateOne({ item: 'x' }, { $push: { tags: { $each: ['a'], $position: 0 } } })
+    // @ts-expect-error - $mul on a string field is a runtime error
+    await col.updateOne({ item: 'x' }, { $mul: { item: 2 } })
   })
 
   it('leaves an untyped collection permissive', async () => {
     const loose = db.collection('anything')
     await loose.updateOne({ a: 1 }, { $set: { whatever: 'goes' } })
+    await loose.updateOne({ a: 1 }, { $push: { anything: 'goes' } })
     expectTypeOf<UpdateFilter<Document>>().toExtend<Record<string, any>>()
+  })
+})
+
+describe('aggregate()', () => {
+  it('returns a cursor of the requested shape', async () => {
+    const totals = await col.aggregate<{ _id: string, total: number }>([
+      { $group: { _id: '$item', total: { $sum: '$qty' } } }
+    ]).toArray()
+    expectTypeOf(totals).toEqualTypeOf<Array<{ _id: string, total: number }>>()
+    expectTypeOf(col.aggregate([]).explain().pushedDown).toEqualTypeOf<number>()
+  })
+
+  it('defaults to Document, so an untyped pipeline stays permissive', async () => {
+    const rows = await col.aggregate([{ $match: { qty: 1 } }]).toArray()
+    expectTypeOf(rows[0]!.anythingAtAll).toEqualTypeOf<any>()
   })
 })
 

@@ -72,6 +72,27 @@ describe('find() query plans', () => {
     expect(plan).not.toContain('SCAN collection_items')
   })
 
+  /**
+   * The claim aggregate() makes for itself: a LEADING $match is pushed into
+   * SQLite and stays index-eligible. If the pushdown in splitPipeline() ever
+   * regresses to "materialise everything, then filter in JavaScript", the
+   * pipeline still returns the right answer and this is the only thing that
+   * notices.
+   */
+  it('a leading $match in aggregate() should use the index too', async () => {
+    const logs = await capture(async db => {
+      await db.collection('items').createIndex({ qty: 1 })
+      await db.collection('items').insertMany([{ qty: 1 }, { qty: 2 }])
+      await db.collection('items')
+        .aggregate([{ $match: { qty: { $gt: 1 } } }, { $group: { _id: null, n: { $sum: 1 } } }])
+        .toArray()
+    })
+    const docs = Array.from({ length: 1000 }, (_, i) => ({ _id: String(i), qty: i }))
+    const plan = explain(logs, docs)
+    expect(plan).toContain('INDEX ix_collection_items_qty_1')
+    expect(plan).not.toContain('SCAN collection_items')
+  })
+
   it('a Date-range find() should use the .$date companion index', async () => {
     const logs = await capture(async db => {
       await db.collection('items').createIndex({ at: 1 })

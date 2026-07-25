@@ -5,10 +5,22 @@ export type QueryFilterDocument = Record<string, any>
 /** The named parameters accompanying a compiled SQL fragment. */
 export type SqlParams = Record<string, string | number | null>
 
-/** Mutable named-parameter registry shared by every context of one compilation. */
-interface Bindings {
+/**
+ * Mutable named-parameter registry shared by every context of one compilation.
+ *
+ * The prefix keeps independently-compiled fragments from colliding when they
+ * end up in ONE statement: an UPDATE carries its filter's `p0...` and its
+ * update expression's `u0...` side by side (see src/update.ts).
+ */
+export interface SqlBindings {
   n: number
   values: SqlParams
+  prefix: string
+}
+
+/** A fresh parameter registry. `prefix` names the parameters it hands out. */
+export function createBindings (prefix = 'p'): SqlBindings {
+  return { n: 0, values: {}, prefix }
 }
 
 /**
@@ -24,11 +36,13 @@ interface Bindings {
 interface SqlContext {
   col: string
   table?: string
-  bindings: Bindings
+  bindings: SqlBindings
   /** How many array levels of a dotted path have already been expanded. */
   arrayPathDepth?: number
   /** $elemMatch nesting level, which keeps each level's column alias unique. */
   elemMatchDepth?: number
+  /** Reject constructs whose answer is known to differ from MongoDB's. */
+  strict?: boolean
 }
 
 // Only PATHS are ever rendered as string literals. Values go through
@@ -61,7 +75,7 @@ export function quoteIdentifier (name: string): string {
  */
 function bindValue (ctx: SqlContext, value: any): string {
   if (value === undefined) throw Error('cannot use undefined as a query value; use null instead')
-  const name = `p${ctx.bindings.n++}`
+  const name = `${ctx.bindings.prefix}${ctx.bindings.n++}`
   if (typeof value === 'boolean') {
     ctx.bindings.values[name] = value ? 1 : 0
     return `:${name}`
@@ -75,16 +89,27 @@ function bindValue (ctx: SqlContext, value: any): string {
 }
 
 /**
- * Encodes a JS value exactly as the storage layer does, registers it under
- * `name`, and returns the SQL fragment referencing it. For the update
- * operators in src/index.ts: $set values must be encoded by the same code
- * that encodes query values and stored documents. Always json()-wrapped so
- * json_set stores real JSON types (a bound bare 1 would store the number 1
- * where `true` was meant).
+ * Encodes a JS value exactly as the storage layer does and returns the SQL
+ * fragment referencing it. For the update operators in src/update.ts: written
+ * values must be encoded by the same code that encodes query values and stored
+ * documents. Always json()-wrapped so json_set stores real JSON types (a bound
+ * bare 1 would store the number 1 where `true` was meant).
  */
-export function bindValueAsJson (params: SqlParams, name: string, value: any): string {
-  params[name] = JSON.stringify(encodeValue(value))
+export function bindJson (bindings: SqlBindings, value: any): string {
+  const name = `${bindings.prefix}${bindings.n++}`
+  bindings.values[name] = JSON.stringify(encodeValue(value))
   return `json(:${name})`
+}
+
+/**
+ * Binds a primitive as itself rather than as JSON. Only for values compared
+ * against what `json_extract` yields - which is a SQL scalar, not JSON text
+ * (see the $min/$max ordering comparison in src/update.ts).
+ */
+export function bindRaw (bindings: SqlBindings, value: string | number | null): string {
+  const name = `${bindings.prefix}${bindings.n++}`
+  bindings.values[name] = value
+  return `:${name}`
 }
 
 // Exported so createIndex() builds index paths with the SAME code that builds
@@ -92,9 +117,12 @@ export function bindValueAsJson (params: SqlParams, name: string, value: any): s
 // Paths stay string LITERALS deliberately: SQLite only matches an expression
 // index whose indexed expression is textually identical, so a bound
 // json_extract(data, :path) would never use an index.
-export function toJson1PathString (pathArr: string[]): string {
+//
+// `suffix` appends an array subscript ('[#]', '[0]', '[#-1]') for the array
+// update operators. It is never user data - only one of those three literals.
+export function toJson1PathString (pathArr: string[], suffix = ''): string {
   const firstDot = (pathArr.length === 1 && pathArr[0] === '') ? '' : '.'
-  return quoteLiteral(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}`)
+  return quoteLiteral(`$${firstDot}${pathArr.join('.').replace(/\.(\d+)/g, '[$1]')}${suffix}`)
 }
 
 function toJson1Extract (col: string, pathArr: string[]): string {
@@ -317,12 +345,73 @@ function arrayPathArms (ctx: SqlContext, field: string, op: string, value: any):
  */
 const MAX_ARRAY_PATH_DEPTH = 2
 
+/**
+ * One array element, re-wrapped as `{ "f": <element> }` so the ordinary
+ * field-path machinery can address it.
+ *
+ * json_quote, not json(): a string element's `value` is bare text, which
+ * json() rejects as malformed JSON, while json_quote encodes scalars and
+ * passes objects and arrays through via the JSON subtype.
+ */
+const ELEMENT_WRAPPER = "json_object('f', json_quote(value))"
+
+/**
+ * Compiles a per-element criterion into a predicate over a column holding
+ * `ELEMENT_WRAPPER` - the shape `$elemMatch` and `$pull` (src/update.ts) both
+ * need, which is why it lives here rather than inside the `$elemMatch` case.
+ *
+ * An operator key (`$gte`, `$lt`, ...) constrains the ELEMENT itself, so it
+ * targets `f`; any other key is a field path *inside* the element and targets
+ * `f.<key>`. Getting that distinction wrong made `$elemMatch` compare every
+ * element against the whole criterion object. `$regex` and its companion
+ * `$options` must stay together in one criterion rather than being split into
+ * two ANDed terms.
+ *
+ * An empty criterion matches every element that is a document or an array -
+ * verified against MongoDB, which returns nothing for `[1]` and matches `[{}]`,
+ * `[{a:1}]` and `[[1]]`. (A stored Date is an 'object' to SQLite but a scalar
+ * to MongoDB, so the wrapper is excluded.)
+ */
+export function elementCriterionSql (
+  alias: string, criterion: QueryFilterDocument, bindings: SqlBindings,
+  depths: { arrayPathDepth?: number, elemMatchDepth?: number } = {}
+): string {
+  const regexPair: Record<string, unknown> = {}
+  const $and: QueryFilterDocument[] = []
+  for (const [key, value] of Object.entries(criterion)) {
+    if (key === '$regex' || key === '$options') {
+      regexPair[key] = value
+      continue
+    }
+    $and.push(OPS_KEYS.includes(key) ? { f: { [key]: value } } : { [`f.${key}`]: value })
+  }
+  if (Object.keys(regexPair).length > 0) $and.push({ f: regexPair })
+
+  if ($and.length === 0) {
+    return "(json_each.type = 'array' OR (json_each.type = 'object' AND json_extract(json_each.value, '$.$date') IS NULL))"
+  }
+  return convert({ col: alias, bindings, ...depths }, { $and })
+}
+
 /** Operators that address a field's VALUE, and so follow the array-path rule. */
 const ARRAY_PATH_OPS = new Set([
   '$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$regex', '$mod', '$type', '$exists', '$size', '$all', '$elemMatch'
 ])
 
 function convertOp (ctx: SqlContext, field: string, op: string, value: any): string {
+  if (ctx.strict === true && field.includes('.') && ARRAY_PATH_OPS.has(op)) {
+    // Only MAX_ARRAY_PATH_DEPTH array levels are expanded, so a longer path
+    // matches strictly fewer documents than MongoDB would if the extra levels
+    // turn out to hold arrays. Nothing here can tell whether they do.
+    const crossings = field.split('.').slice(1).filter(segment => !/^\d+$/.test(segment)).length
+    if (crossings > MAX_ARRAY_PATH_DEPTH) {
+      throw Error(
+        `strict: the path '${field}' could cross more than ${MAX_ARRAY_PATH_DEPTH} array levels, ` +
+        'which this library does not expand - rewrite it with an explicit $elemMatch'
+      )
+    }
+  }
+
   // A dotted path may cross an array at any level (see arrayPathArms). The
   // negative operators are deliberately absent from ARRAY_PATH_OPS: they are
   // the complement of their positive twin and already delegate to it, so
@@ -474,6 +563,15 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     case '$type': {
       const aliases = (Array.isArray(value) ? value : [value]).map(resolveTypeAlias)
       if (aliases.length === 0) throw Error('$type must match at least one type')
+      if (ctx.strict === true) {
+        // These compile to FALSE because the storage layer cannot hold such a
+        // value - but a real server holding one WOULD match, so "no results"
+        // here is an answer, not a fact about the data.
+        const unstorable = aliases.find(alias => UNSTORABLE_TYPE_ALIASES.has(alias))
+        if (unstorable !== undefined) {
+          throw Error(`strict: $type '${unstorable}' can never match, because this library cannot store that type`)
+        }
+      }
       const typeExpr = jsonType(ctx, field)
       const valueExpr = extract(ctx, field)
       // The document is always well-formed JSON, so the scalar side can
@@ -508,45 +606,20 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     }
     case '$elemMatch': {
       if (Array.isArray(value) || typeof value !== 'object' || value === null) throw Error(`${op} expects value to be of type: non-array-object; but got: ${typeof value}`)
-      // Each array element is re-wrapped as { "f": <element> } so the normal
-      // field-path machinery can address it. An operator key ($gte, $lt, ...)
-      // constrains the element itself, so it targets "f"; any other key is a
-      // field path *inside* the element, so it targets "f.<key>". $regex and
-      // its companion $options must stay together in one criterion.
-      const regexPair: Record<string, unknown> = {}
-      const $and: QueryFilterDocument[] = []
-      for (const [key, criterion] of Object.entries(value)) {
-        if (key === '$regex' || key === '$options') {
-          regexPair[key] = criterion
-          continue
-        }
-        $and.push(OPS_KEYS.includes(key)
-          ? { f: { [key]: criterion } }
-          : { [`f.${key}`]: criterion })
-      }
-      if (Object.keys(regexPair).length > 0) $and.push({ f: regexPair })
       // json_each takes (document, path), NOT the extracted value: a scalar
       // string field extracts to bare text, which json_each rejects as
       // malformed JSON. The 2-arg form is always safe, and the json_type
       // guard excludes the single self-row json_each yields for scalars
-      // ($elemMatch only ever matches actual arrays, like MongoDB). The
-      // element is re-wrapped with json_quote, not json(): a string element's
-      // value is bare text - also malformed JSON - while json_quote encodes
-      // scalars and passes objects/arrays through via the JSON subtype.
-      // An empty criterion is an object match against every element, which
-      // only a document or an array can satisfy - verified against MongoDB,
-      // which returns nothing for [1] and matches [{}], [{a:1}] and [[1]].
-      // (A stored Date is an 'object' here but a scalar there, so exclude the
-      // wrapper. json_extract is safe once the type is known to be object.)
+      // ($elemMatch only ever matches actual arrays, like MongoDB).
       // The alias is numbered per nesting level. It used to be plain
       // `valueJson` at every level, so a nested $elemMatch shadowed its
       // parent's alias and matched nothing at all - silently.
       const depth = (ctx.elemMatchDepth ?? 0) + 1
       const alias = `valueJson${depth}`
-      const elemPred = $and.length === 0
-        ? "(json_each.type = 'array' OR (json_each.type = 'object' AND json_extract(json_each.value, '$.$date') IS NULL))"
-        : convert({ col: alias, bindings: ctx.bindings, arrayPathDepth: ctx.arrayPathDepth, elemMatchDepth: depth }, { $and })
-      return `(${jsonType(ctx, field)} = 'array' AND EXISTS (select json_object('f', json_quote(value)) as ${alias} from json_each(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) where (${elemPred})))`
+      const elemPred = elementCriterionSql(alias, value as QueryFilterDocument, ctx.bindings, {
+        arrayPathDepth: ctx.arrayPathDepth, elemMatchDepth: depth
+      })
+      return `(${jsonType(ctx, field)} = 'array' AND EXISTS (select ${ELEMENT_WRAPPER} as ${alias} from json_each(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) where (${elemPred})))`
     }
     case '$size': {
       // MongoDB requires a non-negative whole number, and only ever matches
@@ -640,26 +713,64 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
  * table name) for top-level statements so implicit array matching can
  * compile to its indexable form.
  */
-export function toSql (columnName: string, query: QueryFilterDocument, table?: string): { sql: string, params: SqlParams } {
-  const bindings: Bindings = { n: 0, values: {} }
-  const sql = convert({ col: columnName, table, bindings }, query)
+export interface CompileOptions {
+  /**
+   * The collection's table name, for top-level statements. It enables the
+   * indexable rowid-union form of implicit array matching.
+   */
+  table?: string
+  /** Share a parameter registry with another fragment in the same statement. */
+  bindings?: SqlBindings
+  /** Reject constructs whose answer is known to differ from MongoDB's. */
+  strict?: boolean
+}
+
+export function toSql (
+  columnName: string, query: QueryFilterDocument, options: CompileOptions = {}
+): { sql: string, params: SqlParams } {
+  const bindings = options.bindings ?? createBindings()
+  const sql = convert({ col: columnName, table: options.table, bindings, strict: options.strict }, query)
   return { sql, params: bindings.values }
 }
 
 /**
- * Compiles a MongoDB sort specification ({ field: 1 | -1, ... }) into SQL
- * ORDER BY terms that follow MongoDB's BSON type comparison order:
+ * MongoDB's BSON type ordering, as a SQL rank:
  *
  *   null/missing < numbers < strings < objects < arrays < booleans < dates
  *
- * SQLite's own ordering (NULL < numbers < text, booleans as 0/1 integers,
- * our wrapped dates as object text) disagrees with all of the exotic cases,
- * so each key sorts by a type-rank CASE first and the value second. Date
- * wrappers ({"$date": ISO}) rank as dates and compare by their ISO string,
- * which orders chronologically.
+ * SQLite's own ordering (NULL < numbers < text, booleans as 0/1 integers, our
+ * wrapped dates as object text) disagrees with all of the exotic cases, so
+ * every ordered comparison ranks by type first and compares values second.
+ *
+ * `typeExpr` is a json_type expression and `dateExpr` extracts the value's
+ * `.$date` sub-path (NULL when it is not a stored Date). Kept in one place
+ * because sorting, `$push: { $sort }` and `$min`/`$max` must all agree - and
+ * src/bson-order.ts is the JS twin, which must agree with them too.
+ */
+export function bsonRankSql (typeExpr: string, dateExpr: string): string {
+  return `CASE WHEN ${typeExpr} IS NULL OR ${typeExpr} = 'null' THEN 0 ` +
+    `WHEN ${typeExpr} IN ('integer','real') THEN 1 ` +
+    `WHEN ${typeExpr} = 'text' THEN 2 ` +
+    `WHEN ${typeExpr} = 'object' AND ${dateExpr} IS NOT NULL THEN 6 ` +
+    `WHEN ${typeExpr} = 'object' THEN 3 ` +
+    `WHEN ${typeExpr} = 'array' THEN 4 ` +
+    'ELSE 5 END' // 'true'/'false'
+}
+
+/** The value half of a BSON-ordered comparison: a Date compares by its ISO string. */
+export function bsonValueSql (typeExpr: string, valueExpr: string, dateExpr: string): string {
+  return `CASE WHEN ${typeExpr} = 'object' AND ${dateExpr} IS NOT NULL THEN ${dateExpr} ELSE ${valueExpr} END`
+}
+
+/**
+ * Compiles a MongoDB sort specification ({ field: 1 | -1, ... }) into SQL
+ * ORDER BY terms following MongoDB's BSON type comparison order (see
+ * bsonRankSql). Date wrappers ({"$date": ISO}) rank as dates and compare by
+ * their ISO string, which orders chronologically.
  *
  * Known divergence: MongoDB sorts an ARRAY field by its smallest (asc) /
  * largest (desc) element; here arrays rank as a group and compare as text.
+ * `strict: true` (see assertNoKnownDivergence) rejects such a sort instead.
  */
 export function toSortSql (columnName: string, sort: Record<string, number>): string {
   const entries = Object.entries(sort)
@@ -670,21 +781,12 @@ export function toSortSql (columnName: string, sort: Record<string, number>): st
     if (direction !== 1 && direction !== -1) {
       throw Error(`unsupported sort direction for field ${field}: ${String(direction)} (only 1 and -1 are supported)`)
     }
-    const path = toJson1PathString([field])
-    const datePath = toJson1PathString([`${field}.$date`])
-    const type = `json_type(${quoteIdentifier(columnName)}, ${path})`
-    const dateValue = `json_extract(${quoteIdentifier(columnName)}, ${datePath})`
-    const rank = `CASE WHEN ${type} IS NULL OR ${type} = 'null' THEN 0 ` +
-      `WHEN ${type} IN ('integer','real') THEN 1 ` +
-      `WHEN ${type} = 'text' THEN 2 ` +
-      `WHEN ${type} = 'object' AND ${dateValue} IS NOT NULL THEN 6 ` +
-      `WHEN ${type} = 'object' THEN 3 ` +
-      `WHEN ${type} = 'array' THEN 4 ` +
-      'ELSE 5 END' // 'true'/'false'
-    const value = `CASE WHEN ${type} = 'object' AND ${dateValue} IS NOT NULL THEN ${dateValue} ` +
-      `ELSE json_extract(${quoteIdentifier(columnName)}, ${path}) END`
+    const column = quoteIdentifier(columnName)
+    const type = `json_type(${column}, ${toJson1PathString([field])})`
+    const dateValue = `json_extract(${column}, ${toJson1PathString([`${field}.$date`])})`
+    const value = `json_extract(${column}, ${toJson1PathString([field])})`
     const dir = direction === 1 ? 'ASC' : 'DESC'
-    terms.push(`${rank} ${dir}`, `${value} ${dir}`)
+    terms.push(`${bsonRankSql(type, dateValue)} ${dir}`, `${bsonValueSql(type, value, dateValue)} ${dir}`)
   }
   return terms.join(', ')
 }

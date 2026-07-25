@@ -6,8 +6,10 @@ import { parse as parseDocument, stringify as stringifyDocument } from './ejson.
 import { toMongoError } from './errors.js'
 import type { Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
+import { compileStages, splitPipeline } from './aggregate.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
-import { bindValueAsJson, quoteIdentifier, toJson1PathString, toSortSql, toSql, type SqlParams } from './query/query.js'
+import { quoteIdentifier, toJson1PathString, toSortSql, toSql, type CompileOptions, type SqlParams } from './query/query.js'
+import { buildUpdateExpression, buildUpsertDocument, collectEqualities, type UpdateExpression } from './update.js'
 
 export type { ProjectionSpec } from './projection.js'
 export { DUPLICATE_KEY_ERROR, MongoServerError } from './errors.js'
@@ -23,8 +25,8 @@ export declare type WithId<TSchema extends Document = Document> = WithoutId<TSch
 }
 
 export type {
-  BsonTypeAlias, Condition, Filter, FilterOperators, InferIdType,
-  Paths, PathValue, UpdateFilter
+  AddToSetOperand, ArrayPaths, BsonTypeAlias, Condition, Filter, FilterOperators,
+  InferIdType, Paths, PathValue, PullOperand, PushOperand, UpdateFilter
 } from './filter-types.js'
 
 /**
@@ -112,6 +114,29 @@ export interface FindOneAndDeleteOptions {
   projection?: ProjectionSpec
 }
 
+/** Where an aggregation pipeline's stages actually run. See `AggregationCursor.explain`. */
+export interface PipelineExplanation {
+  /** The SELECT the pushed-down leading stages compiled to. */
+  sql: string
+  /** How many leading stages SQLite runs. The rest run in JavaScript. */
+  pushedDown: number
+  /** The names of the stages that did not push down, in order. */
+  inJavaScript: string[]
+}
+
+export interface AggregationCursor<TSchema extends Document = Document> {
+  next: () => Promise<TSchema | null>
+  toArray: () => Promise<TSchema[]>
+  close: () => Promise<void>
+  /**
+   * Where this pipeline's work happens. Unlike MongoDB's `explain`, this
+   * reports the SQL/JavaScript split rather than an index plan - the question
+   * it answers is "is my leading $match still index-eligible?".
+   */
+  explain: () => PipelineExplanation
+  [Symbol.asyncIterator]: () => AsyncIterableIterator<TSchema>
+}
+
 export interface FindCursor<TSchema extends Document = Document> {
   /** Sorts results in MongoDB's BSON type order. Chainable; throws once iteration has started. */
   sort: (spec: SortSpecification) => FindCursor<TSchema>
@@ -125,236 +150,6 @@ export interface FindCursor<TSchema extends Document = Document> {
   toArray: () => Promise<Array<WithId<TSchema>>>
   close: () => Promise<void>
   [Symbol.asyncIterator]: () => AsyncIterableIterator<WithId<TSchema>>
-}
-
-// $setOnInsert only ever contributes to the document an upsert INSERTS; it is
-// a no-op on a matched document, so it never reaches the SQL expression.
-const UPDATE_OPERATORS = ['$set', '$unset', '$inc', '$setOnInsert']
-
-/**
- * Rejects field paths an update must never touch.
- *
- * An empty path is the dangerous one: `toJson1PathString([''])` is `'$'`, the
- * document ROOT, so `{ $set: { '': 1 } }` used to replace the whole document
- * with the number 1. `_id` is immutable in MongoDB, and letting `$unset` remove
- * it (or `$inc` overwrite it) leaves an unaddressable document behind.
- */
-function assertUpdatableField (operator: string, field: string, allowId = false): void {
-  if (field === '') throw Error(`${operator} requires a non-empty field name`)
-  if (allowId) return
-  if (field === '_id' || field.startsWith('_id.')) {
-    throw Error(`Performing an update on the path '${field}' would modify the immutable field '_id'`)
-  }
-}
-
-/**
- * The `{ field: value }` map an update operator applies, validated.
- *
- * `allowId` is for `$setOnInsert`, whose fields only ever land in a document
- * being created - nothing immutable is being changed there.
- */
-function updateOperand (operator: string, value: unknown, allowId = false): Array<[string, unknown]> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw Error(`Modifiers operate on fields but ${operator} was given type: ${value === null ? 'null' : typeof value}`)
-  }
-  const entries = Object.entries(value)
-  for (const [field] of entries) assertUpdatableField(operator, field, allowId)
-  return entries
-}
-
-/**
- * Rejects an update whose operators target the same path twice, or a path and
- * one of its ancestors - MongoDB's "would create a conflict at" error. The
- * operators are applied in a fixed order here ($inc, then $unset, then $set)
- * and $inc reads the ORIGINAL column, so a conflicting update would otherwise
- * produce a result that silently depends on that ordering.
- */
-function assertNoConflictingPaths (update: AnyFilter): void {
-  const seen: string[] = []
-  for (const operator of UPDATE_OPERATORS) {
-    for (const field of Object.keys((update[operator] ?? {}) as Record<string, unknown>)) {
-      const clash = seen.find(other => other === field || field.startsWith(`${other}.`) || other.startsWith(`${field}.`))
-      if (clash !== undefined) {
-        throw Error(`Updating the path '${field}' would create a conflict at '${clash}'`)
-      }
-      seen.push(field)
-    }
-  }
-}
-
-/**
- * Writes `value` at a dotted path, creating missing parent objects - the JS
- * counterpart of what `ensureParents` + `json_set` do in SQL. Used only when
- * building the document an upsert inserts.
- */
-function setPath (doc: Document, field: string, value: unknown): void {
-  const segments = field.split('.')
-  let node = doc
-  for (const segment of segments.slice(0, -1)) {
-    const existing = node[segment]
-    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) node[segment] = {}
-    node = node[segment] as Document
-  }
-  node[segments[segments.length - 1]!] = value
-}
-
-/**
- * Collects the equality conditions a filter pins, the way MongoDB seeds an
- * upsert's new document: `{ a: 1, 'b.c': { $eq: 2 } }` contributes
- * `{ a: 1, b: { c: 2 } }`.
- *
- * Anything that is not an equality contributes NOTHING - a range, `$in`, a
- * regex, `$or`/`$nor`/`$not` - because there is no single value they imply.
- * `$and` is the exception: it is a conjunction, so each of its terms still
- * has to hold.
- */
-function collectEqualities (filter: AnyFilter, into: Document): void {
-  for (const [key, value] of Object.entries(filter)) {
-    if (key === '$and' && Array.isArray(value)) {
-      for (const term of value) {
-        if (term !== null && typeof term === 'object') collectEqualities(term as AnyFilter, into)
-      }
-      continue
-    }
-    if (key.startsWith('$')) continue
-    if (value instanceof RegExp) continue // a pattern, not a value
-
-    if (value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date)) {
-      const keys = Object.keys(value)
-      if (keys.some(k => k.startsWith('$'))) {
-        // An operator criterion. Only an explicit $eq names a value.
-        if (keys.length === 1 && keys[0] === '$eq' && !((value as Document).$eq instanceof RegExp)) {
-          setPath(into, key, (value as Document).$eq)
-        }
-        continue
-      }
-    }
-    setPath(into, key, value)
-  }
-}
-
-/**
- * The document an upsert inserts when nothing matched: the filter's equality
- * conditions, then `$setOnInsert`, `$set` and `$inc` applied over them (`$inc`
- * counts up from 0, as it does on a missing field). `$unset` is ignored -
- * there is nothing to remove from a document that does not exist yet.
- */
-function buildUpsertDocument (filter: AnyFilter, update: AnyFilter): Document {
-  const doc: Document = {}
-  collectEqualities(filter, doc)
-  for (const operator of ['$setOnInsert', '$set'] as const) {
-    for (const [field, value] of Object.entries((update[operator] ?? {}) as Record<string, unknown>)) {
-      setPath(doc, field, value)
-    }
-  }
-  for (const [field, amount] of Object.entries((update.$inc ?? {}) as Record<string, number>)) {
-    setPath(doc, field, amount)
-  }
-  return doc
-}
-
-/**
- * For a dotted field like 'a.b.c', wraps `expr` in json_insert calls creating
- * '$.a' and '$.a.b' as empty objects when missing - MongoDB creates missing
- * parents on $set/$inc, but SQLite's json_set only creates the leaf.
- * json_insert is a no-op when the path already exists, so present parents
- * (of any type) are left untouched.
- */
-function ensureParents (expr: string, field: string): string {
-  const segments = field.split('.')
-  for (let i = 1; i < segments.length; i++) {
-    const parent = segments.slice(0, i).join('.')
-    expr = `json_insert(${expr}, ${toJson1PathString([parent])}, json('{}'))`
-  }
-  return expr
-}
-
-interface UpdateExpression {
-  /** SQL computing the row's new `data` value. */
-  sql: string
-  params: SqlParams
-  /** The fields `$inc` targets, in the order incConflict indexes them. */
-  incFields: string[]
-  /**
-   * SQL yielding the INDEX into `incFields` of the first field this row holds
-   * a non-numeric value at, or NULL when `$inc` can apply. Callers must run it
-   * BEFORE the update (see Collection.assertIncApplies).
-   *
-   * Indexes rather than names so no user-supplied string is interpolated into
-   * SQL; the caller maps back through `incFields`.
-   */
-  incConflict?: string
-}
-
-/** True for a row whose `field` exists but is not a number - $inc's error case. */
-function nonNumericAt (field: string): string {
-  const path = toJson1PathString([field])
-  return `(json_type(data, ${path}) IS NOT NULL AND json_type(data, ${path}) NOT IN ('integer','real'))`
-}
-
-/**
- * Compiles a MongoDB update document ({ $set, $unset, $inc }) into a SQL
- * expression computing the new value of the `data` column, plus its named
- * parameters. Update params are prefixed 'u' so they can be merged with a
- * filter's 'p'-prefixed params in one statement without collisions.
- */
-function buildUpdateExpression (update: AnyFilter): UpdateExpression {
-  const keys = Object.keys(update)
-  if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')
-  for (const key of keys) {
-    if (!UPDATE_OPERATORS.includes(key)) {
-      throw Error(key.startsWith('$')
-        ? `unsupported update operator: ${key} (supported: ${UPDATE_OPERATORS.join(', ')})`
-        : 'update document requires atomic operators (e.g. { $set: { ... } })')
-    }
-  }
-
-  assertNoConflictingPaths(update)
-
-  // $setOnInsert contributes no SQL - it only shapes the document an upsert
-  // inserts - but its operand still has to be a well-formed field map.
-  if (update.$setOnInsert != null) updateOperand('$setOnInsert', update.$setOnInsert, true)
-
-  let expr = 'data'
-  const params: SqlParams = {}
-  const incFields: string[] = []
-  let n = 0
-
-  if (update.$inc != null) {
-    for (const [field, amount] of updateOperand('$inc', update.$inc)) {
-      if (typeof amount !== 'number' || !Number.isFinite(amount)) {
-        throw Error(`$inc requires a finite number for field ${field}; but got: ${String(amount)}`)
-      }
-      expr = ensureParents(expr, field)
-      const path = toJson1PathString([field])
-      const name = `u${n++}`
-      params[name] = amount
-      incFields.push(field)
-      // Missing fields start from 0, like MongoDB. A present-but-non-numeric
-      // field is an error there, and was silent data loss here (SQLite reads
-      // 'hello' + 1 as 1); incConflict below is what rejects those rows, and
-      // it runs as a separate SELECT before this expression is ever evaluated.
-      expr = `json_set(${expr}, ${path}, COALESCE(json_extract(data, ${path}), 0) + :${name})`
-    }
-  }
-
-  if (update.$unset != null) {
-    const paths = updateOperand('$unset', update.$unset).map(([field]) => toJson1PathString([field]))
-    if (paths.length > 0) expr = `json_remove(${expr}, ${paths.join(', ')})`
-  }
-
-  if (update.$set != null) {
-    for (const [field, value] of updateOperand('$set', update.$set)) {
-      expr = ensureParents(expr, field)
-      expr = `json_set(${expr}, ${toJson1PathString([field])}, ${bindValueAsJson(params, `u${n++}`, value)})`
-    }
-  }
-
-  const incConflict = incFields.length === 0
-    ? undefined
-    : `CASE ${incFields.map((field, index) => `WHEN ${nonNumericAt(field)} THEN ${index}`).join(' ')} END`
-
-  return { sql: expr, params, incFields, ...(incConflict === undefined ? {} : { incConflict }) }
 }
 
 /** The driver's UpdateResult shape for a write that did not upsert. */
@@ -376,6 +171,12 @@ function assertSkip (count: number): void {
     throw Error(`skip must be a non-negative finite number; but got: ${String(count)}`)
   }
 }
+
+/**
+ * Makes each `$match`-after-`$group` temp table uniquely named, so a pipeline
+ * iterated while another one is mid-flight cannot drop the other's table.
+ */
+let matchBatchSequence = 0
 
 /** Names SQLite cannot fold or mangle, so they can be used as a table name verbatim. */
 const UNAMBIGUOUS_NAME = /^[a-z0-9_]+$/
@@ -427,6 +228,8 @@ export class Collection<TSchema extends Document = Document> {
   private readonly name: string
   /** Physical table name, quoted - for interpolation into SQL. */
   private readonly table: string
+  /** What every filter compiled against this collection is compiled with. */
+  private readonly compileOptions: CompileOptions
 
   constructor (name: string, db: DatabaseSync, dbOptions: DbOptions) {
     assertValidCollectionName(name)
@@ -436,6 +239,7 @@ export class Collection<TSchema extends Document = Document> {
     this.collectionName = name
     this.name = tableNameFor(name)
     this.table = quoteIdentifier(this.name)
+    this.compileOptions = { table: this.table, strict: dbOptions.strict }
 
     // node:sqlite is synchronous, so a collection is fully usable the moment
     // its constructor returns - no init promise to await on every call.
@@ -481,8 +285,9 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /**
-   * Rejects the update if any row it would touch holds a non-numeric value
-   * where `$inc` applies, the way MongoDB rejects it - before writing anything.
+   * Rejects the update if any row it would touch violates one of its
+   * preconditions - a non-numeric `$inc`/`$mul` target, a non-array `$push`
+   * target - the way MongoDB rejects it, before writing anything.
    *
    * This is a separate SELECT rather than a guard inside the UPDATE on purpose.
    * The obvious alternative, a CASE that calls a registered SQL function to
@@ -491,12 +296,37 @@ export class Collection<TSchema extends Document = Document> {
    * NULL, so `json_set` wrote null over the value - the exact data loss the
    * guard existed to prevent. Caught by CI's oldest-Node job.
    */
-  private assertIncApplies (expr: UpdateExpression, scope: string, scopeParams: SqlParams): void {
-    if (expr.incConflict === undefined) return
-    const sql = `SELECT ${expr.incConflict} AS field FROM ${this.table} WHERE (${scope}) AND ${expr.incConflict} IS NOT NULL LIMIT 1`
-    const row = this.prepare(sql).get(scopeParams) as { field: number } | undefined
+  /**
+   * Under `strict`, rejects a sort whose key holds an ARRAY in any document.
+   *
+   * MongoDB sorts such a field by its smallest element ascending and its
+   * largest descending; `toSortSql` ranks arrays as a group and compares them
+   * as text, so the two disagree on the ORDER of a result set both consider
+   * correct - the kind of difference a test suite discovers on the day it
+   * moves to a real server. Statically undetectable, so this asks the data.
+   */
+  private assertSortable (sort: Record<string, number>): void {
+    if (this.dbOptions.strict !== true) return
+    for (const field of Object.keys(sort)) {
+      const path = toJson1PathString([field])
+      const found = this.prepare(
+        `SELECT 1 AS found FROM ${this.table} WHERE json_type(data, ${path}) = 'array' LIMIT 1`
+      ).get()
+      if (found !== undefined) {
+        throw Error(
+          `strict: cannot sort by '${field}' - some documents hold an ARRAY there, and MongoDB would ` +
+          'order those by their smallest (ascending) or largest (descending) element, which this library does not'
+        )
+      }
+    }
+  }
+
+  private assertUpdateApplies (expr: UpdateExpression, scope: string, scopeParams: SqlParams): void {
+    if (expr.guardSql === undefined) return
+    const sql = `SELECT ${expr.guardSql} AS guard FROM ${this.table} WHERE (${scope}) AND ${expr.guardSql} IS NOT NULL LIMIT 1`
+    const row = this.prepare(sql).get(scopeParams) as { guard: number } | undefined
     if (row === undefined) return
-    throw Error(`Cannot apply $inc to a value of non-numeric type (field ${expr.incFields[row.field]})`)
+    throw Error(expr.guards[row.guard]!.message)
   }
 
   find (query: Filter<TSchema> = {}, options: FindOptions = {}): FindCursor<TSchema> {
@@ -526,8 +356,9 @@ export class Collection<TSchema extends Document = Document> {
       // ORDER BY cannot defeat (a bare scalar predicate + ORDER BY rowid, by
       // contrast, makes SQLite pick a rowid scan over a field index - measured).
       const normalizedSort = typeof sortSpec === 'string' ? { [sortSpec]: 1 } : sortSpec
+      if (normalizedSort != null) this.assertSortable(normalizedSort)
       const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
-      const filter = toSql('data', query, this.table)
+      const filter = toSql('data', query, this.compileOptions)
       let sql = `SELECT data FROM ${this.table} WHERE (${filter.sql}) ORDER BY ${orderBy}`
 
       if (limitCount != null || skipCount != null) {
@@ -621,6 +452,127 @@ export class Collection<TSchema extends Document = Document> {
       }
     }
     return cursor
+  }
+
+  /**
+   * Runs an aggregation pipeline.
+   *
+   * The leading `$match`/`$sort`/`$skip`/`$limit` stages are compiled into one
+   * SELECT - so a pipeline that starts with `$match` uses the same indexes
+   * `find()` would - and everything after that runs in JavaScript over the
+   * results. `cursor.explain()` reports where the boundary fell.
+   *
+   * This is a SUBSET of MongoDB's pipeline (see "Missing Features" in the
+   * README); an unsupported stage, accumulator or expression operator is an
+   * error rather than a silent no-op.
+   */
+  aggregate <TResult extends Document = Document>(pipeline: Document[] = []): AggregationCursor<TResult> {
+    if (!Array.isArray(pipeline)) throw Error('aggregate expects an array of pipeline stages')
+    // Split (and therefore validate) eagerly, so a malformed pipeline throws
+    // where it was written rather than on first iteration.
+    const split = splitPipeline(pipeline)
+    const stages = compileStages(split.jsStages, (filter, docs) => this.matchBatch(filter, docs), this.dbOptions.strict)
+
+    const source = this.find(split.filter as Filter<TSchema>, {
+      ...(split.sort === undefined ? {} : { sort: split.sort }),
+      ...(split.skip === undefined ? {} : { skip: split.skip }),
+      ...(split.limit === undefined ? {} : { limit: split.limit })
+    })
+
+    let output: AsyncIterator<Document> | undefined
+    let done = false
+
+    const start = (): AsyncIterator<Document> => {
+      let stream: AsyncIterable<Document> = source as AsyncIterable<Document>
+      for (const stage of stages) stream = stage(stream)
+      return stream[Symbol.asyncIterator]()
+    }
+
+    const next = async (): Promise<TResult | null> => {
+      if (done) return null
+      output ??= start()
+      const step = await output.next()
+      if (step.done === true) {
+        done = true
+        return null
+      }
+      return step.value as TResult
+    }
+
+    const close = async (): Promise<void> => {
+      done = true
+      await output?.return?.(undefined)
+      await source.close()
+    }
+
+    const cursor: AggregationCursor<TResult> = {
+      next,
+      close,
+
+      explain: () => ({
+        sql: this.findSql(split.filter, split.sort, split.skip, split.limit),
+        pushedDown: split.pushedDown,
+        inJavaScript: split.jsStages.map(stage => Object.keys(stage)[0]!)
+      }),
+
+      async toArray (): Promise<TResult[]> {
+        const documents: TResult[] = []
+        let document: TResult | null
+        while ((document = await next()) !== null) documents.push(document)
+        return documents
+      },
+
+      async * [Symbol.asyncIterator] (): AsyncIterableIterator<TResult> {
+        try {
+          let document: TResult | null
+          while ((document = await next()) !== null) yield document
+        } finally {
+          await close()
+        }
+      }
+    }
+    return cursor
+  }
+
+  /**
+   * Applies a filter to documents that are no longer rows in this collection -
+   * what a `$match` after a `$group` needs.
+   *
+   * The batch goes into a TEMP table and back through the ordinary query
+   * compiler, rather than through a JavaScript re-implementation of the filter
+   * language. A second matcher would be a second set of semantics to keep in
+   * step with the first, and every quirk pinned down in the specs (implicit
+   * array matching, the dotted-array-path rule, Date comparison through
+   * `.$date`) would have to be reproduced and would eventually drift.
+   */
+  private matchBatch (filter: AnyFilter, docs: Document[]): Document[] {
+    const name = `aggmatch_${this.name}_${matchBatchSequence++}`
+    const table = quoteIdentifier(name)
+    // TEMP, so it never touches the user's schema and disappears with the
+    // connection even if something below throws.
+    this.exec(`CREATE TEMP TABLE ${table} (data JSON)`)
+    try {
+      const insert = this.prepare(`INSERT INTO ${table} VALUES(json(?))`)
+      for (const doc of docs) insert.run(stringifyDocument(doc))
+      const compiled = toSql('data', filter, { ...this.compileOptions, table })
+      const rows = this.prepare(`SELECT data FROM ${table} WHERE (${compiled.sql}) ORDER BY rowid`)
+        .all(compiled.params) as Array<{ data: string }>
+      return rows.map(row => parseDocument(row.data))
+    } finally {
+      this.exec(`DROP TABLE IF EXISTS ${table}`)
+    }
+  }
+
+  /** The SELECT `find()` would build, for AggregationCursor.explain(). */
+  private findSql (filter: AnyFilter, sort?: SortSpecification, skip?: number, limit?: number): string {
+    const normalizedSort = typeof sort === 'string' ? { [sort]: 1 } : sort
+    const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
+    let sql = `SELECT data FROM ${this.table} WHERE (${toSql('data', filter, this.compileOptions).sql}) ORDER BY ${orderBy}`
+    if (limit != null || skip != null) {
+      sql += ` LIMIT ${limit == null || limit === 0 ? -1 : Math.trunc(Math.abs(limit))}`
+      if (skip != null && skip !== 0) sql += ` OFFSET ${Math.trunc(skip)}`
+    }
+    return sql
   }
 
   async findOne (filter: string | Filter<TSchema> = {}, options: FindOptions = {}): Promise<WithId<TSchema> | null> {
@@ -718,7 +670,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   async countDocuments (filter?: Filter<TSchema>): Promise<number> {
-    const compiled = toSql('data', filter ?? {}, this.table)
+    const compiled = toSql('data', filter ?? {}, this.compileOptions)
     const sql = `SELECT COUNT(*) AS count FROM ${this.table} WHERE (${compiled.sql})`
     const result = this.prepare(sql).get(compiled.params) as { count: number }
     return Number(result.count)
@@ -735,7 +687,7 @@ export class Collection<TSchema extends Document = Document> {
    * `deleteOne` could remove more than one row.
    */
   private findOneRow (filter: AnyFilter, sort?: SortSpecification): { rowid: number, data: string } | null {
-    const compiled = toSql('data', filter, this.table)
+    const compiled = toSql('data', filter, this.compileOptions)
     const normalizedSort = typeof sort === 'string' ? { [sort]: 1 } : sort
     const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
     const sql = `SELECT rowid, data FROM ${this.table} WHERE (${compiled.sql}) ORDER BY ${orderBy} LIMIT 1`
@@ -764,7 +716,7 @@ export class Collection<TSchema extends Document = Document> {
 
   /** Applies a compiled update expression to exactly one row. */
   private updateRow (expr: UpdateExpression, rowid: number): number {
-    this.assertIncApplies(expr, 'rowid = :rowid', { rowid })
+    this.assertUpdateApplies(expr, 'rowid = :rowid', { rowid })
     // `data != <expr>` makes a no-op update report modifiedCount 0, like
     // MongoDB. Each 'u' parameter binds once for both occurrences of expr.
     const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE rowid = :rowid AND data != ${expr.sql}`
@@ -801,7 +753,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   async deleteMany (filter: Filter<TSchema>): Promise<DeleteResult> {
-    const compiled = toSql('data', filter, this.table)
+    const compiled = toSql('data', filter, this.compileOptions)
     const result = this.run(`DELETE FROM ${this.table} WHERE (${compiled.sql})`, compiled.params)
     return { acknowledged: true, deletedCount: Number(result.changes) }
   }
@@ -855,13 +807,13 @@ export class Collection<TSchema extends Document = Document> {
     if (matchedCount === 0 && options.upsert === true) {
       return (await this.insertUpserted(buildUpsertDocument(filter, update))).result
     }
-    const compiled = toSql('data', filter, this.table)
+    const compiled = toSql('data', filter, this.compileOptions)
 
     // Checked across every matched row before anything is written, so a bad
-    // $inc target leaves the collection untouched rather than partially
-    // updated. (MongoDB applies until it hits the offending document; this is
-    // the safer divergence, and the one the rollback semantics already implied.)
-    this.assertIncApplies(expr, compiled.sql, compiled.params)
+    // $inc or $push target leaves the collection untouched rather than
+    // partially updated. (MongoDB applies until it hits the offending document;
+    // this is the safer divergence, and the one the rollback semantics implied.)
+    this.assertUpdateApplies(expr, compiled.sql, compiled.params)
 
     // The expression's 'u' params and the filter's 'p' params merge without
     // collisions, by construction (see bindValue / buildUpdateExpression).
@@ -982,6 +934,31 @@ export interface DbOptions {
   /** Logs every statement to the console. */
   debug: boolean
   /**
+   * Rejects the constructs whose answer is KNOWN to differ from MongoDB's,
+   * instead of quietly returning the different answer.
+   *
+   * This library is a compatible subset, and everything outside that subset is
+   * already an error. The cases below are the harder ones: they are accepted,
+   * they return something, and what they return is not what a server would
+   * say. That is exactly what makes a partial implementation dangerous to
+   * develop against, so `strict` turns each of them into a failure:
+   *
+   * - a dotted path that could cross more array levels than the compiler
+   *   expands (see MAX_ARRAY_PATH_DEPTH);
+   * - `$type` naming a BSON type the storage layer cannot hold, which compiles
+   *   to "matches nothing" rather than to a fact about the data;
+   * - a sort whose key holds an ARRAY in some document, which MongoDB orders
+   *   by the array's smallest/largest element and this library orders as text;
+   * - an aggregation field path that runs through an array, which MongoDB maps
+   *   over and this library reads as missing.
+   *
+   * It is a boundary check, not a proof of equivalence: it catches the
+   * divergences that are known and detectable, and cannot catch one nobody has
+   * found yet. Off by default; the intended use is a test suite that runs
+   * against this library instead of a real mongod.
+   */
+  strict: boolean
+  /**
    * Milliseconds a write waits behind a competing writer before failing with
    * SQLITE_BUSY. Only meaningful for file-backed databases - WAL mode still
    * serialises writers, and SQLite's default of 0 fails instantly on contention.
@@ -1013,6 +990,7 @@ export class Db {
   static async fromUrl (url: string, options: Partial<DbOptions> = {}): Promise<Db> {
     const dbOptions: DbOptions = {
       debug: false,
+      strict: false,
       busyTimeoutMs: 5000,
       ...options
     }

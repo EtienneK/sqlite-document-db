@@ -156,10 +156,45 @@ export type MatchKeysAndValues<TSchema> =
   IsAny<TSchema> extends true ? Record<string, any>
     : { [P in Paths<TSchema>]?: PathValue<TSchema, P> }
 
+/** Paths of `TSchema` whose value is an array - what the array operators accept. */
+export type ArrayPaths<TSchema> =
+  IsAny<TSchema> extends true ? string
+    : {
+        [P in Paths<TSchema>]: NonNullable<PathValue<TSchema, P>> extends ReadonlyArray<any> ? P : never
+      }[Paths<TSchema>]
+
+/** The element type of the array at `P`, or `any` for an unknown schema. */
+type ElementOf<TSchema, P> =
+  IsAny<TSchema> extends true ? any
+    : NonNullable<PathValue<TSchema, P>> extends ReadonlyArray<infer U> ? U : never
+
+/**
+ * A `$push` operand: one element, or `$each` with the modifiers this library
+ * implements. `$position` is deliberately absent - it is a runtime error here,
+ * so it must not typecheck (see rule 1 at the top of this file).
+ */
+export type PushOperand<T> = T | {
+  $each: readonly T[]
+  /** Keep the first n elements, or the last n when negative. */
+  $slice?: number
+  /** 1/-1 sorts the elements themselves; a document sorts by a field of each. */
+  $sort?: 1 | -1 | Record<string, 1 | -1>
+}
+
+/** An `$addToSet` operand: one element, or `$each` with several. */
+export type AddToSetOperand<T> = T | { $each: readonly T[] }
+
+/**
+ * A `$pull` operand: a value to remove, or a criterion matched against each
+ * element the way `$elemMatch` matches one.
+ */
+export type PullOperand<T> = T | FilterOperators<T> | Document
+
 /**
  * An update document. Only the operators this library implements appear, and
- * `$inc` is restricted to numeric paths - a `$inc` on a string field is a
- * runtime error, so it should not compile either.
+ * each is restricted to the paths it can apply to - `$inc` to numeric ones,
+ * the array operators to array ones - because a `$inc` on a string field or a
+ * `$push` onto a number is a runtime error, so it should not compile either.
  */
 export type UpdateFilter<TSchema = Document> =
   IsAny<TSchema> extends true ? Record<string, any>
@@ -168,4 +203,13 @@ export type UpdateFilter<TSchema = Document> =
       $setOnInsert?: MatchKeysAndValues<TSchema>
       $unset?: { [P in Paths<Omit<TSchema, '_id'>>]?: '' | true | 1 }
       $inc?: { [P in NumericPaths<Omit<TSchema, '_id'>>]?: number }
+      $mul?: { [P in NumericPaths<Omit<TSchema, '_id'>>]?: number }
+      $min?: MatchKeysAndValues<Omit<TSchema, '_id'>>
+      $max?: MatchKeysAndValues<Omit<TSchema, '_id'>>
+      $rename?: { [P in Paths<Omit<TSchema, '_id'>>]?: string }
+      $push?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: PushOperand<ElementOf<TSchema, P>> }
+      $addToSet?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: AddToSetOperand<ElementOf<TSchema, P>> }
+      $pop?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: 1 | -1 }
+      $pull?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: PullOperand<ElementOf<TSchema, P>> }
+      $pullAll?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: ReadonlyArray<ElementOf<TSchema, P>> }
     }
