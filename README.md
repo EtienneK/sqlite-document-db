@@ -63,6 +63,17 @@ Console output of the above:
 }
 ```
 
+## Examples
+
+Runnable examples live in [examples/](examples/) — CRUD, every query operator,
+arrays, indexes with a before/after timing, cursors, dates, upsert, error
+handling, TypeScript schemas, and a Deno one. They are executed by CI on Node
+and Deno, so they cannot rot:
+
+```bash
+npm run examples
+```
+
 ## Features and examples
 
 ### Insert documents
@@ -305,6 +316,7 @@ db.collection('users')  // ...this one
 npm install
 npm test         # runs every assertion against BOTH this library and a real MongoDB
 npm run test:types  # type-level assertions, including cases that must NOT compile
+npm run examples # builds, then runs every example in examples/
 npm run bench    # benchmarks (indexed vs full-scan queries, writes) over 20k docs
 npm run lint
 npm run build

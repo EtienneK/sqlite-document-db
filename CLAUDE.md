@@ -17,10 +17,15 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 | `npm run typecheck` | `tsc` over `src` **and** `test` |
 | `npm run build` | Emits `dist/` from `src` only (`tsconfig.build.json`) |
 | `npm run test:types` | Type-level assertions (`vitest --typecheck`), own config |
+| `npm run examples` | Builds, then runs every example in `examples/` |
 | `npm run bench` | Benchmarks over 20k docs; no mongod, own vitest config |
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck,
 test:types, build and test on {ubuntu, windows} × Node {22.13.0, 24, 26}.
+A separate job runs [examples/](examples/) under **Deno**, which is the only
+thing in the repo that exercises a non-Node runtime — the test suite is
+vitest-bound. Deno implements `node:sqlite` including the custom-function
+support `$regex` needs, so the library works there unchanged.
 Releases go through [.github/workflows/publish.yml](.github/workflows/publish.yml),
 which **reuses** that workflow via `workflow_call` rather than copying the
 matrix, then packs the tarball and smoke-tests it from a clean project before

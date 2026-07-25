@@ -31,6 +31,7 @@
     "test:watch": "vitest",
     "test:types": "vitest run --config vitest.types.config.ts",
     "bench": "vitest bench --run --config vitest.bench.config.ts",
+    "examples": "npm run build && node examples/run-all.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

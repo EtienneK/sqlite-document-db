@@ -68,6 +68,45 @@ jobs:
       # a real MongoDB booted in-process. See README, "Development".
       - run: npm test
 
+      # Documentation that is not executed rots. dist/ was just built, so the
+      # runner is invoked directly rather than through `npm run examples`.
+      - name: Run the examples
+        run: node examples/run-all.mjs
+
+  # Deno implements node:sqlite, including the custom-function support $regex
+  # needs, so the library works there unchanged. Nothing else in this repo
+  # exercises that - the test suite is vitest-bound - which makes the examples
+  # the natural Deno smoke test.
+  deno:
+    name: deno / examples
+    runs-on: ubuntu-latest
+    env:
+      MONGOMS_DISABLE_POSTINSTALL: '1' # no mongod is started here
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - run: deno --version
+
+      - name: Run every example under Deno
+        run: deno run --allow-read --allow-write --allow-env examples/run-all.mjs
+
+      - name: Run the TypeScript examples under Deno
+        run: |
+          deno run --allow-read --allow-write --allow-env examples/11-typed.ts
+          deno run --allow-read --allow-write --allow-env examples/deno.ts
+
   bench:
     name: benchmarks (smoke)
     runs-on: ubuntu-latest
