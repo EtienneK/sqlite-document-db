@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`insertMany` was one implicit transaction per document.** With
+  `journal_mode=WAL` and SQLite's default `synchronous=FULL` that is an fsync
+  per document, which made inserting a large batch into a file-backed database
+  take minutes: 4000 documents took **25.9 seconds** (155/s). The batch now runs
+  in a single transaction, and the same insert takes **122ms** (32,800/s) — a
+  212× improvement. **The observable contract is unchanged**: MongoDB's
+  *ordered* insert is not atomic, so a failure part-way through commits the
+  documents that succeeded rather than rolling them back — everything before the
+  failure stays written, nothing after it is attempted.
+- **A failed `insertMany` now reports how far it got**, as `insertedCount` and
+  `insertedIds` on the thrown error (and as `error.result`, which is where the
+  driver puts them). Previously a caller who caught the error could not tell
+  whether none or nearly all of the batch had landed without re-querying.
 - `distinct` and `drop` were listed as missing in the README; they now exist.
 - Two backlog entries claimed work that was already done (the "Project Fields to
   Return" tutorial spec, and benchmarks in CI).

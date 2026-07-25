@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 // Documents round-trip through the EJSON layer, not plain JSON: Dates are
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
-import { toMongoError } from './errors.js'
+import { toMongoError, withPartialResult } from './errors.js'
 import type { Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
 import { compileStages, splitPipeline } from './aggregate.js'
@@ -14,6 +14,7 @@ import { buildUpdateExpression, buildUpsertDocument, collectEqualities, type Upd
 
 export type { ProjectionSpec } from './projection.js'
 export { DUPLICATE_KEY_ERROR, MongoServerError } from './errors.js'
+export type { PartialWriteResult } from './errors.js'
 
 export declare interface Document {
   [key: string]: any
@@ -1001,34 +1002,84 @@ export class Collection<TSchema extends Document = Document> {
     }
   }
 
+  /**
+   * Inserts documents in order, as MongoDB's *ordered* `insertMany` does:
+   * serially, stopping at the first failure, keeping everything written before
+   * it and never attempting anything after it.
+   *
+   * **That contract is about the OUTCOME, not about transactions.** The batch
+   * runs inside ONE transaction, and a failure part-way through COMMITS the
+   * documents that succeeded rather than rolling them back - which leaves
+   * exactly the state MongoDB would, while costing one commit instead of one
+   * per document. With `journal_mode=WAL` and SQLite's default
+   * `synchronous=FULL`, a commit per document means an fsync per document; the
+   * batch form is orders of magnitude faster on a file-backed database and
+   * makes no difference to what a caller can observe.
+   *
+   * The input documents are MUTATED, gaining their `_id` - the driver does the
+   * same, and several specs assert on it.
+   */
   async insertMany (docs: TSchema[]): Promise<InsertManyResult> {
     if (!Array.isArray(docs)) throw Error('insertMany expects an array of documents')
     const stmt = this.prepare(`INSERT INTO ${this.table} VALUES(json(?))`)
     const insertedIds: Record<number, string> = {}
     let insertedCount = 0
 
-    // Inserts are ordered and not wrapped in a transaction: like MongoDB's
-    // ordered insertMany, a failure part-way through keeps the documents that
-    // were already written.
-    for (let index = 0; index < docs.length; index++) {
-      const doc = docs[index]!
-      if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
-        throw Error(`documents must be objects; but got: ${doc === null ? 'null' : typeof doc} at index ${index}`)
-      }
-      // MongoDB forbids an array _id, and here it would additionally make the
-      // document ambiguous to address: the implicit array-element rule lets
-      // { _id: [ ... ] } match a DIFFERENT document that merely contains it.
-      if (Array.isArray(doc._id)) throw Error(`the _id field cannot be an array (at index ${index})`)
-      const id = (doc._id == null) ? objectIdHexString() : doc._id;
-      (doc as unknown as WithId<TSchema>)._id = id
+    // BEGIN is attempted rather than guarded by a flag: a caller (or a future
+    // withTransaction) may already have one open, and SQLite has no nested
+    // transactions. Failing to open one simply means this batch does not own
+    // it, and the enclosing transaction decides when the work becomes durable.
+    let owned = false
+    if (docs.length > 1) {
       try {
-        stmt.run(stringifyDocument({ _id: id, ...doc }))
-      } catch (error) {
-        throw this.mapError(error)
+        this.db.exec('BEGIN')
+        owned = true
+      } catch {
+        owned = false
       }
-      insertedIds[index] = id
-      insertedCount++
     }
+
+    /** Ends the transaction KEEPING whatever was inserted, per ordered semantics. */
+    const keepWhatLanded = (): void => {
+      if (!owned) return
+      owned = false
+      try {
+        this.db.exec('COMMIT')
+      } catch {
+        // A constraint failure aborts the statement, not the transaction, so
+        // COMMIT normally succeeds. If SQLite did abort it, the prefix is gone
+        // either way and the only correct move is to leave no transaction open.
+        try { this.db.exec('ROLLBACK') } catch { /* already closed */ }
+      }
+    }
+
+    try {
+      for (let index = 0; index < docs.length; index++) {
+        const doc = docs[index]!
+        if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+          throw Error(`documents must be objects; but got: ${doc === null ? 'null' : typeof doc} at index ${index}`)
+        }
+        // MongoDB forbids an array _id, and here it would additionally make the
+        // document ambiguous to address: the implicit array-element rule lets
+        // { _id: [ ... ] } match a DIFFERENT document that merely contains it.
+        if (Array.isArray(doc._id)) throw Error(`the _id field cannot be an array (at index ${index})`)
+        const id = (doc._id == null) ? objectIdHexString() : doc._id;
+        (doc as unknown as WithId<TSchema>)._id = id
+        try {
+          stmt.run(stringifyDocument({ _id: id, ...doc }))
+        } catch (error) {
+          throw this.mapError(error)
+        }
+        insertedIds[index] = id
+        insertedCount++
+      }
+    } catch (error) {
+      keepWhatLanded()
+      // The driver reports the partial result on the error itself, so a caller
+      // can tell how far an ordered batch got without re-querying.
+      throw withPartialResult(error, insertedIds, insertedCount)
+    }
+    keepWhatLanded()
 
     return { acknowledged: true, insertedIds, insertedCount }
   }

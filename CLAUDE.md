@@ -397,8 +397,19 @@ Mongodb variant flaky for reasons that are nobody's bug.
   compiles, and an array `_id` made `deleteOne` delete two documents.
 - `insertMany` **mutates the input documents**, assigning `_id` in place. This
   matches the MongoDB driver, and several tests assert on the mutated objects.
-- `insertMany` is not transactional, matching MongoDB's *ordered* insert: on a
-  duplicate `_id` the documents already written stay written.
+- **`insertMany` matches MongoDB's *ordered* insert: on a duplicate `_id` the
+  documents already written stay written, and nothing after it is attempted.**
+  That is a statement about the OUTCOME, not about transactions — and the
+  distinction is load-bearing. The batch runs inside ONE transaction and a
+  failure part-way through **COMMITs** the prefix rather than rolling it back,
+  which leaves exactly the state MongoDB would. It used to be one implicit
+  transaction per document, and with `journal_mode=WAL` plus SQLite's default
+  `synchronous=FULL` that is one fsync per document — the reason inserting 100k
+  documents took minutes on a file-backed database. Do not "fix" the commit-on-
+  error into a rollback: that would make the batch atomic, which MongoDB's
+  ordered insert is not.
+  `BEGIN` is *attempted*, not guarded by a flag, so an enclosing transaction
+  (a future `withTransaction`) simply keeps ownership.
 - **Document nesting is capped at `MAX_DOCUMENT_DEPTH` (1000)** in
   [src/ejson.ts](src/ejson.ts), which mirrors SQLite's `SQLITE_MAX_JSON_DEPTH`.
   Without the guard the only symptom is `json()` failing with a bare "malformed

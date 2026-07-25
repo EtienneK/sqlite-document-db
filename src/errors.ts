@@ -40,6 +40,35 @@ export class MongoServerError extends Error {
   }
 }
 
+/**
+ * What an ordered `insertMany` managed to write before it failed.
+ *
+ * The driver raises a `MongoBulkWriteError` carrying this, and callers use it
+ * to find out how far a partially-applied batch got. Attaching the same fields
+ * to whatever error was thrown keeps that possible here without inventing a
+ * second error class for callers to branch on: `error.code` still says WHY it
+ * failed, and `result.insertedCount` now says how much survived.
+ */
+export interface PartialWriteResult {
+  insertedCount: number
+  insertedIds: Record<number, string>
+}
+
+export function withPartialResult (
+  error: unknown, insertedIds: Record<number, string>, insertedCount: number
+): unknown {
+  if (!(error instanceof Error)) return error
+  const result: PartialWriteResult = { insertedCount, insertedIds }
+  Object.defineProperties(error, {
+    // Both spellings, because the driver exposes `error.result.insertedCount`
+    // on a bulk write error while its plainer errors carry the count directly.
+    result: { value: result, enumerable: false, configurable: true },
+    insertedCount: { value: insertedCount, enumerable: false, configurable: true },
+    insertedIds: { value: insertedIds, enumerable: false, configurable: true }
+  })
+  return error
+}
+
 interface SqliteError extends Error { errcode: number }
 
 function isSqliteConstraintError (error: unknown): error is SqliteError {

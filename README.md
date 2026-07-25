@@ -409,6 +409,20 @@ try {
 `MongoServerError` is also exported, but branch on `code` — `instanceof` cannot
 match the official driver's class without depending on `mongodb`.
 
+`insertMany` is **ordered**, like MongoDB's: it inserts serially, stops at the
+first failure, keeps everything written before it, and never attempts anything
+after it. The thrown error carries how far it got, so you do not have to
+re-query to find out:
+
+```javascript
+try {
+  await db.collection('users').insertMany(batch)
+} catch (error) {
+  error.insertedCount        // how many of `batch` were written
+  error.insertedIds          // { <index in batch>: <_id> } for those
+}
+```
+
 ### Typed collections
 
 Pass a schema to `db.collection<T>()` and filters, update documents and results

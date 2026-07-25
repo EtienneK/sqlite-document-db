@@ -1,2 +1,5 @@
 node_modules/
 dist/
+
+# Ad-hoc performance investigations (see BACKLOG item 17).
+.perf/

@@ -937,10 +937,31 @@ up should know:
   synchronous, so there is no interleaving to coordinate — `withTransaction(fn)`
   is the honest shape, and anything that hands the caller a token to pass around
   would be pretending to a concurrency model that does not exist here.
-- **`insertMany` must stay outside it.** It is deliberately non-transactional to
-  match MongoDB's *ordered* insert, and several specs assert that documents
-  written before a duplicate-key failure stay written. Wrapping it would be a
-  silent behaviour change.
+- **`insertMany` already opens its own transaction, and its semantics must
+  survive.** It used to be one implicit transaction per document, which with
+  `journal_mode=WAL` and the default `synchronous=FULL` means an fsync per
+  document - the reason inserting 100k documents into a file took minutes. It
+  now runs the batch in ONE transaction and, on failure, **COMMITs the prefix**
+  rather than rolling back, because MongoDB's *ordered* insert is not atomic.
+  `withTransaction` must not turn that into a rollback. It opens its
+  transaction by ATTEMPTING `BEGIN` and tolerating failure, so an enclosing
+  transaction simply keeps ownership - that is the integration point to build on.
+- **`synchronous` is worth deciding at the same time, but it is a SMALL win.**
+  Nothing sets it, so it is SQLite's default `FULL`; `NORMAL` is the usual
+  recommendation under WAL (durable across process crashes, can lose only the
+  last commits on OS/power failure). Measured over 4000 inserts on a real disk:
+
+  | | time | throughput |
+  | --- | --- | --- |
+  | txn per row, `FULL` (the old `insertMany`) | 26292ms | 152/s |
+  | txn per row, `NORMAL` | 152ms | 26,348/s |
+  | one txn, `FULL` (what it does now) | 65ms | 61,850/s |
+  | one txn, `NORMAL` | 53ms | 75,801/s |
+
+  So `NORMAL` is worth **173x when commits are per-row and only ~1.2x once they
+  are batched**. It looks dramatic only because it rescues the pathological
+  case. Commit granularity is the real axis; treat `synchronous` as a
+  durability option for callers who want it, not as a performance fix.
 
 ---
 
@@ -1122,6 +1143,12 @@ it differently.
   since item 14 landed. No thresholds, deliberately: shared runners are far too
   noisy to assert timings on, so it proves the suite still runs, not that it got
   no slower.
+  **Still open, and it matters: the bench suite only measures `:memory:`.** That
+  is why `insertMany` spent a release doing one implicit transaction — and
+  therefore one fsync — per document without anyone noticing: in memory there is
+  no fsync, so it clocked 243,000 inserts/s while a file-backed database managed
+  155/s. Any cost that is I/O-bound rather than CPU-bound is currently invisible
+  to `npm run bench`. Add at least one file-backed write benchmark.
 - ~~**`_id` types.**~~ **DONE 2026-07-25** —
   [test/id-types.spec.ts](test/id-types.spec.ts) is the specification, and the
   README has an `_id` values section. Supported: string, number, boolean, Date,
