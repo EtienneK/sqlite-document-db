@@ -86,7 +86,8 @@ User indexes (`createIndex`) are SQLite expression indexes named
 `ix_<table>_<mongoName>`; single-field indexes get a `ixd_` companion on
 `<field>.$date` so date-range queries (which target that sub-path) are served too.
 `indexes()` reconstructs the key spec by parsing the CREATE INDEX SQL out of
-`sqlite_master` — there is no separate metadata table. The plan-regression tests in
+`sqlite_master` — there is no metadata table for INDEXES (there is one for
+collection NAMES; see below). The plan-regression tests in
 [test/query-plan.spec.ts](test/query-plan.spec.ts) replay captured SQL and fail if
 `find()`'s statements ever stop using these indexes.
 
@@ -282,6 +283,34 @@ divergence: collections are created EAGERLY here (on `db.collection(name)`) and
 lazily on MongoDB (on first write), which is why the drop parity test recreates
 by inserting rather than by asking for indexes.
 
+### Transactions
+
+`db.withTransaction(work)` is a CALLBACK, not a session object: `node:sqlite` is
+synchronous, so nothing interleaves between statements and there is no
+concurrency for a session to coordinate. Nesting uses SAVEPOINT, because SQLite
+has no nested `BEGIN`.
+
+**Non-obvious detail — `ROLLBACK TO` does not pop the savepoint.** It rewinds
+but leaves the savepoint on the stack, so it must be `RELEASE`d too or the next
+release unwinds the wrong one.
+
+**Non-obvious detail — DDL is transactional, so a rollback can delete a table.**
+Opening a collection for the FIRST time inside a transaction runs its
+`CREATE TABLE`; if that transaction rolls back, the table goes with it and the
+cached `Collection` points at nothing ("no such table" on the next call).
+`withTransaction` therefore CLEARS the collection cache on rollback. The same
+hazard is why `drop()` and `dropDatabase()` evict the cache.
+
+### The collection-name registry
+
+`tableNameFor()` is deliberately not reversible for awkward names (the digest is
+what keeps `Users` and `users` apart), so `listCollections()` could not recover
+the caller's name from the table. `Collection`'s constructor records the mapping
+in `_sdb_collections`; that is the ONLY metadata table, and nothing reads
+document data through it. A database written before it existed still lists its
+simple names — `collection_<name>` does round-trip — and an awkward one
+reappears as soon as anything opens it.
+
 ### SQL injection posture
 
 User-supplied **values** are bound as named parameters (`bindValue()` →
@@ -411,6 +440,13 @@ Mongodb variant flaky for reasons that are nobody's bug.
   compiles, and an array `_id` made `deleteOne` delete two documents.
 - `insertMany` **mutates the input documents**, assigning `_id` in place. This
   matches the MongoDB driver, and several tests assert on the mutated objects.
+- **`bulkWrite` delegates to the single-document methods** rather than
+  reimplementing them, so it cannot drift from `updateOne` and friends. It is a
+  batching and result-accounting layer.
+- **`insertMany({ ordered: false })` cannot use one transaction**, and does not:
+  a failure has to leave the successful documents while skipping the failed
+  ones, and a single transaction has only one outcome for all of them. Ordered
+  (the default) is the batched, fast path.
 - **`insertMany` matches MongoDB's *ordered* insert: on a duplicate `_id` the
   documents already written stay written, and nothing after it is attempted.**
   That is a statement about the OUTCOME, not about transactions — and the

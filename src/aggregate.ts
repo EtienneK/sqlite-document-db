@@ -26,7 +26,8 @@ import { compileProjection, type ProjectionSpec } from './projection.js'
 
 /** The stages this library implements. Anything else is rejected by name. */
 const SUPPORTED_STAGES = [
-  '$match', '$sort', '$limit', '$skip', '$count', '$group', '$project', '$unwind', '$addFields', '$set'
+  '$match', '$sort', '$limit', '$skip', '$count', '$group', '$project', '$unwind', '$addFields',
+  '$set', '$lookup'
 ]
 
 /** Stages that can be pushed into SQL, in the order SQL applies them. */
@@ -354,6 +355,13 @@ type Stage = (input: AsyncIterable<Document>) => AsyncIterable<Document>
 export type BatchMatcher = (filter: Document, docs: Document[]) => Document[]
 
 /**
+ * Reads every document of another collection matching a filter - what
+ * `$lookup` joins against. Supplied by the caller (Collection.aggregate)
+ * because this module has no way to reach a sibling collection.
+ */
+export type ForeignReader = (collection: string, filter: Document) => Promise<Document[]>
+
+/**
  * Compiles the stages that did not get pushed into SQL.
  *
  * `$project`, `$addFields`, `$unwind`, `$skip` and `$limit` stream: they yield
@@ -361,7 +369,9 @@ export type BatchMatcher = (filter: Document, docs: Document[]) => Document[]
  * holds the whole result in memory. `$group`, `$sort`, `$count` and a
  * mid-pipeline `$match` are blocking and materialise, as they do on the server.
  */
-export function compileStages (stages: Document[], matchBatch: BatchMatcher, strict = false): Stage[] {
+export function compileStages (
+  stages: Document[], matchBatch: BatchMatcher, readForeign: ForeignReader, strict = false
+): Stage[] {
   return stages.map(stage => {
     const [name, value] = stageEntry(stage)
     switch (name) {
@@ -437,6 +447,8 @@ export function compileStages (stages: Document[], matchBatch: BatchMatcher, str
           yield * docs
         }
       }
+      case '$lookup':
+        return compileLookup(value, readForeign, strict)
       case '$unwind':
         return compileUnwind(value, strict)
       case '$group':
@@ -445,6 +457,99 @@ export function compileStages (stages: Document[], matchBatch: BatchMatcher, str
         return compileProject(name, value, strict)
     }
   })
+}
+
+/**
+ * `$lookup` - a left outer join against another collection.
+ *
+ * Only the `localField`/`foreignField` form is implemented; the `let` +
+ * `pipeline` form is a different feature and is rejected by name rather than
+ * silently ignored.
+ *
+ * **Batched, not per-document.** The obvious implementation runs one query per
+ * input document, which turns a 1000-document pipeline into 1000 statements.
+ * This collects every local key first, fetches the matching foreign documents
+ * in ONE `$in` query, and indexes them in memory - so the stage costs one query
+ * regardless of input size. That is why it materialises its input: it cannot
+ * build the key set without seeing all of it, exactly like `$group`.
+ *
+ * MongoDB's matching rule here is array-aware on BOTH sides: a local ARRAY
+ * matches a foreign document whose `foreignField` equals ANY of its elements,
+ * and a foreign array matches likewise. Keys are compared by the storage
+ * encoding, so a Date matches a Date rather than a look-alike string.
+ */
+function compileLookup (value: unknown, readForeign: ForeignReader, strict: boolean): Stage {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw Error('$lookup requires a document')
+  }
+  const { from, localField, foreignField, as: asField, ...rest } = value as Record<string, unknown>
+  const unknown = Object.keys(rest)[0]
+  if (unknown !== undefined) {
+    throw Error(unknown === 'pipeline' || unknown === 'let'
+      ? `the ${unknown} form of $lookup is not supported (use localField/foreignField)`
+      : `unrecognized option to $lookup: ${unknown}`)
+  }
+  for (const [name, option] of [['from', from], ['localField', localField], ['foreignField', foreignField], ['as', asField]]) {
+    if (typeof option !== 'string' || option === '') {
+      throw Error(`$lookup requires a non-empty string for '${String(name)}'`)
+    }
+  }
+
+  const local = localField as string
+  const foreign = foreignField as string
+  const target = asField as string
+
+  return async function * (input) {
+    const docs: Document[] = []
+    for await (const doc of input) docs.push(doc)
+    if (docs.length === 0) return
+
+    // One key per distinct local value, arrays flattened one level - which is
+    // what makes `{ skus: ['a','b'] }` join to both 'a' and 'b'.
+    const keys: unknown[] = []
+    const seen = new Set<string>()
+    for (const doc of docs) {
+      const localValue = pathValue(doc, local, strict)
+      for (const key of Array.isArray(localValue) ? localValue : [localValue]) {
+        const encoded = groupKey(key)
+        if (seen.has(encoded)) continue
+        seen.add(encoded)
+        keys.push(key)
+      }
+    }
+
+    // $in over the foreign field. It follows the implicit-array rule already,
+    // so a foreign document whose field is an ARRAY containing the key matches.
+    const matches = await readForeign(from as string, { [foreign]: { $in: keys } })
+
+    const byKey = new Map<string, Document[]>()
+    for (const match of matches) {
+      const foreignValue = pathValue(match, foreign)
+      for (const key of Array.isArray(foreignValue) ? foreignValue : [foreignValue]) {
+        const encoded = groupKey(key)
+        const bucket = byKey.get(encoded)
+        if (bucket === undefined) byKey.set(encoded, [match])
+        else bucket.push(match)
+      }
+    }
+
+    for (const doc of docs) {
+      const localValue = pathValue(doc, local, strict)
+      const joined: Document[] = []
+      const added = new Set<Document>()
+      for (const key of Array.isArray(localValue) ? localValue : [localValue]) {
+        for (const match of byKey.get(groupKey(key)) ?? []) {
+          // A local array whose elements hit the same foreign document must
+          // not include it twice.
+          if (added.has(match)) continue
+          added.add(match)
+          joined.push(match)
+        }
+      }
+      // Always an array, empty when nothing matched - $lookup is a LEFT join.
+      yield setPathImmutable(doc, target, joined)
+    }
+  }
 }
 
 function compileUnwind (value: unknown, strict: boolean): Stage {

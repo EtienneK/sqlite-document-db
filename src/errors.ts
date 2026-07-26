@@ -58,15 +58,25 @@ export function withPartialResult (
   error: unknown, insertedIds: Record<number, string>, insertedCount: number
 ): unknown {
   if (!(error instanceof Error)) return error
-  const result: PartialWriteResult = { insertedCount, insertedIds }
-  Object.defineProperties(error, {
-    // Both spellings, because the driver exposes `error.result.insertedCount`
-    // on a bulk write error while its plainer errors carry the count directly.
-    result: { value: result, enumerable: false, configurable: true },
-    insertedCount: { value: insertedCount, enumerable: false, configurable: true },
-    insertedIds: { value: insertedIds, enumerable: false, configurable: true }
-  })
+  // Both spellings, because the driver exposes `error.result.insertedCount` on
+  // a bulk write error while its plainer errors carry the count directly.
+  attach(error, 'result', { insertedCount, insertedIds } satisfies PartialWriteResult)
+  attach(error, 'insertedCount', insertedCount)
+  attach(error, 'insertedIds', insertedIds)
   return error
+}
+
+/**
+ * Attaches a report to an error without making it enumerable.
+ *
+ * `writable` is what matters and is easy to lose: `defineProperty` defaults it
+ * to FALSE, so a later `Object.assign(error, { result })` - which is how
+ * `bulkWrite` used to add its own report on top of `insertMany`'s - throws
+ * "Cannot assign to read only property" in strict mode and REPLACES the real
+ * error with a TypeError. Every writer goes through here so that cannot recur.
+ */
+export function attach (error: Error, key: string, value: unknown): void {
+  Object.defineProperty(error, key, { value, enumerable: false, configurable: true, writable: true })
 }
 
 interface SqliteError extends Error { errcode: number }

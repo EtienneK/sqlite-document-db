@@ -14,13 +14,14 @@ import { compareBson } from './bson-order.js'
 // Documents round-trip through the EJSON layer, not plain JSON: Dates are
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
-import { toMongoError, withPartialResult } from './errors.js'
+import { attach, toMongoError, withPartialResult } from './errors.js'
 import type { Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 import { quoteIdentifier, toJson1PathString, toSortSql, toSql, type CompileOptions, type SqlParams } from './query.js'
 import type {
-  AggregationCursor, AnyFilter, CreateIndexOptions, DbOptions, DeleteResult, Document,
+  AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions, BulkWriteResult,
+  CountOptions, CreateIndexOptions, DbOptions, DeleteResult, Document, InsertManyOptions,
   FindCursor, FindOneAndDeleteOptions, FindOneAndReplaceOptions, FindOneAndUpdateOptions,
   FindOptions, IndexDescription, IndexDirection, IndexSpecification, InsertManyResult,
   InsertOneResult, ReplaceOptions, SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
@@ -104,6 +105,73 @@ function assertValidCollectionName (name: string): void {
   if (name.length > 200) throw Error('collection name must be at most 200 characters')
 }
 
+/**
+ * Table holding the collection-name registry.
+ *
+ * `tableNameFor` is deliberately NOT reversible for awkward names: they map to
+ * `collectionx_<slug>_<digest>`, and the digest is what keeps `Users` and
+ * `users` apart on a SQLite that compares identifiers case-insensitively. That
+ * is the right trade for storage and the wrong one for `listCollections()`,
+ * which has to answer with the name the caller used - so the mapping is
+ * recorded here when a collection is opened.
+ *
+ * A database written by an older version has no rows here. Simple names are
+ * still listed, because `collection_<name>` IS reversible; an awkward one
+ * reappears the moment anything opens it. Nothing reads data through this
+ * table, so a missing row costs a listing entry and never a document.
+ */
+const REGISTRY_TABLE = '_sdb_collections'
+
+/** Prefixes `tableNameFor` can produce, and nothing else in the schema uses. */
+const COLLECTION_TABLE_PREFIXES = ['collection_', 'collectionx_']
+
+function ensureRegistry (db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS ${quoteIdentifier(REGISTRY_TABLE)} (tbl TEXT PRIMARY KEY, name TEXT NOT NULL)`)
+}
+
+/** Records that `table` holds the collection called `name`. */
+function registerCollection (db: DatabaseSync, table: string, name: string): void {
+  ensureRegistry(db)
+  db.prepare(`INSERT OR REPLACE INTO ${quoteIdentifier(REGISTRY_TABLE)} (tbl, name) VALUES (?, ?)`).run(table, name)
+}
+
+/** Forgets `table`, so a dropped collection stops being listed. */
+export function unregisterCollection (db: DatabaseSync, table: string): void {
+  ensureRegistry(db)
+  db.prepare(`DELETE FROM ${quoteIdentifier(REGISTRY_TABLE)} WHERE tbl = ?`).run(table)
+}
+
+/** Every physical table backing a collection. */
+export function collectionTables (db: DatabaseSync): string[] {
+  const rows = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
+  return rows.map(row => row.name)
+    .filter(name => COLLECTION_TABLE_PREFIXES.some(prefix => name.startsWith(prefix)))
+}
+
+/** The collection names in this database, in the order SQLite lists their tables. */
+export function collectionNames (db: DatabaseSync): string[] {
+  ensureRegistry(db)
+  const registered = new Map<string, string>()
+  for (const row of db.prepare(`SELECT tbl, name FROM ${quoteIdentifier(REGISTRY_TABLE)}`).all() as Array<{ tbl: string, name: string }>) {
+    registered.set(row.tbl, row.name)
+  }
+
+  const names: string[] = []
+  for (const table of collectionTables(db)) {
+    const known = registered.get(table)
+    if (known !== undefined) names.push(known)
+    // `collection_<name>` round-trips; `collectionx_` without a row does not,
+    // and is skipped rather than reported under its mangled physical name.
+    else if (table.startsWith('collection_')) names.push(table.slice('collection_'.length))
+  }
+  return names.toSorted()
+}
+
+/** Removes the registry itself - for dropDatabase, which leaves nothing behind. */
+export function dropRegistry (db: DatabaseSync): void {
+  db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(REGISTRY_TABLE)}`)
+}
+
 export class Collection<TSchema extends Document = Document> {
   /** The name this collection was opened with, as the MongoDB driver exposes it. */
   readonly collectionName: string
@@ -133,6 +201,7 @@ export class Collection<TSchema extends Document = Document> {
     // node:sqlite is synchronous, so a collection is fully usable the moment
     // its constructor returns - no init promise to await on every call.
     this.exec(`CREATE TABLE IF NOT EXISTS ${this.table} (data JSON)`)
+    registerCollection(db, this.name, name)
     this.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier(`ux_${this.name}_doc_id`)} ON ${this.table}(json_extract(data, '$._id'))`)
   }
 
@@ -360,7 +429,17 @@ export class Collection<TSchema extends Document = Document> {
     // Split (and therefore validate) eagerly, so a malformed pipeline throws
     // where it was written rather than on first iteration.
     const split = splitPipeline(pipeline)
-    const stages = compileStages(split.jsStages, (filter, docs) => this.matchBatch(filter, docs), this.dbOptions.strict)
+    const stages = compileStages(
+      split.jsStages,
+      (filter, docs) => this.matchBatch(filter, docs),
+      // $lookup's foreign collection, opened on THIS connection so the join
+      // sees uncommitted work inside a withTransaction. It bypasses Db's cache
+      // (a Collection has no reference to its Db) which costs one
+      // CREATE TABLE IF NOT EXISTS per lookup - idempotent, and it keeps the
+      // eager-creation behaviour `db.collection()` already has.
+      async (name, filter) => await new Collection(name, this.db, this.dbOptions).find(filter).toArray(),
+      this.dbOptions.strict
+    )
 
     const source = this.find(split.filter as Filter<TSchema>, {
       ...(split.sort === undefined ? {} : { sort: split.sort }),
@@ -643,14 +722,43 @@ export class Collection<TSchema extends Document = Document> {
    */
   async drop (): Promise<boolean> {
     this.exec(`DROP TABLE IF EXISTS ${this.table}`)
+    unregisterCollection(this.db, this.name)
     this.onDrop()
     return true
   }
 
-  async countDocuments (filter?: Filter<TSchema>): Promise<number> {
+  /**
+   * Counts matching documents. `skip` and `limit` apply to the MATCHED set
+   * before it is counted, as they do on the server - so `{ limit: 10 }` over
+   * 500 matches answers 10, not 500.
+   */
+  async countDocuments (filter?: Filter<TSchema>, options: CountOptions = {}): Promise<number> {
+    if (options.limit !== undefined) assertLimit(options.limit)
+    if (options.skip !== undefined) assertSkip(options.skip)
+
     const compiled = toSql('data', filter ?? {}, this.compileOptions)
-    const sql = `SELECT COUNT(*) AS count FROM ${this.table} WHERE (${compiled.sql})`
+    let sql = `SELECT COUNT(*) AS count FROM ${this.table} WHERE (${compiled.sql})`
+    if (options.limit !== undefined || options.skip !== undefined) {
+      // LIMIT/OFFSET cannot sit next to an aggregate, so the window is taken
+      // in a subquery and the rows THAT yields are what get counted.
+      const limit = options.limit == null || options.limit === 0 ? -1 : Math.trunc(Math.abs(options.limit))
+      const offset = options.skip == null ? '' : ` OFFSET ${Math.trunc(options.skip)}`
+      sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${this.table} WHERE (${compiled.sql}) LIMIT ${limit}${offset})`
+    }
     const result = this.prepare(sql).get(compiled.params) as { count: number }
+    return Number(result.count)
+  }
+
+  /**
+   * The number of documents in the collection, unfiltered.
+   *
+   * On a real server this reads collection metadata and can lag reality; here
+   * it is an exact `COUNT(*)`, which is both cheaper and more accurate. The
+   * method exists for API compatibility - `countDocuments()` says the same
+   * thing and is the one to reach for.
+   */
+  async estimatedDocumentCount (): Promise<number> {
+    const result = this.prepare(`SELECT COUNT(*) AS count FROM ${this.table}`).get() as { count: number }
     return Number(result.count)
   }
 
@@ -889,11 +997,15 @@ export class Collection<TSchema extends Document = Document> {
    * batch form is orders of magnitude faster on a file-backed database and
    * makes no difference to what a caller can observe.
    *
+   * With `{ ordered: false }` every document is attempted and the failures are
+   * reported together at the end, again matching the server.
+   *
    * The input documents are MUTATED, gaining their `_id` - the driver does the
    * same, and several specs assert on it.
    */
-  async insertMany (docs: TSchema[]): Promise<InsertManyResult> {
+  async insertMany (docs: TSchema[], options: InsertManyOptions = {}): Promise<InsertManyResult> {
     if (!Array.isArray(docs)) throw Error('insertMany expects an array of documents')
+    if (options.ordered === false) return await this.insertUnordered(docs)
     const stmt = this.prepare(`INSERT INTO ${this.table} VALUES(json(?))`)
     const insertedIds: Record<number, string> = {}
     let insertedCount = 0
@@ -959,5 +1071,158 @@ export class Collection<TSchema extends Document = Document> {
     keepWhatLanded()
 
     return { acknowledged: true, insertedIds, insertedCount }
+  }
+
+  /**
+   * `insertMany(docs, { ordered: false })`: attempt every document, then report.
+   *
+   * Unlike the ordered path this cannot stop at the first failure, so it cannot
+   * use one transaction for the whole batch either - a failure has to leave the
+   * SUCCESSFUL documents in place while the failed ones are skipped, and a
+   * single transaction has only one outcome for all of them. Each document
+   * therefore commits on its own, which is slower on a file-backed database;
+   * that is the price of the semantics, and ordered (the default) is the fast
+   * path.
+   */
+  private async insertUnordered (docs: TSchema[]): Promise<InsertManyResult> {
+    const stmt = this.prepare(`INSERT INTO ${this.table} VALUES(json(?))`)
+    const insertedIds: Record<number, string> = {}
+    let insertedCount = 0
+    let firstError: unknown
+
+    for (let index = 0; index < docs.length; index++) {
+      try {
+        const doc = docs[index]!
+        if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+          throw Error(`documents must be objects; but got: ${doc === null ? 'null' : typeof doc} at index ${index}`)
+        }
+        if (Array.isArray(doc._id)) throw Error(`the _id field cannot be an array (at index ${index})`)
+        const id = (doc._id == null) ? objectIdHexString() : doc._id;
+        (doc as unknown as WithId<TSchema>)._id = id
+        try {
+          stmt.run(stringifyDocument({ _id: id, ...doc }))
+        } catch (error) {
+          throw this.mapError(error)
+        }
+        insertedIds[index] = id
+        insertedCount++
+      } catch (error) {
+        firstError ??= error
+      }
+    }
+
+    if (firstError !== undefined) throw withPartialResult(firstError, insertedIds, insertedCount)
+    return { acknowledged: true, insertedIds, insertedCount }
+  }
+
+  /**
+   * Runs a batch of mixed writes.
+   *
+   * Each operation delegates to the single-document method that already
+   * implements it, so `bulkWrite` cannot drift from `updateOne` and friends -
+   * it is a batching and result-accounting layer, not a second implementation.
+   *
+   * Ordered (the default) stops at the first failed operation and reports what
+   * completed; `{ ordered: false }` attempts them all. Neither is atomic, which
+   * matches MongoDB - wrap the call in `db.withTransaction()` if you want
+   * all-or-nothing.
+   */
+  async bulkWrite (
+    operations: Array<AnyBulkWriteOperation<TSchema>>, options: BulkWriteOptions = {}
+  ): Promise<BulkWriteResult> {
+    if (!Array.isArray(operations)) throw Error('bulkWrite expects an array of operations')
+    if (operations.length === 0) throw Error('bulkWrite requires at least one operation')
+
+    const result: BulkWriteResult = {
+      acknowledged: true,
+      insertedCount: 0,
+      matchedCount: 0,
+      modifiedCount: 0,
+      deletedCount: 0,
+      upsertedCount: 0,
+      insertedIds: {},
+      upsertedIds: {}
+    }
+    let firstError: unknown
+
+    for (let index = 0; index < operations.length; index++) {
+      try {
+        await this.applyBulkOperation(operations[index]!, index, result)
+      } catch (error) {
+        firstError ??= error
+        if (options.ordered !== false) break
+      }
+    }
+
+    if (firstError !== undefined) {
+      // defineProperty via attach(), not Object.assign: insertMany already put
+      // a non-writable `result` on this error and assigning over it throws.
+      if (firstError instanceof Error) attach(firstError, 'result', result)
+      throw firstError
+    }
+    return result
+  }
+
+  /** One `bulkWrite` entry, accumulated into `result`. */
+  private async applyBulkOperation (
+    operation: AnyBulkWriteOperation<TSchema>, index: number, result: BulkWriteResult
+  ): Promise<void> {
+    if (operation === null || typeof operation !== 'object' || Array.isArray(operation)) {
+      throw Error(`bulkWrite operation at index ${index} must be a document`)
+    }
+    const entries = Object.entries(operation as Record<string, any>)
+    if (entries.length !== 1) {
+      throw Error(`bulkWrite operation at index ${index} must have exactly one key; but got ${entries.length}`)
+    }
+    const [name, spec] = entries[0]!
+    if (spec === null || typeof spec !== 'object') {
+      throw Error(`the '${name}' operation at index ${index} requires a document`)
+    }
+
+    switch (name) {
+      case 'insertOne': {
+        const inserted = await this.insertOne(spec.document as TSchema)
+        result.insertedIds[index] = inserted.insertedId
+        result.insertedCount++
+        return
+      }
+      case 'updateOne':
+      case 'updateMany': {
+        const options = spec.upsert === true ? { upsert: true } : {}
+        const updated = name === 'updateOne'
+          ? await this.updateOne(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema>, options)
+          : await this.updateMany(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema>, options)
+        this.accumulateUpdate(updated, index, result)
+        return
+      }
+      case 'replaceOne': {
+        const replaced = await this.replaceOne(
+          spec.filter as Filter<TSchema>, spec.replacement as WithoutId<TSchema>,
+          spec.upsert === true ? { upsert: true } : {}
+        )
+        this.accumulateUpdate(replaced, index, result)
+        return
+      }
+      case 'deleteOne':
+      case 'deleteMany': {
+        const deleted = name === 'deleteOne'
+          ? await this.deleteOne(spec.filter as Filter<TSchema>)
+          : await this.deleteMany(spec.filter as Filter<TSchema>)
+        result.deletedCount += deleted.deletedCount
+        return
+      }
+      default:
+        throw Error(
+          `unsupported bulkWrite operation: ${name} ` +
+          '(supported: insertOne, updateOne, updateMany, replaceOne, deleteOne, deleteMany)'
+        )
+    }
+  }
+
+  private accumulateUpdate (updated: UpdateResult, index: number, result: BulkWriteResult): void {
+    result.matchedCount += updated.matchedCount
+    result.modifiedCount += updated.modifiedCount
+    result.upsertedCount += updated.upsertedCount
+    if (updated.upsertedId !== null) result.upsertedIds[index] = updated.upsertedId
   }
 }

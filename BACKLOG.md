@@ -181,40 +181,33 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Transactions](#12-transactions) | M | **The last correctness gap.** Everything below is surface area; this is the one thing a caller cannot work around, and `bulkWrite()` should wait for it so an ordered batch can actually be atomic. `insertMany` already opens its own transaction, so the integration point exists. |
-| 2 | [`$lookup`](#16-aggregation-pipeline) | M | The most conspicuous hole in the pipeline and the one people ask for first. It is a join, which SQLite is good at. |
-| 3 | [Rest of item 15](#15-remaining-collection--db-api) | M | `bulkWrite()` (after item 1), `estimatedDocumentCount()`, `listCollections()`, `dropDatabase()`, `insertMany({ ordered: false })`, `countDocuments` with `limit`/`skip`. `bulkWrite` also closes the last tutorial gap in item 13. |
-| 4 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString` and friends. Only field paths, literals and `$literal` exist today, which is the pipeline's real ceiling once `$lookup` lands. |
-| 5 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 6 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 7 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. All rejected loudly today, so nobody is silently wrong. |
-| 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until it is exhausted, so this is a lifetime problem rather than a lookup one. |
-| 9 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow, so not the S it sits among. |
+| 1 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString` and friends. Only field paths, literals and `$literal` exist, and now that `$lookup` has landed this is the pipeline's ceiling. |
+| 2 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 3 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 4 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. All rejected loudly today, so nobody is silently wrong. |
+| 5 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Rejected by name today. Wants item 1 first, since its whole point is running an expression per input document. |
+| 6 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until it is exhausted, so this is a lifetime problem rather than a lookup one. |
+| 7 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 8 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 
-The S items cleared on 2026-07-25 — item 13's tutorial gaps, `distinct()`,
-`drop()`, `_id` types, the document depth limit — and three of those turned out
-to be **already complete and merely unstruck** ("Project Fields to Return",
-benchmarks in CI, the concurrency documentation). Re-read an item's blockers
-before estimating it; this list drifted in the direction of looking like more
-work than it was.
+**Transactions, `$lookup` and the rest of the API surface landed 2026-07-26**,
+which closes the last correctness gap: multi-document atomicity is now
+expressible. Three things came out of building them that are worth carrying
+forward:
 
-**Write-regression coverage DONE 2026-07-26**, and it arrived the way the best
-backlog items do: from a bug. The `insertMany` fsync-per-document defect (212x)
-was invisible to a benchmark suite that only measures `:memory:`. Two things
-came out of it, and the split is the point:
-
-- [test/write-batching.spec.ts](test/write-batching.spec.ts) is the actual
-  **guard**. It COUNTS the transactions `insertMany` opens (via `debug` logging,
-  the same `capture()` trick the query-plan tests use) rather than timing them —
-  exact, machine-independent, and it fails the moment the batching is removed.
-  Verified by mutation: reintroducing the defect fails 3 of its 6 tests.
-- The `writes, file-backed` group in [bench/db.bench.ts](bench/db.bench.ts) is
-  the **visibility**. It reports, it does not assert, because shared runners are
-  too noisy to fail a build on a timing.
-
-A benchmark alone would not have caught this (CI runs `npm run bench` with no
-thresholds); a test alone would not have shown the cost. **When a bug escapes,
-ask what would have caught it** — and notice whether that thing asserts.
+- **DDL is transactional in SQLite**, so a rollback can delete a table a
+  `Collection` is bound to. `withTransaction` clears the collection cache on
+  rollback for exactly this reason. Any future code that caches something
+  derived from the schema has the same hazard.
+- **`tableNameFor()` being irreversible finally cost something.** The digest
+  that keeps `Users` and `users` apart also means `listCollections()` cannot
+  recover the caller's name, so there is now a `_sdb_collections` registry. It
+  is the only metadata table, and the one place a schema addition was
+  unavoidable.
+- **`bulkWrite` delegates to the single-document methods.** It is a batching and
+  accounting layer, never a second implementation - the same reason a
+  mid-pipeline `$match` goes back through SQLite rather than through a
+  JavaScript matcher.
 
 **Not planned, and worth saying so:** multi-document atomicity beyond a single
 connection, change streams, replication, sharding, `$where`, server-side
@@ -241,11 +234,11 @@ priority table above.
 | 9 | ~~[Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation)~~ | M | **DONE 2026-07-22** — named params for all values; statement caching still open |
 | 10 | ~~[Error normalisation](#10-normalise-errors-to-mongodb-shapes)~~ | S | **DONE 2026-07-25** — `MongoServerError` with `code: 11000`, dual-engine verified |
 | 11 | ~~[Collection naming](#11-fix-collection-naming-restrictions)~~ | S | **DONE 2026-07-25** — case-sensitive, quoted identifiers |
-| 12 | [Transactions](#12-transactions) | M | Pragmas **DONE 2026-07-25**; the `withTransaction` API is still open |
-| 13 | ~~[Tutorial coverage](#13-close-the-tutorial-coverage-gaps)~~ | S | **DONE 2026-07-25** except Bulk Write, which needs `bulkWrite()` (item 15) |
+| 12 | ~~[Transactions](#12-transactions)~~ | M | **DONE 2026-07-26** — `db.withTransaction()`, SAVEPOINT nesting, pragmas |
+| 13 | ~~[Tutorial coverage](#13-close-the-tutorial-coverage-gaps)~~ | S | **DONE** — the last gap (Bulk Write) closed 2026-07-26 with `bulkWrite()` |
 | 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix, plus a Deno job |
-| 15 | [Remaining API surface](#15-remaining-collection--db-api) | M | **`distinct()` and `drop()` DONE 2026-07-25**; `bulkWrite()` and friends still open |
-| 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common-shapes subset DONE 2026-07-25** — `$lookup` and the expression operators still open |
+| 15 | ~~[Remaining API surface](#15-remaining-collection--db-api)~~ | M | **DONE 2026-07-26** — `distinct`, `drop`, `bulkWrite`, `estimatedDocumentCount`, `listCollections`, `dropDatabase`, unordered `insertMany`, count windows |
+| 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common shapes + `$lookup` DONE 2026-07-26** — expression operators and the exotic stages still open |
 | 17 | [Smaller items](#17-smaller-items-and-nice-to-haves) | S each | Benchmarks, `_id` types, depth limits, concurrency docs **DONE**; statement cache and TypeDoc open |
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
 

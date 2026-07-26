@@ -82,6 +82,53 @@ export interface FindOptions {
   projection?: ProjectionSpec
 }
 
+export interface CountOptions {
+  /** Stop counting after this many matches. */
+  limit?: number
+  /** Skip this many matches before counting. */
+  skip?: number
+}
+
+export interface InsertManyOptions {
+  /**
+   * Ordered (the default) inserts serially and stops at the first failure.
+   * Unordered attempts every document and reports the failures together.
+   */
+  ordered?: boolean
+}
+
+/** One entry of a `bulkWrite` batch. Exactly one key, as MongoDB requires. */
+export type AnyBulkWriteOperation<TSchema extends Document = Document> =
+  | { insertOne: { document: TSchema } }
+  | { updateOne: { filter: Document, update: Document, upsert?: boolean } }
+  | { updateMany: { filter: Document, update: Document, upsert?: boolean } }
+  | { replaceOne: { filter: Document, replacement: Document, upsert?: boolean } }
+  | { deleteOne: { filter: Document } }
+  | { deleteMany: { filter: Document } }
+
+export interface BulkWriteOptions {
+  /** Ordered (the default) stops at the first failed operation. */
+  ordered?: boolean
+}
+
+export interface BulkWriteResult {
+  acknowledged: boolean
+  insertedCount: number
+  matchedCount: number
+  modifiedCount: number
+  deletedCount: number
+  upsertedCount: number
+  /** `{ <index in the operation list>: <_id> }`, as the driver reports them. */
+  insertedIds: Record<number, string>
+  upsertedIds: Record<number, string>
+}
+
+/** One collection, as `db.listCollections()` describes it. */
+export interface CollectionInfo {
+  name: string
+  type: 'collection'
+}
+
 export interface UpdateOptions {
   /** Insert a document built from the filter and the update when nothing matches. */
   upsert?: boolean

@@ -41,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path, rather than letting SQLite report a bare "malformed JSON". The cap sits
   above MongoDB's own (~180) and below the JavaScript call stack the encoder
   needs, which is what makes it reachable on every supported platform.
+- **`db.withTransaction(work)`** — commits when the callback returns, rolls back
+  when it throws, nests via SAVEPOINT. A callback rather than MongoDB's session
+  object, because `node:sqlite` is synchronous and there is no concurrency for a
+  session to coordinate.
+- **`$lookup`** (the `localField`/`foreignField` form) — a left outer join that
+  is array-aware on both sides and fetches the foreign side in ONE query
+  regardless of input size.
+- **`bulkWrite()`**, ordered and unordered, over `insertOne`/`updateOne`/
+  `updateMany`/`replaceOne`/`deleteOne`/`deleteMany`, with the driver's result
+  shape. **`insertMany({ ordered: false })`** too.
+- **`estimatedDocumentCount()`**, `countDocuments()` with `limit`/`skip`,
+  **`db.listCollections()`** and **`db.dropDatabase()`**.
 - Types for all of the above: the array operators are restricted to array paths
   and their element type, `$mul` to numeric paths, and `aggregate<TResult>()`
   threads the result shape through.

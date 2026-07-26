@@ -47,8 +47,8 @@ test fixtures, small services. Anywhere "just use SQLite" is right but modelling
 documents as columns is not.
 
 **A poor fit for** lifting an existing MongoDB application over unchanged. This
-is a subset — no `$lookup`, no transactions, no change streams, no sharding, and
-an aggregation pipeline that covers the common shapes rather than all of them.
+is a subset — no change streams, no sharding, no replica sets, and an
+aggregation pipeline that covers the common shapes rather than all of them.
 [Missing Features](#missing-features) is the exact list.
 
 **Using it as a MongoDB test double** works, and is a deliberate use case — it
@@ -199,12 +199,44 @@ finalises it. The MongoDB driver has already buffered a batch client-side and
 keeps draining it, so `next()` there can still return a document. If you close
 a cursor early, do not rely on either behaviour.
 
+### Transactions
+
+```javascript
+await db.withTransaction(async () => {
+  await accounts.updateOne({ _id: 'a' }, { $inc: { balance: -100 } })
+  await accounts.updateOne({ _id: 'b' }, { $inc: { balance: 100 } })
+})
+```
+
+Commits when the callback returns, rolls back if it throws, and returns
+whatever the callback returns. It is the read-modify-write a single statement
+cannot express — check a balance, then spend it, with nothing able to slip in
+between.
+
+**Not MongoDB's session API, deliberately.** `node:sqlite` is synchronous, so
+nothing can interleave between two statements and there is no concurrency for a
+session object to coordinate; a callback is the honest shape. Nesting works via
+SAVEPOINT — an inner rollback discards only its own work, an outer one discards
+everything.
+
+Two things to know: an ordered `insertMany` that fails part-way normally *keeps*
+what it wrote, but inside a transaction that rolls back it does not (which is
+what you asked for by opening one); and do not iterate a cursor across a
+rollback — materialise with `toArray()` first.
+
 ### Distinct values, and dropping a collection
 
 ```javascript
 await db.collection('items').distinct('status')                  // ['A', 'D', 'P']
 await db.collection('items').distinct('status', { qty: { $gt: 50 } })
 await db.collection('items').drop()
+```
+
+```javascript
+await db.collection('items').estimatedDocumentCount()             // 5
+await db.collection('items').countDocuments({ status: 'A' }, { skip: 1, limit: 2 })
+await db.listCollections().toArray()   // [{ name: 'items', type: 'collection' }]
+await db.dropDatabase()
 ```
 
 `distinct` follows the same implicit-array rule queries do: an **array field
@@ -324,10 +356,30 @@ await db.collection('orders').updateOne({ _id: id }, { $pull: { items: { qty: { 
 adds it once. Pushing onto a field that exists and is not an array is an error,
 as it is on the server; onto a missing field it creates the array.
 
+### Bulk writes
+
+```javascript
+const result = await db.collection('items').bulkWrite([
+  { insertOne: { document: { item: 'new' } } },
+  { updateOne: { filter: { item: 'old' }, update: { $set: { status: 'D' } }, upsert: true } },
+  { updateMany: { filter: { status: 'A' }, update: { $inc: { qty: 1 } } } },
+  { replaceOne: { filter: { item: 'stale' }, replacement: { item: 'fresh' } } },
+  { deleteOne: { filter: { qty: 0 } } },
+  { deleteMany: { filter: { status: 'X' } } }
+])
+// { insertedCount, matchedCount, modifiedCount, deletedCount, upsertedCount,
+//   insertedIds, upsertedIds }
+```
+
+Ordered by default (stops at the first failure); `{ ordered: false }` attempts
+them all. Neither is atomic — that matches MongoDB, and
+`db.withTransaction()` is how you get all-or-nothing. `insertMany` takes
+`{ ordered: false }` too.
+
 ### Aggregate
 
 A narrow pipeline: `$match`, `$sort`, `$limit`, `$skip`, `$count`, `$group`,
-`$project`, `$addFields`/`$set` and `$unwind`.
+`$project`, `$addFields`/`$set`, `$unwind` and `$lookup`.
 
 ```javascript
 const revenue = await db.collection('orders').aggregate([
@@ -338,6 +390,20 @@ const revenue = await db.collection('orders').aggregate([
   { $limit: 10 }
 ]).toArray()
 ```
+
+`$lookup` joins another collection:
+
+```javascript
+await db.collection('orders').aggregate([
+  { $lookup: { from: 'inventory', localField: 'item', foreignField: 'sku', as: 'stock' } }
+]).toArray()
+```
+
+It is a left outer join — `stock` is always an array, empty when nothing
+matches — and it is array-aware on both sides, so a local `['a','b']` joins to
+documents keyed `a` and `b` alike. One query fetches all of them, regardless of
+how many input documents there are. Only the `localField`/`foreignField` form
+is implemented; the `let`+`pipeline` form is rejected by name.
 
 Accumulators: `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`, `$push`,
 `$addToSet`, `$count`. Expressions are field paths (`'$item'`), literals and
@@ -517,15 +583,18 @@ Update operators: `$set` `$unset` `$inc` `$mul` `$min` `$max` `$rename`
 `$each`) `$pop` `$pull` `$pullAll`, plus the `upsert` option on
 `updateOne`/`updateMany`/`replaceOne`.
 
-Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
-`$project` `$addFields`/`$set` `$unwind`. Accumulators: `$sum` `$avg` `$min`
-`$max` `$first` `$last` `$push` `$addToSet` `$count`.
+Accumulators: `$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
+`$count`.
 
-Methods: `find()` `findOne()` `countDocuments()` `distinct()` `aggregate()`
-`insertOne()` `insertMany()` `updateOne()` `updateMany()` `deleteOne()`
-`deleteMany()` `replaceOne()` `findOneAndUpdate()` `findOneAndReplace()`
-`findOneAndDelete()` `createIndex()` `dropIndex()` `indexes()` `listIndexes()`
-`drop()`.
+Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
+`$project` `$addFields`/`$set` `$unwind` `$lookup`.
+
+Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
+`distinct()` `aggregate()` `insertOne()` `insertMany()` `updateOne()`
+`updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
+`findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()` `createIndex()`
+`dropIndex()` `indexes()` `listIndexes()` `drop()`; on `Db`,
+`withTransaction()` `listCollections()` `dropDatabase()`.
 
 Result objects match the official driver's shapes (`acknowledged`,
 `matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes
@@ -616,13 +685,12 @@ how each piece would be implemented. The headlines:
 
 **Collection / Db API**
 
-- `estimatedDocumentCount()`, `db.listCollections()`, `db.dropDatabase()`,
-  `insertMany({ ordered: false })`, `countDocuments()` with `limit`/`skip`
+- `renameCollection()`, index options beyond `unique`/`name`, `watch()`
 
 **Aggregation** — the pipeline is a common-shapes subset, not the whole thing:
 
-- Stages: `$lookup`, `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`,
-  `$sample`, `$graphLookup`
+- Stages: `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`,
+  `$graphLookup`; and `$lookup`'s `let`+`pipeline` form
 - Expression operators: the arithmetic, string, date, array and conditional
   families (`$add`, `$concat`, `$cond`, `$dateToString`, `$size`, …). Only field
   paths, literals and `$literal` are supported
@@ -630,9 +698,10 @@ how each piece would be implemented. The headlines:
 
 **Not planned**
 
-- Transactions and multi-document atomicity, change streams, replication,
-  sharding, `$where`, server-side JavaScript, GridFS, the wire protocol.
-  A process that needs those needs a server.
+- Change streams, replication, sharding, `$where`, server-side JavaScript,
+  GridFS, the wire protocol. A process that needs those needs a server.
+  (Multi-document atomicity within one connection *is* supported — see
+  [Transactions](#transactions).)
 
 ## Thanks
 
