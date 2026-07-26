@@ -11,7 +11,7 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Full suite (vitest), ~4s. Boots one real MongoDB for the run. |
+| `npm test` | Full suite (vitest), ~2s. Boots two real MongoDBs for the run (see below). |
 | `npm run test:watch` | Watch mode |
 | `npm run lint` | oxlint |
 | `npm run typecheck` | `tsc` over `src` **and** `test` |
@@ -56,6 +56,9 @@ belongs in types.ts.**
   needed the class and importing it from the entry point would have made the
   graph circular.
 - [src/mongo-client.ts](src/mongo-client.ts) — the `MongoClient`-shaped shim
+  (see below).
+- [src/client-session.ts](src/client-session.ts) — `ClientSession`:
+  `startSession()`, `withTransaction`, and the rules for `{ session }`
   (see below).
 - [src/collection.ts](src/collection.ts) — `Collection`: CRUD, queries, indexes,
   `aggregate()`. Where compiled SQL gets run.
@@ -387,7 +390,8 @@ Dates are UTC-only and a `timezone` option is REJECTED rather than ignored.
 
 `Db.fromUrl(url, { strict: true })` rejects constructs whose answer is KNOWN to
 differ from MongoDB's (over-deep dotted array paths, `$type` on an unstorable
-type, sorting an array-valued field, an aggregation path through an array).
+type, sorting an array-valued field, an aggregation path through an array, an
+operation inside a session transaction that was not given `{ session }`).
 [test/strict.spec.ts](test/strict.spec.ts) is single-engine on purpose — every
 case is one where a real server disagrees, so there is nothing to check against.
 Each test asserts BOTH halves: the lenient default still behaves as documented,
@@ -422,7 +426,9 @@ by inserting rather than by asking for indexes.
 `db.withTransaction(work)` is a CALLBACK, not a session object: `node:sqlite` is
 synchronous, so nothing interleaves between statements and there is no
 concurrency for a session to coordinate. Nesting uses SAVEPOINT, because SQLite
-has no nested `BEGIN`.
+has no nested `BEGIN`. (A session object exists too, for ported MongoDB code —
+see Sessions below. It runs on these same primitives, and does NOT nest, because
+a server's does not.)
 
 **Non-obvious detail — `ROLLBACK TO` does not pop the savepoint.** It rewinds
 but leaves the savepoint on the stack, so it must be `RELEASE`d too or the next
@@ -434,6 +440,65 @@ Opening a collection for the FIRST time inside a transaction runs its
 cached `Collection` points at nothing ("no such table" on the next call).
 `withTransaction` therefore CLEARS the collection cache on rollback. The same
 hazard is why `drop()` and `dropDatabase()` evict the cache.
+
+**Non-obvious detail — a failed COMMIT must leave the frame open.**
+`withTransaction` is `enterTransaction` + `commitFrame`/`rollbackFrame`, split
+so `ClientSession` can use the halves separately. `commitFrame` deliberately
+does NOT close the frame in a `finally`: if the COMMIT throws, the catch arm's
+`rollbackFrame` still has something to roll back, and `closed` is what keeps the
+depth from being given up twice.
+
+### Sessions (src/client-session.ts)
+
+`client.startSession()` exists for ONE shape — `session.withTransaction(work)`
+with `{ session }` on every operation — because that is how MongoDB transaction
+code is written and rewriting it is what the shim exists to avoid.
+
+**A session is a ROUTING token on MongoDB and only a CHECKED one here.** `BEGIN`
+belongs to the connection, so an operation cannot be steered into or out of a
+transaction; what a session can do is refuse the operations whose answer would
+differ. `ClientSession.enlist(session, host)` is that check, called once by
+every public `Collection`/`Db` method — including with NO session, which is the
+case `strict` cares about.
+
+**Non-obvious detail — the transaction opens LAZILY, on the first operation that
+names the session.** That is not an optimisation: it is what makes the
+divergence exactly the detectable set. A write BEFORE that point genuinely is
+outside the transaction on both engines (a server also starts one with its first
+operation), so nothing is wrong to report; a write after it takes part where
+MongoDB would not, and `host.activeSession` being set is precisely the signal
+`strict` raises on. Eager BEGIN would also have nowhere to run — a session
+belongs to a client, and a client can have several databases, each its own
+connection.
+
+**Non-obvious detail — `SessionHost` is how the session reaches the database.**
+`Db` builds one and hands it to every `Collection` (like `onDrop`); it carries
+`begin`/`commit`/`rollback`, `strict`, `activeSession`, and the `Db` itself as
+an identity token for "a session may only be used on a database its own client
+opened". `Collection` has no `Db` reference and `Db`'s transaction primitives
+are private, so this is the seam — and it keeps `withTransaction` the only
+public transaction shape.
+
+**Non-obvious detail — `enlist` is a STATIC method.** It reads another
+instance's `#`-private state, which a free function in the same module cannot
+do (TypeScript's `private`/`#` is class-scoped, not module-scoped). The
+alternative — public binding methods — would put the mechanism on the session's
+own surface where a caller could drive it.
+
+**Non-obvious detail — every delegating method forwards the session.**
+`insertOne` → `insertMany`, `bulkWrite` → the single-document methods,
+`updateMany` → `countDocuments`, `aggregate` → `find` and `$lookup`'s
+collection. A delegated call that dropped it would look exactly like an
+operation the caller forgot to enrol, and `strict` would refuse the library's
+own internals. `Collection.enlist(options)` returns the narrowed `{ session }`
+for that purpose.
+
+**Non-obvious detail — there is deliberately no `session.transaction`.** The
+driver has one at runtime but EXCLUDES it from its published types, so code
+written against it here would stop compiling on a swap back to `mongodb` — the
+exact drift the shim exists to prevent. `test/client-session.spec.ts` holding
+both at one interface is what caught it. `inTransaction()` is the public
+spelling.
 
 ### The MongoClient shim
 
@@ -457,11 +522,17 @@ unimplemented OPERATOR is a different thing and still throws.
 
 **A file-backed client has ONE database.** A second `db(name)` on a file is an
 error, not a second view of the same collections — that silent merge is exactly
-what `tableNameFor` prevents one level down.
+what `tableNameFor` prevents one level down. It is also why a session's
+transaction covers one database: each `db(name)` owns a connection.
 
-[test/mongo-client.spec.ts](test/mongo-client.spec.ts) runs the same test bodies
-through the shim AND the real driver, holding both at one structural interface
-with no cast — so a drift in shape fails to compile rather than to run.
+`startSession()`/`withSession()` are real (see Sessions above); `watch()` is the
+only method left that throws, and it is a decision rather than a gap.
+
+[test/mongo-client.spec.ts](test/mongo-client.spec.ts) and
+[test/client-session.spec.ts](test/client-session.spec.ts) run the same test
+bodies through the shim AND the real driver, holding both at one structural
+interface with no cast — so a drift in shape fails to compile rather than to
+run.
 
 ### The raw SQL escape hatch
 
@@ -590,8 +661,15 @@ which immediately tells you the *test* is wrong rather than the implementation.
 Originally every spec spawned its own `mongod` in `beforeEach`, which cost ~60s
 a run. Now:
 
-- [test/global-setup.ts](test/global-setup.ts) boots **one** mongod for the whole
-  run and hands its URI to the specs via Vitest's `provide`/`inject`.
+- [test/global-setup.ts](test/global-setup.ts) boots the servers for the whole
+  run and hands their URIs to the specs via Vitest's `provide`/`inject`. There
+  are **two**: `mongoUri`, a standalone mongod that nearly every spec uses, and
+  `mongoReplicaSetUri`, a one-node replica set that only
+  [test/client-session.spec.ts](test/client-session.spec.ts) uses. MongoDB
+  refuses transactions on a standalone, so without the replica set the session
+  work would have had no oracle — but every write to one is slower, and pointing
+  the whole suite at it took the run from 1.6s to 8.3s (measured). Two servers
+  booting in parallel costs ~110ms and keeps both properties.
 - [test/helpers/dual-dbs.ts](test/helpers/dual-dbs.ts) gives each spec file its
   own randomly-named database on that shared server, so files stay isolated and
   can run in parallel. Two entry points:

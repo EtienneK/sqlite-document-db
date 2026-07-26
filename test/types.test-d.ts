@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, it } from 'vitest'
 
-import type { Collection, Db, Document, Filter, UpdateFilter, WithId } from '../src/index.js'
+import type { ClientSession, Collection, Db, Document, Filter, UpdateFilter, WithId } from '../src/index.js'
 
 /**
  * Type-level tests for BACKLOG item 5b.
@@ -32,6 +32,7 @@ interface Item {
 
 declare const db: Db
 declare const col: Collection<Item>
+declare const session: ClientSession
 
 describe('Filter<TSchema>', () => {
   it('types an operator against the field it applies to', async () => {
@@ -215,5 +216,45 @@ describe('result types', () => {
     expectTypeOf(await col.findOne({ item: 'x' })).toEqualTypeOf<WithId<Item> | null>()
     expectTypeOf(await col.find().toArray()).toEqualTypeOf<Array<WithId<Item>>>()
     expectTypeOf(await col.findOneAndDelete({ item: 'x' })).toEqualTypeOf<WithId<Item> | null>()
+  })
+})
+
+describe('{ session }', () => {
+  it('is accepted by every operation, alongside that method\'s own options', async () => {
+    await col.find({ qty: 1 }, { session, limit: 2 }).toArray()
+    await col.findOne({ qty: 1 }, { session })
+    await col.countDocuments({}, { session, skip: 1 })
+    await col.estimatedDocumentCount({ session })
+    await col.distinct('item', {}, { session })
+    await col.aggregate([{ $match: { qty: 1 } }], { session }).toArray()
+    await col.insertOne({ item: 'x' } as Item, { session })
+    await col.insertMany([{ item: 'x' } as Item], { session, ordered: false })
+    await col.updateOne({ qty: 1 }, { $set: { item: 'x' } }, { session, upsert: true })
+    await col.updateMany({ qty: 1 }, { $set: { item: 'x' } }, { session })
+    await col.replaceOne({ qty: 1 }, { item: 'x' } as Item, { session })
+    await col.deleteOne({ qty: 1 }, { session })
+    await col.deleteMany({ qty: 1 }, { session })
+    await col.findOneAndUpdate({ qty: 1 }, { $set: { item: 'x' } }, { session, returnDocument: 'after' })
+    await col.findOneAndReplace({ qty: 1 }, { item: 'x' } as Item, { session })
+    await col.findOneAndDelete({ qty: 1 }, { session })
+    await col.bulkWrite([{ deleteOne: { filter: { qty: 1 } } }], { session })
+    await col.createIndex({ qty: 1 }, { session, unique: true })
+    await col.dropIndex('qty_1', { session })
+    await col.indexes({ session })
+    await col.drop({ session })
+    await db.createCollection('c', { session })
+    await db.dropDatabase({ session })
+  })
+
+  it('rejects anything that is not a session', async () => {
+    // @ts-expect-error - a session comes from client.startSession(), and a
+    // stand-in for one would fail at runtime rather than route anything.
+    await col.findOne({ qty: 1 }, { session: 'my-session' })
+  })
+
+  it('returns the callback value from withTransaction', async () => {
+    expectTypeOf(await session.withTransaction(async () => 42)).toEqualTypeOf<number>()
+    expectTypeOf(session.inTransaction()).toEqualTypeOf<boolean>()
+    expectTypeOf(session.hasEnded).toEqualTypeOf<boolean>()
   })
 })

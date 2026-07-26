@@ -58,14 +58,78 @@ export interface UpdateResult {
   upsertedId: string | null
 }
 
+/**
+ * What an operation needs to know about the session it was handed.
+ *
+ * The class that implements it is `ClientSession` in src/client-session.ts,
+ * which this file cannot name: types.ts is the shared type surface and takes no
+ * dependencies (see the header). Nothing outside client-session.ts acts on a
+ * session anyway - `ClientSession.enlist` is the one place that does, and it
+ * narrows to the class first.
+ */
+export interface SessionLike {
+  /** True once `endSession()` has been called. Using it after that is an error. */
+  readonly hasEnded: boolean
+  /** True between `startTransaction()` and its commit or abort. */
+  inTransaction: () => boolean
+}
+
+/**
+ * The `{ session }` every operation accepts, as the MongoDB driver does.
+ *
+ * A session here is a token that says which transaction an operation belongs
+ * to, and it is CHECKED rather than routed: SQLite's transaction is a property
+ * of the connection, so an operation cannot be steered into or out of one. See
+ * the note on `ClientSession` for what that means, and for the one case
+ * `strict` turns into an error.
+ */
+export interface SessionOption {
+  session?: SessionLike
+}
+
+/** A transaction frame opened on a database: BEGIN, or a named SAVEPOINT. */
+export interface TransactionFrame {
+  readonly savepoint: string | null
+  /** Set once the frame's SQL has been ended, so it is never ended twice. */
+  closed: boolean
+}
+
+/**
+ * What a `ClientSession` needs from the database an operation is running on.
+ *
+ * `Db` builds exactly one of these and hands it to every `Collection` it opens
+ * - the same way it hands over `onDrop`. It exists so that a session can open
+ * and end a transaction without `Collection` holding a `Db` (it does not) and
+ * without `Db`'s transaction primitives becoming public API (`withTransaction`
+ * is deliberately the only shape on offer).
+ */
+export interface SessionHost {
+  /**
+   * The `Db` itself, as an identity token. A session may only be used on a
+   * database its own client opened, which is the check this answers.
+   */
+  readonly database: object
+  /** Whether this database was opened with `strict: true`. */
+  readonly strict: boolean
+  /** The session whose transaction is open on this database, if any. */
+  activeSession: SessionLike | null
+  begin: () => TransactionFrame
+  commit: (frame: TransactionFrame) => void
+  rollback: (frame: TransactionFrame) => void
+}
+
 export type IndexDirection = 1 | -1
 
 export type IndexSpecification = string | Record<string, IndexDirection>
 
-export interface CreateIndexOptions {
+export interface CreateIndexOptions extends SessionOption {
   unique?: boolean
   name?: string
 }
+
+export interface DropIndexOptions extends SessionOption {}
+
+export interface ListIndexesOptions extends SessionOption {}
 
 export interface IndexDescription {
   name: string
@@ -75,21 +139,39 @@ export interface IndexDescription {
 
 export type SortSpecification = string | Record<string, 1 | -1>
 
-export interface FindOptions {
+export interface FindOptions extends SessionOption {
   sort?: SortSpecification
   limit?: number
   skip?: number
   projection?: ProjectionSpec
 }
 
-export interface CountOptions {
+export interface CountOptions extends SessionOption {
   /** Stop counting after this many matches. */
   limit?: number
   /** Skip this many matches before counting. */
   skip?: number
 }
 
-export interface InsertManyOptions {
+export interface EstimatedDocumentCountOptions extends SessionOption {}
+
+export interface DistinctOptions extends SessionOption {}
+
+export interface AggregateOptions extends SessionOption {}
+
+export interface DropCollectionOptions extends SessionOption {}
+
+export interface InsertOneOptions extends SessionOption {}
+
+export interface DeleteOptions extends SessionOption {}
+
+export interface CreateCollectionOptions extends SessionOption {}
+
+export interface DropDatabaseOptions extends SessionOption {}
+
+export interface ListCollectionsOptions extends SessionOption {}
+
+export interface InsertManyOptions extends SessionOption {
   /**
    * Ordered (the default) inserts serially and stops at the first failure.
    * Unordered attempts every document and reports the failures together.
@@ -106,7 +188,7 @@ export type AnyBulkWriteOperation<TSchema extends Document = Document> =
   | { deleteOne: { filter: Document } }
   | { deleteMany: { filter: Document } }
 
-export interface BulkWriteOptions {
+export interface BulkWriteOptions extends SessionOption {
   /** Ordered (the default) stops at the first failed operation. */
   ordered?: boolean
 }
@@ -129,7 +211,7 @@ export interface CollectionInfo {
   type: 'collection'
 }
 
-export interface UpdateOptions {
+export interface UpdateOptions extends SessionOption {
   /** Insert a document built from the filter and the update when nothing matches. */
   upsert?: boolean
   /**
@@ -139,12 +221,12 @@ export interface UpdateOptions {
   arrayFilters?: Document[]
 }
 
-export interface ReplaceOptions {
+export interface ReplaceOptions extends SessionOption {
   /** Insert the replacement (plus any `_id` the filter pins) when nothing matches. */
   upsert?: boolean
 }
 
-export interface FindOneAndUpdateOptions {
+export interface FindOneAndUpdateOptions extends SessionOption {
   /** Which version to return. Defaults to 'before', as the driver does. */
   returnDocument?: 'before' | 'after'
   upsert?: boolean
@@ -156,7 +238,7 @@ export interface FindOneAndUpdateOptions {
 
 export interface FindOneAndReplaceOptions extends FindOneAndUpdateOptions {}
 
-export interface FindOneAndDeleteOptions {
+export interface FindOneAndDeleteOptions extends SessionOption {
   sort?: SortSpecification
   projection?: ProjectionSpec
 }

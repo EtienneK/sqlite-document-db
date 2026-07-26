@@ -23,6 +23,9 @@ export type { RawSql } from './raw-sql.js'
 // promise.
 export { MongoClient } from './mongo-client.js'
 export type { MongoClientOptions } from './mongo-client.js'
+// `client.startSession()`, and the `{ session }` every operation accepts.
+export { ClientSession } from './client-session.js'
+export type { ClientSessionOptions, TransactionOptions } from './client-session.js'
 export type { Driver, DriverParams, DriverRow, DriverStatement } from './driver.js'
 export { DUPLICATE_KEY_ERROR, MongoServerError } from './errors.js'
 export type { PartialWriteResult } from './errors.js'
@@ -32,11 +35,14 @@ export type {
   InferIdType, Paths, PathValue, PositionalPaths, PullOperand, PushOperand, UpdateFilter
 } from './filter-types.js'
 export type {
-  AggregationCursor, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult, CollectionInfo,
-  CountOptions, CreateIndexOptions, DbOptions, DeleteResult, Document, FindCursor,
+  AggregateOptions, AggregationCursor, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult,
+  CollectionInfo, CountOptions, CreateCollectionOptions, CreateIndexOptions, DbOptions,
+  DeleteOptions, DeleteResult, DistinctOptions, Document, DropCollectionOptions,
+  DropDatabaseOptions, DropIndexOptions, EstimatedDocumentCountOptions, FindCursor,
   FindOneAndDeleteOptions, FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions,
   IndexDescription, IndexDirection, IndexSpecification, InsertManyOptions, InsertManyResult,
-  InsertOneResult, PipelineExplanation, ReplaceOptions, SortSpecification, UpdateOptions,
+  InsertOneOptions, InsertOneResult, ListCollectionsOptions, ListIndexesOptions,
+  PipelineExplanation, ReplaceOptions, SessionOption, SortSpecification, UpdateOptions,
   UpdateResult, WithId, WithoutId
 } from './types.js'
 

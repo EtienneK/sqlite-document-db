@@ -224,16 +224,32 @@ whatever the callback returns. It is the read-modify-write a single statement
 cannot express — check a balance, then spend it, with nothing able to slip in
 between.
 
-**Not MongoDB's session API, deliberately.** `node:sqlite` is synchronous, so
-nothing can interleave between two statements and there is no concurrency for a
-session object to coordinate; a callback is the honest shape. Nesting works via
-SAVEPOINT — an inner rollback discards only its own work, an outer one discards
-everything.
+A callback rather than a token to thread through, because `node:sqlite` is
+synchronous: nothing can interleave between two statements, so there is no
+concurrency for a session object to coordinate. Nesting works via SAVEPOINT — an
+inner rollback discards only its own work, an outer one discards everything.
 
-Two things to know: an ordered `insertMany` that fails part-way normally *keeps*
-what it wrote, but inside a transaction that rolls back it does not (which is
-what you asked for by opening one); and do not iterate a cursor across a
-rollback — materialise with `toArray()` first.
+**MongoDB's session API works too**, for code that is already written that way:
+
+```javascript
+const session = client.startSession()
+await session.withTransaction(async () => {
+  await accounts.updateOne({ _id: 'a' }, { $inc: { balance: -100 } }, { session })
+  await accounts.updateOne({ _id: 'b' }, { $inc: { balance: 100 } }, { session })
+})
+await session.endSession()
+```
+
+`startTransaction()`/`commitTransaction()`/`abortTransaction()`,
+`client.withSession(work)`, `inTransaction()` and `{ session }` on every
+operation are all there, and all checked against a real MongoDB — see
+[sessions](#sessions-and-the-one-thing-they-cannot-do) for the single thing a
+session here cannot do.
+
+Two more things to know: an ordered `insertMany` that fails part-way normally
+*keeps* what it wrote, but inside a transaction that rolls back it does not
+(which is what you asked for by opening one); and do not iterate a cursor across
+a rollback — materialise with `toArray()` first.
 
 ### Distinct values, and dropping a collection
 
@@ -686,6 +702,7 @@ It rejects, rather than silently answering differently:
 | `{ x: { $type: 'objectId' } }` | matches nothing | the type cannot be stored here, so "nothing" is an artefact, not a fact about your data |
 | `.sort({ v: 1 })` where some `v` is an array | orders arrays as a group | MongoDB orders them by their smallest (asc) or largest (desc) element |
 | `'$instock.qty'` in a pipeline | reads as missing | MongoDB maps the path over the array — `$unwind` first |
+| an operation inside a transaction with no `{ session }` | takes part in the transaction | MongoDB runs it *outside*, and does not roll it back — [sessions](#sessions-and-the-one-thing-they-cannot-do) |
 
 This is a boundary check, not a proof of equivalence: it catches the divergences
 that are known and detectable. It is off by default, and the intended use is a
@@ -730,16 +747,55 @@ mean editing the very line the shim exists to leave alone. A file path or
   They describe a network client that is not here, and unlike an unimplemented
   operator they cannot make an answer wrong. `strict`, `busyTimeoutMs` and
   `debug` are read from the same object.
-- **`startSession()`, `withSession()` and `watch()` throw**, naming what to use
-  instead. The two are not the same kind of gap: **sessions are planned** (the
-  substantive part of one is a transaction, and
-  [`db.withTransaction(work)`](#transactions) already is that), while **change
-  streams are decided against** — they need an oplog, and the local
-  approximations are connection-local, unresumable and unverifiable. See
-  BACKLOG.md for both.
+- **`startSession()` and `withSession()` work** — see below.
+- **`watch()` throws**, naming what to use instead. Change streams are decided
+  against, not missing: they need an oplog, and the local approximations are
+  connection-local, unresumable and unverifiable. See BACKLOG.md.
 
 The tests for this run the *same* code through both this shim and the real
 driver, which is the only way a drop-in claim can be more than a claim.
+
+### Sessions, and the one thing they cannot do
+
+```javascript
+const session = client.startSession()
+await session.withTransaction(async () => {
+  await accounts.updateOne({ _id: from }, { $inc: { balance: -100 } }, { session })
+  await accounts.updateOne({ _id: to }, { $inc: { balance: 100 } }, { session })
+})
+await session.endSession()
+```
+
+That shape is why sessions exist here: it is how a great deal of MongoDB
+transaction code is written, and rewriting it is the one thing the shim exists
+to avoid. `startTransaction()` / `commitTransaction()` / `abortTransaction()`,
+`client.withSession(work)`, `inTransaction()`, `hasEnded`, `equals()` and
+`{ session }` on every operation all behave as the driver's do — including the
+errors, down to *"Transaction already in progress"* and *"Use of expired
+sessions is not permitted"*, each pinned against a real MongoDB.
+
+**A session cannot route an operation, only carry one.** `{ session }` on
+MongoDB means "put this in the transaction", and *omitting* it means "run this
+outside, right now". A SQLite transaction belongs to the **connection**, so
+there is no outside to run in — a second connection is a different database in
+memory, and on a file it would block on the transaction's write lock and
+deadlock a single-threaded process. One consequence, and it is the only one:
+
+> An operation inside a transaction that is **not** given the session still
+> takes part in it. MongoDB would run it outside and not roll it back.
+
+Code that is correct against a real server is unaffected, because forgetting
+`{ session }` inside a transaction is a well-known bug there and correct code
+passes it to everything. `strict: true` turns the case into an error rather than
+a difference. Two related refusals, both loud: a transaction covers **one**
+database (it opens on the first operation naming the session, as it does on a
+server), and an operation naming a *different* session while a transaction is
+open is refused rather than quietly enrolled.
+
+Session options (`causalConsistency`, `readConcern`, `writeConcern`, …) are
+ignored, on the same grounds as the connection options: one connection to a
+local file satisfies the first trivially, and there is no replica set for the
+others to mean anything against.
 
 ### Raw SQL
 
@@ -885,10 +941,13 @@ Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
 `distinct()` `aggregate()` `insertOne()` `insertMany()` `updateOne()`
 `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
 `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()` `createIndex()`
-`dropIndex()` `indexes()` `listIndexes()` `drop()`; on `Db`,
-`withTransaction()` `listCollections()` `createCollection()` `dropDatabase()`
-`databaseName`, and [`sql`](#raw-sql) / `table()` for SQL this library does not
-compile; plus a [`MongoClient` shim](#a-mongoclient-shaped-entry-point).
+`dropIndex()` `indexes()` `listIndexes()` `drop()`, each taking `{ session }`;
+on `Db`, `withTransaction()` `listCollections()` `createCollection()`
+`dropDatabase()` `databaseName`, and [`sql`](#raw-sql) / `table()` for SQL this
+library does not compile; plus a
+[`MongoClient` shim](#a-mongoclient-shaped-entry-point) with
+[`startSession()`](#sessions-and-the-one-thing-they-cannot-do) and
+`withSession()`.
 
 Result objects match the official driver's shapes (`acknowledged`,
 `matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes
@@ -998,7 +1057,8 @@ how each piece would be implemented. The headlines:
 - Change streams, replication, sharding, `$where`, server-side JavaScript,
   GridFS, the wire protocol. A process that needs those needs a server.
   (Multi-document atomicity within one connection *is* supported — see
-  [Transactions](#transactions).) Change streams were investigated far enough to
+  [Transactions](#transactions) and
+  [Sessions](#sessions-and-the-one-thing-they-cannot-do).) Change streams were investigated far enough to
   be worth a decision record rather than a line here: `node:sqlite` exposes no
   update hook, and SQLite's session extension records *nothing* for these tables
   and is connection-local regardless — so it could see neither another process's

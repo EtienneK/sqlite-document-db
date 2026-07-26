@@ -181,15 +181,30 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [`ClientSession` for the shim](#25-clientsession-for-the-shim) | S-M | The piece the `MongoClient` shim is missing: `session.withTransaction()` is how a lot of MongoDB transaction code is written, and rewriting it is the one thing the shim exists to avoid. The divergence is enumerable, so `strict` can enforce it. |
-| 2 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 3 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 4 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 5 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 6 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 2 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 3 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 4 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 5 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [`ClientSession`](#25-clientsession-for-the-shim) | S-M | **DONE 2026-07-26.** The shim's missing piece, and the last one: `session.withTransaction()` with `{ session }` on every operation now runs unchanged. Verified against a real replica set, since MongoDB refuses transactions on a standalone. |
 | — | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26.** No update hook in `node:sqlite`; the session extension records NOTHING for these tables (measured, 0 bytes - no primary key), and is connection-local anyway. A local change-notification API under another name is the honest version. |
 | — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
+
+**Sessions landed 2026-07-26** ([item 25](#25-clientsession-for-the-shim)),
+which closes the `MongoClient` shim: the only method left that throws is
+`watch()`, and that is a decision rather than a gap. Two things from it are
+worth carrying forward:
+
+- **The test suite has two servers now, and the reason is a real constraint.**
+  MongoDB refuses transactions on a standalone mongod, so a whole feature would
+  otherwise have shipped unverified. Pointing everything at a replica set cost
+  5x the wall clock; booting both and letting one spec opt in cost ~110ms. When
+  the oracle cannot answer, changing the oracle is on the table.
+- **A structural interface over both clients caught an API promise nobody made.**
+  `session.transaction` exists at runtime in the driver and NOT in its published
+  types, so building it here would have shipped code that stops compiling on the
+  swap back. The no-cast dual harness is what found it.
 
 Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
 The review's own conclusion is worth keeping in view: this library leads on
@@ -223,8 +238,9 @@ wire protocol. A process that needs those needs a server.
 [Change streams](#26-change-streams-decided-against-2026-07-26) and
 [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) are in the
 same category but were investigated far enough to be worth writing down, so each
-has a decision record rather than a line here. `startSession()` is NOT in this
-category - see [item 25](#25-clientsession-for-the-shim).
+has a decision record rather than a line here. `startSession()` was never in
+this category and is now implemented - see
+[item 25](#25-clientsession-for-the-shim).
 
 ---
 
@@ -260,7 +276,7 @@ priority table above.
 | 22 | ~~[`MongoClient` shim](#22-a-mongoclient-shaped-shim)~~ | M | **DONE 2026-07-26** — tested through the real driver AND the shim, at one type |
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
-| 25 | [`ClientSession` for the shim](#25-clientsession-for-the-shim) | S-M | Open — the shim's missing piece; blocked on nothing |
+| 25 | ~~[`ClientSession` for the shim](#25-clientsession-for-the-shim)~~ | S-M | **DONE 2026-07-26** — sessions, `{ session }` everywhere, oracle-verified on a replica set |
 | 26 | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26**, with the measurement |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
@@ -1621,8 +1637,9 @@ drop-in claim is literally "the same code runs through both".
   both are justified the same way: they describe a network client that is not
   here, they cannot make an answer wrong, and refusing them means editing the
   very line the shim exists to leave alone. An unimplemented OPERATOR is a
-  different thing and still throws — as do `startSession`, `withSession` and
-  `watch`, each naming what to use instead.
+  different thing and still throws — as does `watch`, which names what to use
+  instead. (`startSession`/`withSession` threw here too until
+  [item 25](#25-clientsession-for-the-shim) landed them.)
 - **A file-backed client has ONE database.** A second `db(name)` on a file is an
   error rather than a second view of the same collections; that silent merge is
   what `tableNameFor` prevents one level down.
@@ -1897,7 +1914,52 @@ replicas.
 
 ## 25. `ClientSession`, for the shim
 
-**Size: S-M.** The [`MongoClient` shim](#22-a-mongoclient-shaped-shim) landed
+**Size: S-M — DONE 2026-07-26.** [src/client-session.ts](src/client-session.ts):
+`startSession()`, `withSession()`, `session.withTransaction()`, the explicit
+`startTransaction`/`commitTransaction`/`abortTransaction` trio, `endSession()`,
+`hasEnded`, `inTransaction()`, `equals()`, and `{ session }` on every operation
+method on `Collection` and `Db`. Dual-engine in
+[test/client-session.spec.ts](test/client-session.spec.ts), which runs one set
+of test bodies through the shim AND the real driver at a single structural
+interface with no cast — the same design as
+[test/mongo-client.spec.ts](test/mongo-client.spec.ts).
+
+Four things came out of building it that the plan below did not anticipate:
+
+- **The oracle needed a REPLICA SET.** MongoDB refuses transactions on a
+  standalone mongod, so the half of this item that matters could not have been
+  checked against a server at all. [test/global-setup.ts](test/global-setup.ts)
+  now boots a one-node replica set *beside* the standalone one and only this
+  spec injects it: pointing the whole suite at the replica set took the run from
+  1.6s to 8.3s (measured), and two servers booting in parallel cost ~110ms.
+- **The transaction opens LAZILY, on the first operation naming the session** —
+  not eagerly, which turned out to be more than convenience. A server also
+  starts a transaction with its first operation, so a write before that point is
+  outside it on BOTH engines, and the divergence shrinks to exactly the set
+  `strict` can detect. (Eager also had nowhere to go: a session belongs to a
+  client, and a client can hold several databases, each its own connection.)
+- **`session.withTransaction` does NOT delegate to `db.withTransaction`** as
+  planned. It uses the same primitives, split into `enterTransaction` +
+  `commitFrame`/`rollbackFrame`, because the explicit trio has no callback to
+  sit inside. It also does not NEST, though `db.withTransaction` does: a second
+  transaction on one session is "Transaction already in progress" on a real
+  server, and that is now pinned.
+- **There is deliberately no `session.transaction` property.** The driver has
+  one at runtime but excludes it from its published types, so code written
+  against it here would stop COMPILING on a swap back to `mongodb`. The shared
+  structural interface caught it — which is the compile-time half of the
+  drop-in claim doing its job.
+
+Divergences, all enforced: an operation inside a transaction that was not given
+`{ session }` takes part in it (`strict` rejects; MongoDB would run it outside);
+a transaction covers ONE database; an operation naming a *different* session
+while a transaction is open is refused; `estimatedDocumentCount` answers inside
+a transaction where MongoDB refuses it. Session options
+(`causalConsistency`, `readConcern`, …) are ignored, as connection options are.
+
+Original analysis follows.
+
+The [`MongoClient` shim](#22-a-mongoclient-shaped-shim) landed
 with `startSession()` throwing, which is the honest status quo but leaves a real
 gap: a great deal of MongoDB transaction code is written as
 

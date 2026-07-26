@@ -201,8 +201,8 @@ describe('MongoClient', () => {
 
     it('fails loudly on the surface it does not have', async () => {
       const client = await ShimClient.connect(':memory:')
-      expect(() => client.startSession()).toThrow(/withTransaction/)
-      await expect(client.withSession()).rejects.toThrow(/withTransaction/)
+      // Sessions DO work (see test/client-session.spec.ts); change streams
+      // cannot, and say so rather than answering with nothing.
       expect(() => client.watch()).toThrow(/change streams/)
       await client.close()
     })

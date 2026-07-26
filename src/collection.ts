@@ -9,6 +9,7 @@
 
 import { createHash } from 'node:crypto'
 import { compileStages, splitPipeline } from './aggregate.js'
+import { ClientSession } from './client-session.js'
 import type { Driver, DriverStatement } from './driver.js'
 import { compareBson } from './bson-order.js'
 // Documents round-trip through the EJSON layer, not plain JSON: Dates are
@@ -23,11 +24,14 @@ import {
   type CompileOptions, type SqlParams
 } from './query.js'
 import type {
-  AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions, BulkWriteResult,
-  CountOptions, CreateIndexOptions, DbOptions, DeleteResult, Document, InsertManyOptions,
-  FindCursor, FindOneAndDeleteOptions, FindOneAndReplaceOptions, FindOneAndUpdateOptions,
-  FindOptions, IndexDescription, IndexDirection, IndexSpecification, InsertManyResult,
-  InsertOneResult, ReplaceOptions, SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
+  AggregateOptions, AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions,
+  BulkWriteResult, CountOptions, CreateIndexOptions, DbOptions, DeleteOptions, DeleteResult,
+  DistinctOptions, Document, DropCollectionOptions, DropIndexOptions,
+  EstimatedDocumentCountOptions, InsertManyOptions, FindCursor, FindOneAndDeleteOptions,
+  FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions, IndexDescription, IndexDirection,
+  IndexSpecification, InsertManyResult, InsertOneOptions, InsertOneResult, ListIndexesOptions,
+  ReplaceOptions, SessionHost, SessionLike, SessionOption, SortSpecification, UpdateOptions,
+  UpdateResult, WithId, WithoutId
 } from './types.js'
 import {
   buildUpdateExpression, buildUpsertDocument, collectEqualities,
@@ -80,6 +84,30 @@ function asJsonText (typeExpr: string, valueExpr: string): string {
  * iterated while another one is mid-flight cannot drop the other's table.
  */
 let matchBatchSequence = 0
+
+function noSessionsHere (): never {
+  throw Error('this collection was not opened by a client, so it has no sessions')
+}
+
+/**
+ * The session host for a `Collection` nobody handed one to - one built directly
+ * rather than through `db.collection()`.
+ *
+ * `database` is a fresh object, so no client owns it and every session is
+ * refused as foreign, which is the truth: a session belongs to the client that
+ * created it, and this collection came from no client. Its transaction hooks
+ * are unreachable for the same reason.
+ */
+function detachedSessionHost (dbOptions: DbOptions): SessionHost {
+  return {
+    database: {},
+    strict: dbOptions.strict,
+    activeSession: null,
+    begin: noSessionsHere,
+    commit: noSessionsHere,
+    rollback: noSessionsHere
+  }
+}
 
 /** Names SQLite cannot fold or mangle, so they can be used as a table name verbatim. */
 const UNAMBIGUOUS_NAME = /^[a-z0-9_]+$/
@@ -202,13 +230,24 @@ export class Collection<TSchema extends Document = Document> {
   private readonly compileOptions: CompileOptions
   /** Evicts this collection from its `Db`'s cache. See drop(). */
   private readonly onDrop: () => void
+  /**
+   * Where `{ session }` is checked, and where a session's transaction is
+   * opened. Supplied by the `Db` that made this collection; a `Collection`
+   * built by hand gets a detached one, which accepts no session at all -
+   * sessions come from a `MongoClient`, and that client owns no such database.
+   */
+  private readonly sessions: SessionHost
 
-  constructor (name: string, db: Driver, dbOptions: DbOptions, onDrop: () => void = () => {}) {
+  constructor (
+    name: string, db: Driver, dbOptions: DbOptions, onDrop: () => void = () => {},
+    sessions: SessionHost = detachedSessionHost(dbOptions)
+  ) {
     assertValidCollectionName(name)
 
     this.db = db
     this.dbOptions = dbOptions
     this.onDrop = onDrop
+    this.sessions = sessions
     this.collectionName = name
     this.name = tableNameFor(name)
     this.table = quoteIdentifier(this.name)
@@ -256,6 +295,21 @@ export class Collection<TSchema extends Document = Document> {
 
   private mapError (error: unknown): unknown {
     return toMongoError(error, this.collectionName, name => this.mongoIndexName(name))
+  }
+
+  /**
+   * Checks the `{ session }` this call was given - or the absence of one, which
+   * is the case `strict` cares about - and opens the session's transaction if
+   * this is the first operation to name it. See src/client-session.ts.
+   *
+   * It returns the session back, narrowed to just that key, because every
+   * method that delegates has to PASS IT ON: an internal `insertMany` called
+   * without the session its `insertOne` was given would look exactly like an
+   * operation the caller forgot to enrol, and `strict` would refuse it.
+   */
+  private enlist (options: SessionOption): { session?: SessionLike } {
+    ClientSession.enlist(options.session, this.sessions)
+    return options.session === undefined ? {} : { session: options.session }
   }
 
   /**
@@ -308,6 +362,7 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   find (query: Filter<TSchema> = {}, options: FindOptions = {}): FindCursor<TSchema> {
+    this.enlist(options)
     // The options form gets the same validation as the chainable setters -
     // limit and skip are interpolated into SQL, so a NaN arriving from
     // unvalidated caller input surfaced as "no such column: NaN".
@@ -459,8 +514,11 @@ export class Collection<TSchema extends Document = Document> {
    * README); an unsupported stage, accumulator or expression operator is an
    * error rather than a silent no-op.
    */
-  aggregate <TResult extends Document = Document>(pipeline: Document[] = []): AggregationCursor<TResult> {
+  aggregate <TResult extends Document = Document>(
+    pipeline: Document[] = [], options: AggregateOptions = {}
+  ): AggregationCursor<TResult> {
     if (!Array.isArray(pipeline)) throw Error('aggregate expects an array of pipeline stages')
+    const session = this.enlist(options)
     // Split (and therefore validate) eagerly, so a malformed pipeline throws
     // where it was written rather than on first iteration.
     const split = splitPipeline(pipeline)
@@ -471,12 +529,15 @@ export class Collection<TSchema extends Document = Document> {
       // sees uncommitted work inside a withTransaction. It bypasses Db's cache
       // (a Collection has no reference to its Db) which costs one
       // CREATE TABLE IF NOT EXISTS per lookup - idempotent, and it keeps the
-      // eager-creation behaviour `db.collection()` already has.
-      async (name, filter) => await new Collection(name, this.db, this.dbOptions).find(filter).toArray(),
+      // eager-creation behaviour `db.collection()` already has. It shares this
+      // collection's session host, so the join is part of the same transaction.
+      async (name, filter) => await new Collection(name, this.db, this.dbOptions, () => {}, this.sessions)
+        .find(filter, session).toArray(),
       this.dbOptions.strict
     )
 
     const source = this.find(split.filter as Filter<TSchema>, {
+      ...session,
       ...(split.sort === undefined ? {} : { sort: split.sort }),
       ...(split.skip === undefined ? {} : { skip: split.skip }),
       ...(split.limit === undefined ? {} : { limit: split.limit })
@@ -602,6 +663,7 @@ export class Collection<TSchema extends Document = Document> {
    * comparisons therefore query that sub-path.
    */
   async createIndex (spec: IndexSpecification, options: CreateIndexOptions = {}): Promise<string> {
+    this.enlist(options)
     const key: Record<string, IndexDirection> = typeof spec === 'string' ? { [spec]: 1 } : spec
     const entries = Object.entries(key)
     if (entries.length === 0) throw Error('createIndex requires at least one field')
@@ -631,7 +693,8 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /** Drops an index by the name createIndex returned. Throws if it does not exist. */
-  async dropIndex (name: string): Promise<void> {
+  async dropIndex (name: string, options: DropIndexOptions = {}): Promise<void> {
+    this.enlist(options)
     const physical = `ix_${this.name}_${name}`
     const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get([physical])
     if (found === undefined) throw Error(`index not found with name [${name}]`)
@@ -640,7 +703,8 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /** Lists indexes in (a subset of) MongoDB's shape: `{ name, key, unique? }`. */
-  async indexes (): Promise<IndexDescription[]> {
+  async indexes (options: ListIndexesOptions = {}): Promise<IndexDescription[]> {
+    this.enlist(options)
     const rows = this.db.prepare(
       "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? ORDER BY name"
     ).all([this.name]) as Array<{ name: string, sql: string | null }>
@@ -668,8 +732,8 @@ export class Collection<TSchema extends Document = Document> {
     return descriptions
   }
 
-  listIndexes (): { toArray: () => Promise<IndexDescription[]> } {
-    return { toArray: async () => await this.indexes() }
+  listIndexes (options: ListIndexesOptions = {}): { toArray: () => Promise<IndexDescription[]> } {
+    return { toArray: async () => await this.indexes(options) }
   }
 
   /**
@@ -691,7 +755,8 @@ export class Collection<TSchema extends Document = Document> {
    * where `instock` is an array) yields nothing here, where MongoDB descends
    * into it. `strict: true` rejects that rather than answering it.
    */
-  async distinct (field: string, filter: Filter<TSchema> = {}): Promise<any[]> {
+  async distinct (field: string, filter: Filter<TSchema> = {}, options: DistinctOptions = {}): Promise<any[]> {
+    this.enlist(options)
     if (typeof field !== 'string' || field === '') throw Error('distinct requires a non-empty field name')
     this.assertDistinctPath(field)
 
@@ -755,7 +820,8 @@ export class Collection<TSchema extends Document = Document> {
    * that, `db.collection(name)` would hand back the same dead object and every
    * call on it would fail with "no such table" rather than recreating it.
    */
-  async drop (): Promise<boolean> {
+  async drop (options: DropCollectionOptions = {}): Promise<boolean> {
+    this.enlist(options)
     this.exec(`DROP TABLE IF EXISTS ${this.table}`)
     unregisterCollection(this.db, this.name)
     this.onDrop()
@@ -768,6 +834,7 @@ export class Collection<TSchema extends Document = Document> {
    * 500 matches answers 10, not 500.
    */
   async countDocuments (filter?: Filter<TSchema>, options: CountOptions = {}): Promise<number> {
+    this.enlist(options)
     if (options.limit !== undefined) assertLimit(options.limit)
     if (options.skip !== undefined) assertSkip(options.skip)
 
@@ -791,8 +858,13 @@ export class Collection<TSchema extends Document = Document> {
    * it is an exact `COUNT(*)`, which is both cheaper and more accurate. The
    * method exists for API compatibility - `countDocuments()` says the same
    * thing and is the one to reach for.
+   *
+   * Divergence worth knowing: MongoDB REFUSES this one inside a transaction
+   * ("Cannot run 'count' in a multi-document transaction"), because it reads
+   * metadata rather than documents. Here it is an ordinary count and answers.
    */
-  async estimatedDocumentCount (): Promise<number> {
+  async estimatedDocumentCount (options: EstimatedDocumentCountOptions = {}): Promise<number> {
+    this.enlist(options)
     const result = this.prepare(`SELECT COUNT(*) AS count FROM ${this.table}`).get() as { count: number }
     return Number(result.count)
   }
@@ -824,14 +896,16 @@ export class Collection<TSchema extends Document = Document> {
    * synchronous and there is no await in between); across processes the unique
    * `_id` index is what makes a lost race an error rather than a duplicate.
    */
-  private async insertUpserted (doc: Document): Promise<{ result: UpdateResult, document: WithId<TSchema> }> {
-    const insert = await this.insertMany([doc as TSchema])
+  private async insertUpserted (
+    doc: Document, session: SessionOption = {}
+  ): Promise<{ result: UpdateResult, document: WithId<TSchema> }> {
+    const insert = await this.insertMany([doc as TSchema], session)
     const upsertedId = insert.insertedIds[0]!
     return {
       result: { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedCount: 1, upsertedId },
       // Read back rather than reusing `doc`: the storage layer decides the
       // final shape (dropped `undefined`s, Date round-trip, key order).
-      document: (await this.findOne({ _id: upsertedId } as AnyFilter))!
+      document: (await this.findOne({ _id: upsertedId } as AnyFilter, session))!
     }
   }
 
@@ -864,7 +938,8 @@ export class Collection<TSchema extends Document = Document> {
     return { ...(id == null ? {} : { _id: id }), ...doc }
   }
 
-  async deleteOne (filter: Filter<TSchema>): Promise<DeleteResult> {
+  async deleteOne (filter: Filter<TSchema>, options: DeleteOptions = {}): Promise<DeleteResult> {
+    this.enlist(options)
     const found = this.findOneRow(filter)
     if (found === null) return { acknowledged: true, deletedCount: 0 }
     const { rowid } = found
@@ -873,7 +948,8 @@ export class Collection<TSchema extends Document = Document> {
     return { acknowledged: true, deletedCount: Number(result.changes) }
   }
 
-  async deleteMany (filter: Filter<TSchema>): Promise<DeleteResult> {
+  async deleteMany (filter: Filter<TSchema>, options: DeleteOptions = {}): Promise<DeleteResult> {
+    this.enlist(options)
     const compiled = toSql('data', filter, this.compileOptions)
     const result = this.run(`DELETE FROM ${this.table} WHERE (${compiled.sql})`, compiled.params)
     return { acknowledged: true, deletedCount: Number(result.changes) }
@@ -889,12 +965,13 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   async replaceOne (filter: Filter<TSchema>, doc: WithoutId<TSchema>, options: ReplaceOptions = {}): Promise<UpdateResult> {
+    const session = this.enlist(options)
     const givenId = Collection.replacementId(doc)
 
     const found = this.findOneRow(filter)
     if (found === null) {
       if (options.upsert !== true) return updateResult(0, 0)
-      return (await this.insertUpserted(this.upsertReplacement(filter, doc, givenId))).result
+      return (await this.insertUpserted(this.upsertReplacement(filter, doc, givenId), session)).result
     }
 
     const id = parseDocument(found.data)._id
@@ -907,12 +984,13 @@ export class Collection<TSchema extends Document = Document> {
 
   /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
   async updateOne (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
+    const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
 
     const found = this.findOneRow(filter)
     if (found === null) {
       if (options.upsert !== true) return updateResult(0, 0)
-      return (await this.insertUpserted(buildUpsertDocument(filter, update))).result
+      return (await this.insertUpserted(buildUpsertDocument(filter, update), session)).result
     }
 
     return updateResult(1, this.updateRow(expr, found.rowid))
@@ -920,13 +998,14 @@ export class Collection<TSchema extends Document = Document> {
 
   /** Updates every document matching `filter` with $set/$unset/$inc operators. */
   async updateMany (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
+    const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
 
-    const matchedCount = await this.countDocuments(filter)
+    const matchedCount = await this.countDocuments(filter, session)
     // An upsert that matches nothing inserts exactly ONE document, as it does
     // for updateOne - "many" describes what is updated, not what is created.
     if (matchedCount === 0 && options.upsert === true) {
-      return (await this.insertUpserted(buildUpsertDocument(filter, update))).result
+      return (await this.insertUpserted(buildUpsertDocument(filter, update), session)).result
     }
     const compiled = toSql('data', filter, this.compileOptions)
 
@@ -954,12 +1033,13 @@ export class Collection<TSchema extends Document = Document> {
   async findOneAndUpdate (
     filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: FindOneAndUpdateOptions = {}
   ): Promise<WithId<TSchema> | null> {
+    const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
     const found = this.findOneRow(filter, options.sort)
 
     if (found === null) {
       if (options.upsert !== true) return null
-      return await this.returnUpserted(buildUpsertDocument(filter, update), options, filter)
+      return await this.returnUpserted(buildUpsertDocument(filter, update), options, filter, session)
     }
 
     const before = parseDocument(found.data) as WithId<TSchema>
@@ -971,12 +1051,13 @@ export class Collection<TSchema extends Document = Document> {
   async findOneAndReplace (
     filter: Filter<TSchema>, replacement: WithoutId<TSchema>, options: FindOneAndReplaceOptions = {}
   ): Promise<WithId<TSchema> | null> {
+    const session = this.enlist(options)
     const givenId = Collection.replacementId(replacement)
     const found = this.findOneRow(filter, options.sort)
 
     if (found === null) {
       if (options.upsert !== true) return null
-      return await this.returnUpserted(this.upsertReplacement(filter, replacement, givenId), options, filter)
+      return await this.returnUpserted(this.upsertReplacement(filter, replacement, givenId), options, filter, session)
     }
 
     const before = parseDocument(found.data) as WithId<TSchema>
@@ -987,6 +1068,7 @@ export class Collection<TSchema extends Document = Document> {
 
   /** Deletes one document and returns it, or null when nothing matched. */
   async findOneAndDelete (filter: Filter<TSchema>, options: FindOneAndDeleteOptions = {}): Promise<WithId<TSchema> | null> {
+    this.enlist(options)
     const found = this.findOneRow(filter, options.sort)
     if (found === null) return null
 
@@ -1006,9 +1088,9 @@ export class Collection<TSchema extends Document = Document> {
 
   /** The 'before'/'after' choice for an upsert: there is no 'before' version. */
   private async returnUpserted (
-    doc: Document, options: FindOneAndUpdateOptions, filter: Filter<TSchema>
+    doc: Document, options: FindOneAndUpdateOptions, filter: Filter<TSchema>, session: SessionOption = {}
   ): Promise<WithId<TSchema> | null> {
-    const { document } = await this.insertUpserted(doc)
+    const { document } = await this.insertUpserted(doc, session)
     if (options.returnDocument !== 'after') return null
     return this.applyProjection(document, options.projection, filter)
   }
@@ -1036,10 +1118,10 @@ export class Collection<TSchema extends Document = Document> {
     return compiled.project(doc, compiled.probes.map((_, index) => row[`${PROBE_COLUMN}${index}`] as number | null))
   }
 
-  async insertOne (doc: TSchema): Promise<InsertOneResult> {
+  async insertOne (doc: TSchema, options: InsertOneOptions = {}): Promise<InsertOneResult> {
     return {
       acknowledged: true,
-      insertedId: (await this.insertMany([doc])).insertedIds[0]!
+      insertedId: (await this.insertMany([doc], this.enlist(options))).insertedIds[0]!
     }
   }
 
@@ -1064,6 +1146,7 @@ export class Collection<TSchema extends Document = Document> {
    * same, and several specs assert on it.
    */
   async insertMany (docs: TSchema[], options: InsertManyOptions = {}): Promise<InsertManyResult> {
+    this.enlist(options)
     if (!Array.isArray(docs)) throw Error('insertMany expects an array of documents')
     if (options.ordered === false) return await this.insertUnordered(docs)
     const stmt = this.prepare(`INSERT INTO ${this.table} VALUES(json(?))`)
@@ -1190,6 +1273,7 @@ export class Collection<TSchema extends Document = Document> {
   async bulkWrite (
     operations: Array<AnyBulkWriteOperation<TSchema>>, options: BulkWriteOptions = {}
   ): Promise<BulkWriteResult> {
+    const session = this.enlist(options)
     if (!Array.isArray(operations)) throw Error('bulkWrite expects an array of operations')
     if (operations.length === 0) throw Error('bulkWrite requires at least one operation')
 
@@ -1207,7 +1291,7 @@ export class Collection<TSchema extends Document = Document> {
 
     for (let index = 0; index < operations.length; index++) {
       try {
-        await this.applyBulkOperation(operations[index]!, index, result)
+        await this.applyBulkOperation(operations[index]!, index, result, session)
       } catch (error) {
         firstError ??= error
         if (options.ordered !== false) break
@@ -1225,7 +1309,7 @@ export class Collection<TSchema extends Document = Document> {
 
   /** One `bulkWrite` entry, accumulated into `result`. */
   private async applyBulkOperation (
-    operation: AnyBulkWriteOperation<TSchema>, index: number, result: BulkWriteResult
+    operation: AnyBulkWriteOperation<TSchema>, index: number, result: BulkWriteResult, session: SessionOption
   ): Promise<void> {
     if (operation === null || typeof operation !== 'object' || Array.isArray(operation)) {
       throw Error(`bulkWrite operation at index ${index} must be a document`)
@@ -1241,14 +1325,14 @@ export class Collection<TSchema extends Document = Document> {
 
     switch (name) {
       case 'insertOne': {
-        const inserted = await this.insertOne(spec.document as TSchema)
+        const inserted = await this.insertOne(spec.document as TSchema, session)
         result.insertedIds[index] = inserted.insertedId
         result.insertedCount++
         return
       }
       case 'updateOne':
       case 'updateMany': {
-        const options = spec.upsert === true ? { upsert: true } : {}
+        const options = { ...session, ...(spec.upsert === true ? { upsert: true } : {}) }
         const updated = name === 'updateOne'
           ? await this.updateOne(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema>, options)
           : await this.updateMany(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema>, options)
@@ -1258,7 +1342,7 @@ export class Collection<TSchema extends Document = Document> {
       case 'replaceOne': {
         const replaced = await this.replaceOne(
           spec.filter as Filter<TSchema>, spec.replacement as WithoutId<TSchema>,
-          spec.upsert === true ? { upsert: true } : {}
+          { ...session, ...(spec.upsert === true ? { upsert: true } : {}) }
         )
         this.accumulateUpdate(replaced, index, result)
         return
@@ -1266,8 +1350,8 @@ export class Collection<TSchema extends Document = Document> {
       case 'deleteOne':
       case 'deleteMany': {
         const deleted = name === 'deleteOne'
-          ? await this.deleteOne(spec.filter as Filter<TSchema>)
-          : await this.deleteMany(spec.filter as Filter<TSchema>)
+          ? await this.deleteOne(spec.filter as Filter<TSchema>, session)
+          : await this.deleteMany(spec.filter as Filter<TSchema>, session)
         result.deletedCount += deleted.deletedCount
         return
       }

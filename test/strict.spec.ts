@@ -1,6 +1,10 @@
-import { Db } from '../src/index.js'
+import { Db, MongoClient } from '../src/index.js'
 
 const open = async (strict: boolean): Promise<Db> => await Db.fromUrl(':memory:', { strict })
+
+/** A client, for the one divergence that needs a session (and so a client). */
+const connect = async (strict: boolean): Promise<MongoClient> =>
+  await MongoClient.connect(':memory:', { strict })
 
 const seedNested = async (db: Db): Promise<void> => {
   await db.collection('t').insertMany([
@@ -188,6 +192,79 @@ describe('strict mode', () => {
       await db.collection('t').insertOne({ size: { uom: 'cm' } })
       expect(await db.collection('t').distinct('size.uom')).toStrictEqual(['cm'])
       await db.close()
+    })
+  })
+
+  /**
+   * The one divergence a `ClientSession` has (BACKLOG item 25).
+   *
+   * On MongoDB a session is a ROUTING token: an operation given `{ session }`
+   * joins the transaction and one without it runs outside, immediately, and is
+   * not rolled back. Measured against the server for the case below - the write
+   * survives. Here a transaction belongs to the CONNECTION, so every operation
+   * on it takes part whether it asked to or not.
+   *
+   * Correct MongoDB code passes the session to every operation in a transaction
+   * (omitting it is a well-known bug), so this only bites code that
+   * deliberately writes outside a transaction from inside one. It is still
+   * detectable, which is what makes it strict's business.
+   */
+  describe('an operation inside a session transaction that was not given the session', () => {
+    it('should take part in the transaction by default, where MongoDB would leave it out', async () => {
+      const client = await connect(false)
+      const items = client.db('a').collection('items')
+      const session = client.startSession()
+
+      await session.withTransaction(async () => {
+        await items.insertOne({ _id: 'enrolled' } as any, { session })
+        await items.insertOne({ _id: 'forgotten' } as any) // no session
+        throw Error('roll back')
+      }).catch(() => {})
+
+      // On a real server 'forgotten' would still be here.
+      expect(await items.countDocuments({})).toStrictEqual(0)
+      await session.endSession()
+      await client.close()
+    })
+
+    it('should reject the operation under strict', async () => {
+      const client = await connect(true)
+      const items = client.db('a').collection('items')
+      const session = client.startSession()
+
+      await expect(session.withTransaction(async () => {
+        await items.insertOne({ _id: 'enrolled' } as any, { session })
+        await items.insertOne({ _id: 'forgotten' } as any)
+      })).rejects.toThrow(/strict.*not given \{ session \}/)
+
+      await session.endSession()
+      await client.close()
+    })
+
+    it('should still allow an operation before the transaction has opened', async () => {
+      // The transaction opens on the FIRST operation naming the session, which
+      // is when one starts on a real server too - so a write before that point
+      // genuinely is outside it, on both engines, and strict has nothing to say.
+      const client = await connect(true)
+      const items = client.db('a').collection('items')
+      const session = client.startSession()
+
+      await session.withTransaction(async () => {
+        await items.insertOne({ _id: 'before' } as any)
+        await items.insertOne({ _id: 'inside' } as any, { session })
+      })
+
+      expect(await items.countDocuments({})).toStrictEqual(2)
+      await session.endSession()
+      await client.close()
+    })
+
+    it('should leave operations outside any transaction alone', async () => {
+      const client = await connect(true)
+      const items = client.db('a').collection('items')
+      await items.insertOne({ _id: 1 } as any)
+      expect(await items.countDocuments({})).toStrictEqual(1)
+      await client.close()
     })
   })
 

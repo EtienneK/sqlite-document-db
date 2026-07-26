@@ -10,11 +10,17 @@
  * import { MongoClient } from 'sqlite-document-db'   // was: from 'mongodb'
  * ```
  *
- * **It is a shim, not a driver.** There is no server, no connection pool and no
- * session, and the surface here says so rather than pretending: `startSession`
- * and `watch` throw an error naming what to use instead. What it does promise is
- * the part this library can evidence - the CRUD, query, update and aggregation
- * subset, checked assertion for assertion against a real MongoDB.
+ * **It is a shim, not a driver.** There is no server and no connection pool, and
+ * the surface here says so rather than pretending: `watch` throws an error
+ * naming what to use instead. What it does promise is the part this library can
+ * evidence - the CRUD, query, update, aggregation and transaction subset,
+ * checked assertion for assertion against a real MongoDB.
+ *
+ * `startSession()` DOES work (see src/client-session.ts), because
+ * `session.withTransaction()` is how a great deal of MongoDB transaction code
+ * is written and rewriting it is the one thing this file exists to avoid. What
+ * a session cannot do here is route an operation around a transaction, and that
+ * limit is documented on `ClientSession` and enforced under `strict`.
  *
  * Two deliberate leniencies, both because refusing would defeat the point:
  *
@@ -28,6 +34,7 @@
  *   (`strict`, `busyTimeoutMs`, `debug`) are read from the same object.
  */
 
+import { ClientSession, type ClientSessionOptions } from './client-session.js'
 import { Db } from './db.js'
 import type { DbOptions } from './types.js'
 
@@ -68,6 +75,8 @@ export class MongoClient {
   private readonly target: Target
   private readonly options: Partial<DbOptions>
   private readonly databases = new Map<string, Db>()
+  /** Live sessions, so `close()` can end them the way the driver does. */
+  private readonly sessions = new Set<ClientSession>()
   private closed = false
 
   constructor (url: string, options: MongoClientOptions = {}) {
@@ -128,24 +137,49 @@ export class MongoClient {
     return opened
   }
 
-  /** Closes every database this client opened. */
+  /** Closes every database this client opened, ending its sessions first. */
   async close (): Promise<void> {
+    // Ending a session rolls back any transaction still open on it, so this
+    // order is what keeps a forgotten commit from being decided by db.close().
+    // Over a copy: endSession removes the session from the set it is iterating.
+    for (const session of Array.from(this.sessions)) await session.endSession()
     for (const db of this.databases.values()) await db.close()
     this.databases.clear()
     this.closed = true
   }
 
-  /** Present so the failure is a clear message rather than "not a function". */
-  startSession (): never {
-    throw Error(
-      'sessions are not supported: there is no server to coordinate with, and nothing here can ' +
-      'interleave between two statements. Use db.withTransaction(work) for multi-document atomicity'
+  /**
+   * A session, for `session.withTransaction(work)` and `{ session }`.
+   *
+   * Options are accepted and ignored, on the same grounds as the connection
+   * options above: `causalConsistency`, `readConcern` and `writeConcern`
+   * describe a replica set, and one connection to a local database satisfies
+   * the first trivially and has nothing for the other two to mean.
+   *
+   * What a session is and is not able to do here is set out on `ClientSession`
+   * - in short, it can carry a transaction, and it cannot keep an operation
+   * OUT of one.
+   */
+  startSession (_options: ClientSessionOptions = {}): ClientSession {
+    if (this.closed) throw Error('MongoClient is closed')
+    const session: ClientSession = new ClientSession(
+      // A session may only be used on a database this client opened - the
+      // driver's "ClientSession must be from the same MongoClient".
+      database => [...this.databases.values()].some(db => db === database),
+      () => this.sessions.delete(session)
     )
+    this.sessions.add(session)
+    return session
   }
 
-  /** As `startSession`: the callback form fails the same way, for the same reason. */
-  async withSession (): Promise<never> {
-    return this.startSession()
+  /** Runs `work` with a session, ending it afterwards however `work` finishes. */
+  async withSession <T>(work: (session: ClientSession) => Promise<T>): Promise<T> {
+    const session = this.startSession()
+    try {
+      return await work(session)
+    } finally {
+      await session.endSession()
+    }
   }
 
   watch (): never {
