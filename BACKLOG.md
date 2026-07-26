@@ -181,15 +181,15 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 2 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 3 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 4 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants item 1 first, or the promise is embarrassing. |
-| 5 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 6 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 7 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 8 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 9 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. The last unimplemented family in the CRUD surface. |
+| 2 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 3 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. The subset is now wide enough that the promise is not embarrassing. |
+| 4 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 5 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 6 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 7 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 8 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
 Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
@@ -239,7 +239,7 @@ priority table above.
 | 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25**, extended for the array operators and `aggregate<T>()` |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; `$`-operators still open |
-| 8 | ~~[`$regex`, `$type`, `$mod`](#8-remaining-query-operators)~~ | M | **DONE 2026-07-22** — `$expr`/`$bits*`/`$text` still open |
+| 8 | ~~[Remaining query operators](#8-remaining-query-operators)~~ | M | `$regex`/`$type`/`$mod` **DONE 2026-07-22**; `$expr` and `$bits*` **DONE 2026-07-26**; `$text` decided against, with the reason |
 | 9 | ~~[Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation)~~ | M | **DONE 2026-07-22** — named params for all values; statement caching still open |
 | 10 | ~~[Error normalisation](#10-normalise-errors-to-mongodb-shapes)~~ | S | **DONE 2026-07-25** — `MongoServerError` with `code: 11000`, dual-engine verified |
 | 11 | ~~[Collection naming](#11-fix-collection-naming-restrictions)~~ | S | **DONE 2026-07-25** — case-sensitive, quoted identifiers |
@@ -812,7 +812,54 @@ Notes for posterity:
   `json_quote(value)` and only matches real arrays. (`$all` still has the same
   scalar-field hazard — it feeds `json_each` an extracted value.)
 
-Still open below: `$expr`, `$bits*`, `$text`; `$where` is a documented won't-do.
+**`$expr` and the `$bits*` operators landed 2026-07-26**, dual-engine in
+[test/operators/expr-and-bitwise.spec.ts](test/operators/expr-and-bitwise.spec.ts).
+
+- **`$expr` is evaluated in JavaScript through a registered SQL function**
+  (`mdb_expr`), exactly as `$regex` uses `mdb_regexp`. The alternative was
+  compiling [src/expression.ts](src/expression.ts) to SQL, which would be a
+  second implementation of every rule in it — the same argument that keeps a
+  mid-pipeline `$match` going back through SQLite. It costs index eligibility
+  (`$expr` is a scan; narrow it with an indexed criterion in the same filter)
+  and it needs `supportsFunctions`, which item 24 already owes `$regex`.
+- **One divergence, and it is the platform's.** An expression that RAISES on a
+  document (`$multiply` over a string) makes that document not match, where a
+  real server fails the whole query. An exception thrown from a `db.function()`
+  callback is swallowed on the Node 22.13 floor and propagates on Node 26, so
+  raising would make one query behave two ways on two supported runtimes.
+  Structural mistakes are caught instead, at compile time, by
+  `assertKnownExpressionOperators` — so the common typo is an error everywhere.
+- **`$bits*` masks bind as a decimal STRING** and are `CAST` to INTEGER,
+  because bit 62 is already past `Number.MAX_SAFE_INTEGER`. They follow the
+  implicit-array rule and only test whole numbers, both verified against the
+  server.
+
+### `$text`: DECIDED 2026-07-26 — not implemented, and it says why
+
+**This is a decision, not a gap.** `$text` would need an FTS5 virtual table
+shadowing each collection, kept in step by triggers, plus `$meta: 'textScore'`
+for projection and sort. The build is a day's work. The problem is not the
+build:
+
+**It could not be verified.** MongoDB stems with Snowball, per language; FTS5
+offers `porter` (English only) or no stemming at all. Neither reproduces
+MongoDB's token set, so the same `$search` returns DIFFERENT DOCUMENTS on the
+two engines — not in an edge case, but generally. Every other feature in this
+library is checked against a real server (see item 23); `$text` would be the
+first that could not be, and the first whose divergence was unbounded rather
+than enumerable. `strict: true` would have to reject it always, which is a good
+signal that it does not belong in the subset.
+
+**What callers get instead**, and the error message names both: `$regex` for
+substring matching, and — new since [item 20](#20-a-raw-sql-escape-hatch) — an
+FTS5 table of their own through `db.sql`, where the tokenizer is their choice
+and no claim of MongoDB parity is being made on their behalf. That is a better
+answer than a search feature that silently disagrees with the thing it imitates.
+
+Revisit if MongoDB parity stops being the standard, or if someone wants
+FTS-backed search under a differently-named API that promises nothing about
+`$text`.
+
 Original analysis follows.
 
 - **`$regex`** — SQLite has no built-in `REGEXP`, but `node:sqlite` lets you register

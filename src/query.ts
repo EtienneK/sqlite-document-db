@@ -1,4 +1,5 @@
 import { encodeValue } from './ejson.js'
+import { assertKnownExpressionOperators } from './expression.js'
 
 export type QueryFilterDocument = Record<string, any>
 
@@ -165,7 +166,12 @@ const OPS = {
   // Array Query Operators
   $all: null,
   $elemMatch: null,
-  $size: null
+  $size: null,
+  // Bitwise Query Operators
+  $bitsAllSet: null,
+  $bitsAnySet: null,
+  $bitsAllClear: null,
+  $bitsAnyClear: null
 }
 const OPS_KEYS = Object.keys(OPS)
 
@@ -174,8 +180,27 @@ const OPS_KEYS = Object.keys(OPS)
  * to a key of a field's criterion object). `{ $gt: 5 }` or `{ $not: {...} }` at
  * that position is "unknown top level operator" on the server - and here it was
  * worse than an error: `$not` recursed into itself until the stack blew.
+ *
+ * `$expr` belongs here and NOT in `OPS`: it takes an aggregation expression
+ * rather than a field criterion, so `{ qty: { $expr: ... } }` has to stay the
+ * error it is on the server.
  */
-const TOP_LEVEL_OPS_KEYS = new Set(['$and', '$or', '$nor'])
+const TOP_LEVEL_OPS_KEYS = new Set(['$and', '$or', '$nor', '$expr'])
+
+/**
+ * Filter-document operators that are DECIDED against rather than merely absent,
+ * each with the reason and the thing to reach for instead. A caller who writes
+ * one of these is asking a real question, and "unknown top level operator" does
+ * not answer it.
+ */
+const REFUSED_TOP_LEVEL_OPS: Record<string, string> = {
+  $text: '$text is not supported: it needs a stemming full-text index, and SQLite\'s FTS5 stemmer ' +
+    'does not agree with MongoDB\'s, so the two would return different documents for the same query ' +
+    '- which is the one thing this library will not do quietly. Use $regex for substring matching, ' +
+    'or build an FTS5 table of your own through db.sql, where the tokenizer is your choice',
+  $where: '$where is not supported, and will not be: it executes arbitrary JavaScript against every ' +
+    'document. Use $expr, which covers the same comparisons without running code'
+}
 
 /**
  * Normalizes $regex input (a RegExp or a pattern string, optionally with a
@@ -395,8 +420,54 @@ export function elementCriterionSql (
 
 /** Operators that address a field's VALUE, and so follow the array-path rule. */
 const ARRAY_PATH_OPS = new Set([
-  '$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$regex', '$mod', '$type', '$exists', '$size', '$all', '$elemMatch'
+  '$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$regex', '$mod', '$type', '$exists', '$size', '$all', '$elemMatch',
+  '$bitsAllSet', '$bitsAnySet', '$bitsAllClear', '$bitsAnyClear'
 ])
+
+/**
+ * The bitmask a `$bits*` operator tests with, as a SIGNED 64-bit decimal string.
+ *
+ * A string, because that is the only way to get an exact 64-bit integer through
+ * a bound parameter: bit 62 is already past `Number.MAX_SAFE_INTEGER`, so a JS
+ * number would silently lose precision on the way in. SQLite parses the decimal
+ * text back into an exact INTEGER on the other side of `CAST`.
+ *
+ * Both of MongoDB's spellings are accepted: a bitmask number, or an array of
+ * bit POSITIONS. BinData is the third, and cannot be stored here at all.
+ */
+function bitMaskLiteral (op: string, value: unknown): string {
+  let mask: bigint
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || value < 0) {
+      throw Error(`${op} takes a non-negative whole number bitmask, or an array of bit positions; but got: ${value}`)
+    }
+    mask = BigInt(value)
+  } else if (Array.isArray(value)) {
+    mask = 0n
+    for (const position of value) {
+      if (typeof position !== 'number' || !Number.isInteger(position) || position < 0 || position > 63) {
+        throw Error(`${op} bit positions must be whole numbers from 0 to 63; but got: ${String(position)}`)
+      }
+      mask |= 1n << BigInt(position)
+    }
+  } else {
+    throw Error(`${op} takes a bitmask number or an array of bit positions; but got: ${typeof value}`)
+  }
+  // SQLite's INTEGER is signed, so bit 63 is the sign bit - asIntN gives the
+  // value SQLite will actually hold rather than one it would clamp.
+  return BigInt.asIntN(64, mask).toString()
+}
+
+/** The comparison each `$bits*` operator makes against `<value> & <mask>`. */
+function bitPredicate (op: string, valueExpr: string, maskExpr: string): string {
+  const masked = `(CAST(${valueExpr} AS INTEGER) & ${maskExpr})`
+  switch (op) {
+    case '$bitsAllSet': return `${masked} = ${maskExpr}`
+    case '$bitsAnySet': return `${masked} != 0`
+    case '$bitsAllClear': return `${masked} = 0`
+    default: return `${masked} != ${maskExpr}` // $bitsAnyClear
+  }
+}
 
 function convertOp (ctx: SqlContext, field: string, op: string, value: any): string {
   if (ctx.strict === true && field.includes('.') && ARRAY_PATH_OPS.has(op)) {
@@ -621,6 +692,37 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       })
       return `(${jsonType(ctx, field)} = 'array' AND EXISTS (select ${ELEMENT_WRAPPER} as ${alias} from json_each(${quoteIdentifier(ctx.col)}, ${toJson1PathString([field])}) where (${elemPred})))`
     }
+    // ---------------------- Bitwise Query Operators ----------------------
+    case '$bitsAllSet':
+    case '$bitsAnySet':
+    case '$bitsAllClear':
+    case '$bitsAnyClear': {
+      const mask = `CAST(${bindValue(ctx, bitMaskLiteral(op, value))} AS INTEGER)`
+      // Only whole numbers are testable. A value with a fractional part has no
+      // bits to speak of and never matches, which is MongoDB's rule too - and
+      // the guard also keeps text and JSON arrays away from the & operator,
+      // where SQLite would helpfully coerce them to 0.
+      const scalarPred = `${jsonType(ctx, field)} = 'integer' AND ${bitPredicate(op, extract(ctx, field), mask)}`
+      const elemPred = `json_each.type = 'integer' AND ${bitPredicate(op, 'value', mask)}`
+      return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
+    }
+    // ---------------------- $expr ----------------------
+    case '$expr': {
+      // $expr is evaluated in JavaScript, one document at a time, through a
+      // registered SQL function - the same shape $regex uses. The alternative
+      // was compiling the expression language to SQL, which would be a SECOND
+      // implementation of every rule in src/expression.ts (missing vs null,
+      // type errors, half-to-even rounding) and would drift from the first.
+      //
+      // Two consequences, both documented in the README: it cannot use an
+      // index, and it needs a driver with user-defined functions.
+      if ((ctx.elemMatchDepth ?? 0) > 0) throw Error('$expr is not allowed inside $elemMatch')
+      assertKnownExpressionOperators(value)
+      // Through the storage encoder, so a Date in the expression survives the
+      // trip and comes back as a Date rather than as a string.
+      const expression = bindValue(ctx, JSON.stringify(encodeValue(value)))
+      return `mdb_expr(${expression}, ${quoteIdentifier(ctx.col)}) = 1`
+    }
     case '$size': {
       // MongoDB requires a non-negative whole number, and only ever matches
       // arrays - json_array_length answers 0 for a scalar, so without the type
@@ -647,6 +749,8 @@ function convert (ctx: SqlContext, query: QueryFilterDocument): string {
     // are legal there. Anything else is a typo the server would reject, so
     // reject it too rather than searching for a field literally called '$gt'.
     if (field.startsWith('$') && !TOP_LEVEL_OPS_KEYS.has(field)) {
+      const refused = REFUSED_TOP_LEVEL_OPS[field]
+      if (refused !== undefined) throw Error(refused)
       throw Error(`unknown top level operator: ${field} (expected a field name, or one of ${[...TOP_LEVEL_OPS_KEYS].join(', ')})`)
     }
     const opEqualsField = TOP_LEVEL_OPS_KEYS.has(field)

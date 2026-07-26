@@ -169,8 +169,13 @@ function isNullish (value: unknown): boolean {
   return value === null || value === undefined
 }
 
-/** MongoDB's truthiness: false, null, missing and 0 are false; everything else is true. */
-function truthy (value: unknown): boolean {
+/**
+ * MongoDB's truthiness: false, null, missing and 0 are false; everything else
+ * is true - including the empty string and the empty array.
+ *
+ * Exported because `$expr` decides whether a document matches by it.
+ */
+export function isTruthy (value: unknown): boolean {
   return !(value === false || value === null || value === undefined || value === 0)
 }
 
@@ -313,9 +318,9 @@ const OPERATORS: Record<string, Operator> = {
 
   // --- Boolean ------------------------------------------------------------
 
-  $and: (raw, ctx) => (Array.isArray(raw) ? raw : [raw]).every(element => truthy(evaluate(element, ctx))),
-  $or: (raw, ctx) => (Array.isArray(raw) ? raw : [raw]).some(element => truthy(evaluate(element, ctx))),
-  $not: (raw, ctx) => !truthy(args('$not', raw, ctx, 1)[0]),
+  $and: (raw, ctx) => (Array.isArray(raw) ? raw : [raw]).every(element => isTruthy(evaluate(element, ctx))),
+  $or: (raw, ctx) => (Array.isArray(raw) ? raw : [raw]).some(element => isTruthy(evaluate(element, ctx))),
+  $not: (raw, ctx) => !isTruthy(args('$not', raw, ctx, 1)[0]),
 
   // --- Conditional --------------------------------------------------------
 
@@ -323,13 +328,13 @@ const OPERATORS: Record<string, Operator> = {
   $cond: (raw, ctx) => {
     if (Array.isArray(raw)) {
       if (raw.length !== 3) throw Error(`$cond takes exactly 3 arguments, but ${raw.length} were given`)
-      return evaluate(truthy(evaluate(raw[0], ctx)) ? raw[1] : raw[2], ctx)
+      return evaluate(isTruthy(evaluate(raw[0], ctx)) ? raw[1] : raw[2], ctx)
     }
     const spec = options('$cond', raw, ['if', 'then', 'else'])
     for (const key of ['if', 'then', 'else']) {
       if (!Object.hasOwn(spec, key)) throw Error(`$cond requires '${key}'`)
     }
-    return evaluate(truthy(evaluate(spec.if, ctx)) ? spec.then : spec.else, ctx)
+    return evaluate(isTruthy(evaluate(spec.if, ctx)) ? spec.then : spec.else, ctx)
   },
 
   /** The first argument that is neither null nor missing, else the last. */
@@ -351,7 +356,7 @@ const OPERATORS: Record<string, Operator> = {
     }
     for (const branch of branches) {
       const { case: condition, then } = options('a $switch branch', branch, ['case', 'then'])
-      if (truthy(evaluate(condition, ctx))) return evaluate(then, ctx)
+      if (isTruthy(evaluate(condition, ctx))) return evaluate(then, ctx)
     }
     if (!Object.hasOwn(spec, 'default')) {
       throw Error('$switch could not find a matching branch and no default was given')
@@ -523,7 +528,7 @@ const OPERATORS: Record<string, Operator> = {
     const kept: unknown[] = []
     for (const element of asArray('$filter', input)) {
       if (kept.length >= limit) break
-      if (truthy(evaluate(spec.cond, { ...ctx, vars: { ...ctx.vars, [name]: element } }))) kept.push(element)
+      if (isTruthy(evaluate(spec.cond, { ...ctx, vars: { ...ctx.vars, [name]: element } }))) kept.push(element)
     }
     return kept
   },
@@ -615,6 +620,41 @@ const OPERATORS: Record<string, Operator> = {
 
 /** Operator names this module implements, for error messages and validation. */
 export const EXPRESSION_OPERATORS = ['$literal', ...Object.keys(OPERATORS)].toSorted()
+
+/**
+ * Rejects an unknown `$`-operator anywhere in an expression, WITHOUT evaluating
+ * it.
+ *
+ * `$expr` compiles to a SQL function that runs per row (see src/query.ts), and
+ * an error thrown inside a `db.function()` callback is swallowed on the Node
+ * 22.13 floor this package supports - so a typo like `{ $gtt: [...] }` would
+ * quietly match nothing on one supported Node and throw on another. Checking
+ * the structure once, at compile time, is what makes the common mistake an
+ * error everywhere.
+ *
+ * It is a structural check only. Evaluating a sample document instead would
+ * raise on expressions that are perfectly valid ({ $switch } with no default
+ * and no matching branch), which is worse than not checking.
+ */
+export function assertKnownExpressionOperators (expression: unknown): void {
+  if (Array.isArray(expression)) {
+    for (const element of expression) assertKnownExpressionOperators(element)
+    return
+  }
+  if (expression === null || typeof expression !== 'object' || expression instanceof Date) return
+
+  for (const [key, value] of Object.entries(expression as Document)) {
+    if (!key.startsWith('$')) {
+      assertKnownExpressionOperators(value)
+      continue
+    }
+    if (!EXPRESSION_OPERATORS.includes(key)) {
+      throw Error(`unsupported aggregation expression operator: ${key}`)
+    }
+    // $literal's argument is data, not an expression, so it is not walked.
+    if (key !== '$literal') assertKnownExpressionOperators(value)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Shared operator bodies

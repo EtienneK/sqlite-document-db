@@ -34,8 +34,8 @@ await users.find({ tags: 'admin' }).toArray()
   than the code. The rules nobody would guess right get copied from the server
   instead of invented — what `$pull` does with a document criterion, whether
   `$addToSet` counts `1` and `true` as equal, what an upsert seeds a new
-  document with, how `$ne` behaves against an array field. That is **796 tests
-  across 38 spec files**, nearly all of them matched pairs, and it is what turns
+  document with, how `$ne` behaves against an array field. That is **925 tests
+  across 41 spec files**, nearly all of them matched pairs, and it is what turns
   "MongoDB-like" from a description into something that fails a build. Where the
   two are known to differ, [`strict: true`](#strict-mode) turns the difference
   into an error instead of a surprise.
@@ -315,6 +315,47 @@ db.collection('items').find({ qty: { $type: ['int', 'string'] } })
 
 `$regex` runs JavaScript `RegExp` inside SQLite (via a registered SQL function),
 so JS regex syntax applies. MongoDB's `x` (extended) option is not supported.
+
+### Compare two fields with `$expr`
+
+`$expr` puts an [aggregation expression](#aggregate) in a filter, which is the
+way to compare two fields of the same document:
+
+```javascript
+await db.collection('accounts').find({ $expr: { $gt: ['$spent', '$budget'] } }).toArray()
+await db.collection('orders').find({
+  $expr: { $gte: [{ $multiply: ['$qty', '$price'] }, 100] }
+}).toArray()
+```
+
+It works anywhere a filter does — `find`, `countDocuments`, `deleteMany`, a
+pipeline `$match` — and composes with `$and`/`$or` and ordinary field criteria.
+Three things to know:
+
+- **It cannot use an index.** The expression is evaluated per candidate row, so
+  `$expr` is a scan. Narrow it with an indexed criterion in the same filter
+  (`{ status: 'open', $expr: … }`) and the index still does its half.
+- **An unknown operator is an error**, checked before the query runs — a typo
+  fails rather than matching nothing.
+- **A document the expression cannot evaluate does not match**, where a real
+  server fails the whole query. `{ $expr: { $gt: [{ $multiply: ['$qty', 2] }, 5] } }`
+  over a document whose `qty` is a string skips that document here. The
+  difference is not a choice: `$expr` runs as a registered SQL function, and an
+  exception thrown inside one is swallowed on Node 22.13 and propagates on Node
+  26, so raising would make one query behave two ways on two supported runtimes.
+
+### Match on bits
+
+```javascript
+db.collection('perms').find({ flags: { $bitsAllSet: 0b1010 } })  // a bitmask...
+db.collection('perms').find({ flags: { $bitsAnySet: [1, 3] } })  // ...or bit positions
+db.collection('perms').find({ flags: { $bitsAllClear: 0b0100 } })
+db.collection('perms').find({ flags: { $bitsAnyClear: 0b1111 } })
+```
+
+Only whole numbers are tested — a value with a fractional part, a string or a
+missing field never matches — and the implicit-array rule applies, so a field
+holding `[1, 8]` matches when one of its elements does.
 
 ### Update documents
 
@@ -686,7 +727,8 @@ the call site instead of in a wrong result.
 
 Query operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 `$not` `$nor` `$exists` `$type` `$regex` (with `$options`) `$mod` `$all`
-`$elemMatch` `$size`.
+`$elemMatch` `$size` `$expr` `$bitsAllSet` `$bitsAnySet` `$bitsAllClear`
+`$bitsAnyClear`.
 
 Update operators: `$set` `$unset` `$inc` `$mul` `$min` `$max` `$rename`
 `$setOnInsert` `$push` (with `$each`, `$slice`, `$sort`) `$addToSet` (with
@@ -804,9 +846,13 @@ how each piece would be implemented. The headlines:
 **Querying**
 
 - Projection `$`-operators: `$slice`, `$elemMatch`, `$` positional
-- Remaining [Evaluation Query Operators](https://www.mongodb.com/docs/manual/reference/operator/query-evaluation/) —
-  `$expr`, `$text`, and the `$bits*` operators. `$where` will **not** be supported
-  (it executes arbitrary JavaScript).
+- `$text`. It needs a stemming full-text index, and SQLite's FTS5 stemmer does
+  not agree with MongoDB's — the same query would return different documents on
+  the two, which is the one thing this library will not do quietly. Use
+  `$regex`, or build an FTS5 table of your own through [`db.sql`](#raw-sql),
+  where the tokenizer is your choice. The error says so.
+- `$where` will **not** be supported (it executes arbitrary JavaScript). `$expr`
+  covers the same comparisons without running code.
 
 **Updating**
 

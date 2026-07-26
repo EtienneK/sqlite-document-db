@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`$expr`**, which puts an aggregation expression in a filter — the way to
+  compare two fields of the same document
+  (`{ $expr: { $gt: ['$spent', '$budget'] } }`). It works anywhere a filter
+  does and composes with `$and`/`$or` and ordinary criteria. It cannot use an
+  index, and a document the expression cannot evaluate does not match (where a
+  real server fails the query) — both documented in the README.
+- **The bitwise query operators** `$bitsAllSet`, `$bitsAnySet`, `$bitsAllClear`
+  and `$bitsAnyClear`, taking either a bitmask or an array of bit positions.
+  Masks are exact to 64 bits, past what a JavaScript number holds.
+- **A reason instead of "unknown operator" for `$text` and `$where`.** Both are
+  decisions rather than gaps, and the error now says why and what to use
+  instead — `$regex` or a caller-owned FTS5 table via `db.sql` for `$text`,
+  `$expr` for `$where`.
 - **The aggregation expression operators.** Arithmetic (`$add`, `$multiply`,
   `$round`, …), comparison, boolean, conditional (`$cond`, `$ifNull`,
   `$switch`), string (`$concat`, `$toUpper`, `$split`, `$trim`, `$replaceAll`,

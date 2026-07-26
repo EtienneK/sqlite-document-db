@@ -150,7 +150,33 @@ delegating also inherits implicit array matching, Dates and index eligibility.
 used to recurse forever) and criterion position (`{ qty: { $gtt: 5 } }` — which
 used to become an equality match against that object and return nothing). If you
 add an operator, add it to `OPS`, and add it to `TOP_LEVEL_OPS_KEYS` only if
-MongoDB accepts it as a filter-document key.
+MongoDB accepts it as a filter-document key. `REFUSED_TOP_LEVEL_OPS` is for the
+ones that are DECISIONS rather than gaps (`$text`, `$where`): they answer with
+the reason and the alternative instead of "unknown top level operator".
+
+**Non-obvious detail — `$expr` runs in JavaScript, through a SQL function.**
+It compiles to `mdb_expr(<expression json>, data)`, registered in index.ts
+exactly like `$regex`'s `mdb_regexp`. The alternative — compiling
+[src/expression.ts](src/expression.ts) to SQL — would be a SECOND
+implementation of every rule in that file (missing vs null, type errors,
+half-to-even rounding) and would drift from the first. Consequences: `$expr`
+cannot use an index, and it needs a driver with `supportsFunctions`.
+
+**Non-obvious detail — an evaluation error inside `$expr` is caught and means
+"no match".** MongoDB fails the whole query instead. This is not a preference:
+an exception thrown from a `db.function()` callback is SWALLOWED on the Node
+22.13 floor and propagates on Node 26 (the same trap the update guards hit), so
+letting it out would make one query behave two ways on two supported runtimes.
+What CAN be checked everywhere is the STRUCTURE, so
+`assertKnownExpressionOperators` validates operator names at compile time —
+that is what makes the common typo an error. Do not "improve" this by throwing
+from the callback.
+
+**Non-obvious detail — a `$bits*` mask is bound as a decimal STRING** and
+`CAST(… AS INTEGER)` on the way in. Bit 62 is already past
+`Number.MAX_SAFE_INTEGER`, so a JS number would silently lose precision; SQLite
+parses the text into an exact 64-bit integer. `BigInt.asIntN(64, …)` is what
+makes bit 63 the sign bit rather than a value SQLite would clamp.
 
 **Non-obvious detail — dotted paths cross arrays.** MongoDB descends into an
 array at EVERY level of a path, so `{ 'instock.qty': 5 }` must match an element

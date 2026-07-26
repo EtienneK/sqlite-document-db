@@ -134,10 +134,14 @@ describe('driver seam', () => {
       expect(await items.countDocuments({ s: 'alpha' })).toStrictEqual(1)
       expect(await items.countDocuments({ _id: { $gt: 1 } })).toStrictEqual(1)
 
-      // $regex compiles to the function that was never registered. It fails
-      // LOUDLY rather than returning a wrong answer - and closing this gap with
-      // a JavaScript post-filter is the remaining work in BACKLOG item 24.
+      // $regex and $expr both compile to functions that were never registered.
+      // They fail LOUDLY rather than returning a wrong answer - and closing
+      // this gap with a JavaScript post-filter is the remaining work in
+      // BACKLOG item 24.
       await expect(items.countDocuments({ s: { $regex: '^al' } })).rejects.toThrow(/mdb_regexp/)
+      await expect(items.countDocuments({ $expr: { $eq: ['$_id', 1] } })).rejects.toThrow(/mdb_expr/)
+      // Everything that compiles to plain SQL still works, including $bits*.
+      expect(await items.countDocuments({ _id: { $bitsAllSet: 0b1 } })).toStrictEqual(1)
       await db.close()
     })
   })

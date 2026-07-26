@@ -40,4 +40,32 @@ console.log('$regex   ', await names({ item: /^p/ }))
 console.log('$regex i ', await names({ item: { $regex: '^P', $options: 'i' } }))
 console.log('$mod     ', await names({ qty: { $mod: [25, 0] } }))
 
+// $expr puts an aggregation expression in a filter, which is the way to
+// compare two fields of the SAME document - no ordinary criterion can.
+console.log('$expr    ', await names({ $expr: { $gt: ['$qty', { $multiply: ['$size.h', 5] }] } }))
+// It composes with ordinary criteria - and since $expr itself cannot use an
+// index, pairing it with one that can is how you keep the scan small.
+console.log('$expr+eq ', await names({ status: 'A', $expr: { $gte: ['$qty', { $multiply: ['$size.h', 5] }] } }))
+
+// Bitwise: a bitmask, or the bit positions.
+await db.collection('perms').insertMany([
+  { who: 'ann', flags: 0b1010 },
+  { who: 'bob', flags: 0b0101 },
+  { who: 'cid', flags: 0b1111 }
+])
+const holders = async filter =>
+  (await db.collection('perms').find(filter).toArray()).map(d => d.who)
+console.log('$bitsAllSet  ', await holders({ flags: { $bitsAllSet: 0b1010 } }))
+console.log('$bitsAnySet  ', await holders({ flags: { $bitsAnySet: [0] } }))
+console.log('$bitsAllClear', await holders({ flags: { $bitsAllClear: 0b0101 } }))
+
+// $text and $where are refused, and the error says why and what to use instead.
+for (const refused of [{ $text: { $search: 'paper' } }, { $where: 'this.qty > 1' }]) {
+  try {
+    await names(refused)
+  } catch (error) {
+    console.log('refused  ', error.message.slice(0, 68) + '...')
+  }
+}
+
 await db.close()

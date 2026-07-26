@@ -109,6 +109,11 @@ export interface FilterOperators<TValue> {
   $elemMatch?: Document
   $size?: number
   $not?: FilterOperators<TValue> | RegExp
+  /** A bitmask, or an array of bit positions. */
+  $bitsAllSet?: number | readonly number[]
+  $bitsAnySet?: number | readonly number[]
+  $bitsAllClear?: number | readonly number[]
+  $bitsAnyClear?: number | readonly number[]
 }
 
 /** A filter's value for one field: a literal to match, or operators. */
@@ -119,6 +124,13 @@ export interface RootFilterOperators<TSchema> {
   $and?: ReadonlyArray<Filter<TSchema>>
   $or?: ReadonlyArray<Filter<TSchema>>
   $nor?: ReadonlyArray<Filter<TSchema>>
+  /**
+   * An aggregation expression used as a filter - the way to compare two fields
+   * of the same document. Deliberately typed loosely: the expression language
+   * is a second grammar (see src/expression.ts), and a half-typed version of it
+   * would promise more than it checks.
+   */
+  $expr?: Document
 }
 
 /**

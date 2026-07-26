@@ -69,8 +69,17 @@ describe('Filter<TSchema>', () => {
     await col.find({ qty: { $gtt: 1 } }).toArray()
     // @ts-expect-error - $where is deliberately not supported
     await col.find({ $where: 'this.qty > 1' }).toArray()
-    // @ts-expect-error - $expr is not implemented
+  })
+
+  it('accepts the operators that ARE implemented', async () => {
+    // $expr takes an aggregation expression, which is a second grammar - typed
+    // loosely on purpose, because a half-typed version of it would promise
+    // more than it checks.
     await col.find({ $expr: { $gt: ['$qty', 1] } }).toArray()
+    await col.find({ qty: { $bitsAllSet: 0b101 } }).toArray()
+    await col.find({ qty: { $bitsAnyClear: [0, 2] } }).toArray()
+    // @ts-expect-error - a bitmask is a number or an array of bit positions
+    await col.find({ qty: { $bitsAllSet: 'nope' } }).toArray()
   })
 
   it('types dot-notation paths against the nested schema', async () => {
