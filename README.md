@@ -25,6 +25,20 @@ await users.find({ tags: 'admin' }).toArray()
 
 ## Why it exists
 
+- **Every behaviour is checked against a real MongoDB, not read off the docs.**
+  This is the reason to believe a compatibility claim from a subset
+  implementation, so it comes first. Each spec runs its assertions **twice** —
+  once against this library and once against a MongoDB booted in-process — with
+  the same expectation on both. **MongoDB is the oracle**: when an expectation
+  is wrong, the MongoDB half fails too, which says the *test* is wrong rather
+  than the code. The rules nobody would guess right get copied from the server
+  instead of invented — what `$pull` does with a document criterion, whether
+  `$addToSet` counts `1` and `true` as equal, what an upsert seeds a new
+  document with, how `$ne` behaves against an array field. That is **796 tests
+  across 38 spec files**, nearly all of them matched pairs, and it is what turns
+  "MongoDB-like" from a description into something that fails a build. Where the
+  two are known to differ, [`strict: true`](#strict-mode) turns the difference
+  into an error instead of a surprise.
 - **Queries run in the database, not in JavaScript.** Filter objects are
   compiled into SQLite [JSON functions](https://www.sqlite.org/json1.html), so
   `find({ qty: { $gt: 25 } })` becomes a `WHERE` clause that a real index can
@@ -33,11 +47,6 @@ await users.find({ tags: 'admin' }).toArray()
 - **Zero runtime dependencies.** It uses Node's built-in
   [`node:sqlite`](https://nodejs.org/api/sqlite.html): nothing to compile, no
   prebuilt binaries, no `node-gyp`. It runs unchanged on Deno.
-- **Behaviour is checked against a real MongoDB.** Every assertion in the test
-  suite runs twice — once against this library and once against a MongoDB
-  booted in-process — so the semantics are copied rather than guessed. Where
-  the two are known to differ, [`strict: true`](#strict-mode) turns the
-  difference into an error instead of a surprise.
 
 ## Is this the right tool?
 
@@ -560,10 +569,34 @@ npm run lint
 npm run build
 ```
 
-The test suite is the interesting part: each assertion runs twice, once against
-`sqlite-document-db` and once against a real MongoDB booted in-memory, so
-MongoDB itself acts as the oracle for correct behaviour. Running the tests
-therefore downloads a `mongod` binary the first time.
+The test suite is the interesting part, and the reason the compatibility claim
+at the top of this file is worth anything: each assertion runs twice, once
+against `sqlite-document-db` and once against a real MongoDB booted in-memory,
+so MongoDB itself is the oracle for correct behaviour. A spec looks like this:
+
+```javascript
+for (const dbName of ['Sqlite', 'Mongodb']) {
+  const db = () => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
+
+  it('matches an array element', async () => {
+    expect((await db().collection('t').findOne({ tags: 'B' }))?._id).toStrictEqual(1)
+  })
+}
+```
+
+Because the expectation is shared, a **wrong** expectation fails the `Mongodb`
+half — which immediately says the test is wrong rather than the implementation.
+One mongod is booted for the whole run and each spec file gets its own database
+on it, so the suite finishes in about four seconds; the first run downloads a
+`mongod` binary.
+
+Two things this catches that a hand-written expectation would not: the exact
+semantics of operators nobody remembers correctly (`$pull` with a criterion
+document, `$mul` on a missing field, what an upsert inserts), and divergences in
+places nobody thinks to look — string sort order outside the Basic Multilingual
+Plane was wrong until [test/unicode.spec.ts](test/unicode.spec.ts) asked the
+server. Divergences that cannot be fixed are enforced instead, by
+[`strict: true`](#strict-mode).
 
 ## Missing Features
 

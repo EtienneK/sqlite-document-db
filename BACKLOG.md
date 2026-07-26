@@ -181,18 +181,17 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Lead with oracle verification](#23-lead-with-oracle-verification) | XS | A README edit. The one property no competitor has cheaply reproduced is currently the third bullet in a list. |
-| 2 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | "You are on SQLite" is the pitch, and there is no way to use SQLite. The moment a caller needs a CTE or a window function their only option is a second connection to the same file. |
-| 3 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
-| 4 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 5 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 6 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 7 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 3-4 first, or the promise is embarrassing. |
-| 8 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 9 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 3 first, since its point is running an expression per input document. |
-| 10 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 11 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 12 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | "You are on SQLite" is the pitch, and there is no way to use SQLite. The moment a caller needs a CTE or a window function their only option is a second connection to the same file. |
+| 2 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
+| 3 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 4 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 5 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 6 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 2-3 first, or the promise is embarrassing. |
+| 7 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 8 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 2 first, since its point is running an expression per input document. |
+| 9 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 10 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 11 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
 Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
@@ -257,7 +256,7 @@ priority table above.
 | 20 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | Open — decide decoded vs raw rows, and read-only vs writable |
 | 21 | [Optimistic concurrency](#21-optimistic-concurrency) | L | Open — **decide first**; option 2 (document the pure-MongoDB pattern) is likely |
 | 22 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Open — wants a wider subset first |
-| 23 | [Lead with oracle verification](#23-lead-with-oracle-verification) | XS | Open — README edit |
+| 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
@@ -1436,7 +1435,17 @@ operators, `$expr`) land.
 
 ## 23. Lead with oracle verification
 
-**Size: XS.** The README lists "checked against a real MongoDB" third, in a
+**Size: XS — DONE 2026-07-26.** It is the FIRST bullet under "Why it exists"
+now, and says what it means mechanically: each spec runs its assertions twice,
+MongoDB is the oracle, and a wrong expectation fails the MongoDB half too - so
+the failure says the test is wrong rather than the code. Carries the count (796
+tests across 38 spec files) and names the kind of rule it exists to copy rather
+than invent. The Development section gained the four-line shape of a dual-engine
+spec and the two things it catches that a hand-written expectation would not,
+with the Unicode sort-order divergence as the worked example. Original analysis
+follows.
+
+The README lists "checked against a real MongoDB" third, in a
 bullet under "Why it exists". The competitive review makes it clear this is the
 single hardest property for anyone else to reproduce - the nearest competitor
 tests against its own shim - and it is the reason to trust a compatibility
