@@ -1354,20 +1354,20 @@ have the measurements behind both halves.
   [Transactions](#transactions) and
   [Sessions](#sessions-and-the-one-thing-they-cannot-do).)
 
-**Binary data and GridFS** — not implemented, and the two are one gap. Every
-non-JSON type except `Date` is rejected at write time, `Uint8Array` included, so
-there is currently no way to store bytes through this library at all — not as a
-document field and not through `db.sql`, whose `${}` interpolation binds strings,
-numbers, booleans, `null`, `Date`s and objects but not blobs.
+**Binary data in documents, and GridFS** — not implemented yet. Every non-JSON
+type except `Date` is rejected at write time, `Uint8Array` included, so a
+document field cannot hold bytes. What *does* exist is the escape hatch:
+[`db.sql`](#raw-sql) binds and returns `Uint8Array`, so files can live in a
+`BLOB` table of your own on the same connection, transactionally, next to the
+documents that reference them.
 
 GridFS itself needs nothing from a server — it is a convention over two ordinary
 collections — so it is a plausible feature rather than a refused one, gated on
-binary support landing first. Note that the problem it solves is not one this
-library has: there is **no 16MB document cap** here (see
+`$binary` document support landing first. Note that the problem it solves is not
+one this library has: there is **no 16MB document cap** here (see
 [Document limits](#document-limits) above), so its value would be compatibility
 for code already written against `GridFSBucket`. BACKLOG.md item 35 has the
-measurements and the build order. Until then, large binary payloads want a
-separate SQLite connection of your own.
+measurements and the build order.
 
 ## Thanks
 
