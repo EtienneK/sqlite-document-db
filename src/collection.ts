@@ -8,8 +8,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { DatabaseSync } from 'node:sqlite'
 import { compileStages, splitPipeline } from './aggregate.js'
+import type { Driver, DriverStatement } from './driver.js'
 import { compareBson } from './bson-order.js'
 // Documents round-trip through the EJSON layer, not plain JSON: Dates are
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
@@ -125,31 +125,31 @@ const REGISTRY_TABLE = '_sdb_collections'
 /** Prefixes `tableNameFor` can produce, and nothing else in the schema uses. */
 const COLLECTION_TABLE_PREFIXES = ['collection_', 'collectionx_']
 
-function ensureRegistry (db: DatabaseSync): void {
+function ensureRegistry (db: Driver): void {
   db.exec(`CREATE TABLE IF NOT EXISTS ${quoteIdentifier(REGISTRY_TABLE)} (tbl TEXT PRIMARY KEY, name TEXT NOT NULL)`)
 }
 
 /** Records that `table` holds the collection called `name`. */
-function registerCollection (db: DatabaseSync, table: string, name: string): void {
+function registerCollection (db: Driver, table: string, name: string): void {
   ensureRegistry(db)
-  db.prepare(`INSERT OR REPLACE INTO ${quoteIdentifier(REGISTRY_TABLE)} (tbl, name) VALUES (?, ?)`).run(table, name)
+  db.prepare(`INSERT OR REPLACE INTO ${quoteIdentifier(REGISTRY_TABLE)} (tbl, name) VALUES (?, ?)`).run([table, name])
 }
 
 /** Forgets `table`, so a dropped collection stops being listed. */
-export function unregisterCollection (db: DatabaseSync, table: string): void {
+export function unregisterCollection (db: Driver, table: string): void {
   ensureRegistry(db)
-  db.prepare(`DELETE FROM ${quoteIdentifier(REGISTRY_TABLE)} WHERE tbl = ?`).run(table)
+  db.prepare(`DELETE FROM ${quoteIdentifier(REGISTRY_TABLE)} WHERE tbl = ?`).run([table])
 }
 
 /** Every physical table backing a collection. */
-export function collectionTables (db: DatabaseSync): string[] {
+export function collectionTables (db: Driver): string[] {
   const rows = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
   return rows.map(row => row.name)
     .filter(name => COLLECTION_TABLE_PREFIXES.some(prefix => name.startsWith(prefix)))
 }
 
 /** The collection names in this database, in the order SQLite lists their tables. */
-export function collectionNames (db: DatabaseSync): string[] {
+export function collectionNames (db: Driver): string[] {
   ensureRegistry(db)
   const registered = new Map<string, string>()
   for (const row of db.prepare(`SELECT tbl, name FROM ${quoteIdentifier(REGISTRY_TABLE)}`).all() as Array<{ tbl: string, name: string }>) {
@@ -168,7 +168,7 @@ export function collectionNames (db: DatabaseSync): string[] {
 }
 
 /** Removes the registry itself - for dropDatabase, which leaves nothing behind. */
-export function dropRegistry (db: DatabaseSync): void {
+export function dropRegistry (db: Driver): void {
   db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(REGISTRY_TABLE)}`)
 }
 
@@ -176,7 +176,7 @@ export class Collection<TSchema extends Document = Document> {
   /** The name this collection was opened with, as the MongoDB driver exposes it. */
   readonly collectionName: string
 
-  private readonly db: DatabaseSync
+  private readonly db: Driver
   private readonly dbOptions: DbOptions
   /** Physical table name, unquoted - for sqlite_master lookups and index names. */
   private readonly name: string
@@ -187,7 +187,7 @@ export class Collection<TSchema extends Document = Document> {
   /** Evicts this collection from its `Db`'s cache. See drop(). */
   private readonly onDrop: () => void
 
-  constructor (name: string, db: DatabaseSync, dbOptions: DbOptions, onDrop: () => void = () => {}) {
+  constructor (name: string, db: Driver, dbOptions: DbOptions, onDrop: () => void = () => {}) {
     assertValidCollectionName(name)
 
     this.db = db
@@ -214,7 +214,7 @@ export class Collection<TSchema extends Document = Document> {
     }
   }
 
-  private prepare (sql: string): ReturnType<DatabaseSync['prepare']> {
+  private prepare (sql: string): DriverStatement {
     if (this.dbOptions.debug) console.log(sql)
     return this.db.prepare(sql)
   }
@@ -521,7 +521,7 @@ export class Collection<TSchema extends Document = Document> {
     this.exec(`CREATE TEMP TABLE ${table} (data JSON)`)
     try {
       const insert = this.prepare(`INSERT INTO ${table} VALUES(json(?))`)
-      for (const doc of docs) insert.run(stringifyDocument(doc))
+      for (const doc of docs) insert.run([stringifyDocument(doc)])
       const compiled = toSql('data', filter, { ...this.compileOptions, table })
       const rows = this.prepare(`SELECT data FROM ${table} WHERE (${compiled.sql}) ORDER BY rowid`)
         .all(compiled.params) as Array<{ data: string }>
@@ -598,7 +598,7 @@ export class Collection<TSchema extends Document = Document> {
   /** Drops an index by the name createIndex returned. Throws if it does not exist. */
   async dropIndex (name: string): Promise<void> {
     const physical = `ix_${this.name}_${name}`
-    const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get(physical)
+    const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get([physical])
     if (found === undefined) throw Error(`index not found with name [${name}]`)
     this.exec(`DROP INDEX ${quoteIdentifier(physical)}`)
     this.exec(`DROP INDEX IF EXISTS ${quoteIdentifier(`ixd_${this.name}_${name}`)}`)
@@ -608,7 +608,7 @@ export class Collection<TSchema extends Document = Document> {
   async indexes (): Promise<IndexDescription[]> {
     const rows = this.db.prepare(
       "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? ORDER BY name"
-    ).all(this.name) as Array<{ name: string, sql: string | null }>
+    ).all([this.name]) as Array<{ name: string, sql: string | null }>
 
     const descriptions: IndexDescription[] = [
       { name: '_id_', key: { _id: 1 }, unique: true } // the index the constructor creates
@@ -1055,7 +1055,7 @@ export class Collection<TSchema extends Document = Document> {
         const id = (doc._id == null) ? objectIdHexString() : doc._id;
         (doc as unknown as WithId<TSchema>)._id = id
         try {
-          stmt.run(stringifyDocument({ _id: id, ...doc }))
+          stmt.run([stringifyDocument({ _id: id, ...doc })])
         } catch (error) {
           throw this.mapError(error)
         }
@@ -1100,7 +1100,7 @@ export class Collection<TSchema extends Document = Document> {
         const id = (doc._id == null) ? objectIdHexString() : doc._id;
         (doc as unknown as WithId<TSchema>)._id = id
         try {
-          stmt.run(stringifyDocument({ _id: id, ...doc }))
+          stmt.run([stringifyDocument({ _id: id, ...doc })])
         } catch (error) {
           throw this.mapError(error)
         }

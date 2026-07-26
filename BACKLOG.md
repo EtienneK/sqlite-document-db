@@ -181,14 +181,27 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString` and friends. Only field paths, literals and `$literal` exist, and now that `$lookup` has landed this is the pipeline's ceiling. |
-| 2 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 3 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 4 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. All rejected loudly today, so nobody is silently wrong. |
-| 5 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Rejected by name today. Wants item 1 first, since its whole point is running an expression per input document. |
-| 6 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until it is exhausted, so this is a lifetime problem rather than a lookup one. |
-| 7 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 8 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Unicode round-trips](#19-unicode-and-special-character-round-trips) | S | **A real hole, found by looking at a competitor's tests.** There is no non-ASCII anywhere in this suite, in a library that stores JSON as SQLite text. Cheapest item here and it covers where a silent corruption would actually live. |
+| 2 | [Lead with oracle verification](#23-lead-with-oracle-verification) | XS | A README edit. The one property no competitor has cheaply reproduced is currently the third bullet in a list. |
+| 3 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | "You are on SQLite" is the pitch, and there is no way to use SQLite. The moment a caller needs a CTE or a window function their only option is a second connection to the same file. |
+| 4 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
+| 5 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 6 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 7 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 8 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 4-5 first, or the promise is embarrassing. |
+| 9 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 10 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 4 first, since its point is running an expression per input document. |
+| 11 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 12 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 13 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is decided against. |
+
+Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
+The review's own conclusion is worth keeping in view: this library leads on
+almost every axis that can be counted (19 query operators to 11, 13 update
+operators to 4, an aggregation pipeline to none, zero dependencies to seven) and
+the gaps are in **tooling and escape hatches**, not in the compiler. Two of the
+five items above are documentation.
 
 **Transactions, `$lookup` and the rest of the API surface landed 2026-07-26**,
 which closes the last correctness gap: multi-document atomicity is now
@@ -241,6 +254,12 @@ priority table above.
 | 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common shapes + `$lookup` DONE 2026-07-26** — expression operators and the exotic stages still open |
 | 17 | [Smaller items](#17-smaller-items-and-nice-to-haves) | S each | Benchmarks, `_id` types, depth limits, concurrency docs **DONE**; statement cache and TypeDoc open |
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
+| 19 | [Unicode round-trips](#19-unicode-and-special-character-round-trips) | S | Open — no non-ASCII coverage anywhere in the suite |
+| 20 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | Open — decide decoded vs raw rows, and read-only vs writable |
+| 21 | [Optimistic concurrency](#21-optimistic-concurrency) | L | Open — **decide first**; option 2 (document the pure-MongoDB pattern) is likely |
+| 22 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Open — wants a wider subset first |
+| 23 | [Lead with oracle verification](#23-lead-with-oracle-verification) | XS | Open — README edit |
+| 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
 format); items 5b, 15, 16 and 18 depend on
@@ -1214,3 +1233,404 @@ that the list of known divergences is enforced rather than merely written down.
 Each spec asserts BOTH halves: that the lenient default still behaves as
 documented, and that strict rejects. A check that fires on something the lenient
 path never got wrong would be noise.
+
+---
+
+## Competitive review 2026-07-26: Pongo
+
+[Pongo](https://github.com/event-driven-io/Pongo) is the closest competitor —
+a MongoDB-style API over SQL. Its README says "Mongo on Postgres", which
+undersells it: the repo carries **three** storage backends (PostgreSQL, sqlite3
+and Cloudflare D1), so it competes on our own ground. It is a monorepo where
+`pongo` (the Mongo API) sits on `dumbo` (connections, pooling, migrations, SQL
+building), and most of the code is `dumbo`.
+
+Read at commit `main`, 2026-07-26. Items 19-23 below come out of it.
+
+### Where this library is ahead
+
+| | here | Pongo |
+| --- | --- | --- |
+| Query operators | 19 | 11 (no `$not`, `$exists`, `$type`, `$regex`, `$mod`) |
+| Update operators | 13 | 4 (`$set`, `$unset`, `$inc`, `$push`) |
+| Aggregation | 10 stages, 9 accumulators, `$lookup` | none |
+| Indexes | `createIndex` + plan-regression tests | not exposed |
+| Projection | yes | no |
+| Runtime dependencies | 0 | 7 |
+
+### The differentiator worth defending
+
+**Pongo is not checked against a real MongoDB.** Its `package.json` has no
+`mongodb`, no `mongodb-memory-server` and no testcontainers - only
+`@types/mongodb`. Its "dual-implementation" e2e compares its SQLite backend
+against *its own MongoClient shim*, which is also its own code: if both sides
+misread a MongoDB rule, the test passes. Every one of the assertions here runs
+against a real `mongod`.
+
+That is the hardest thing in this project for a competitor to copy, and it is
+why the oracle harness must not be traded away for speed. See item 23.
+
+### Where Pongo is ahead
+
+- **Optimistic concurrency** — a `_version` per document, `expectedVersion` on
+  writes, `nextExpectedVersion` in results (item 21). The one substantive gap.
+- **A raw SQL escape hatch** — `collection.sql.query` (item 20).
+- **Document versioning** — upcast/downcast on read and write.
+- **A `MongoClient` drop-in shim** (item 22), a CLI, connection pooling,
+  `renameCollection`, and multiple backends.
+
+### Deliberately not copied
+
+A CLI and connection pooling (`node:sqlite` is synchronous - there is nothing to
+pool), multiple storage backends, and `replaceMany`, which is a Pongo extension
+rather than a MongoDB method. Adding it would break rule 1 of
+[src/filter-types.ts](src/filter-types.ts): never promise something MongoDB does
+not have.
+
+---
+
+## 19. Unicode and special-character round-trips
+
+**Size: S.** The clearest gap the Pongo review found, and it is in TESTING
+rather than features.
+
+[test/injection.spec.ts](test/injection.spec.ts) covers adversarial ASCII —
+quotes, backslashes, `'; DROP TABLE`, strings shaped like our own `:p0`
+parameters and like the stored `$date` wrapper. **There is no non-ASCII
+anywhere in the suite.** Pongo runs a shared case table (apostrophes, Polish
+diacritics, Japanese, JSON-like strings, dates, large integers) through every
+write method AND through `find` filters matching those values.
+
+For a library that stores JSON as SQLite text and compares it with
+`json_extract`, encoding round-trips are exactly where a silent corruption
+would live. Worth covering:
+
+- Non-ASCII: accents, CJK, RTL, combining marks, emoji (including astral-plane
+  characters, which are surrogate pairs in JavaScript).
+- Characters that are structural in JSON or SQL: `"`, `\`, newlines, tabs, NUL.
+  A NUL is the interesting one — `src/index.ts` already uses `\0` as a
+  delimiter in the `$regex` cache key, and collection names reject it.
+- The same values as **field names**, not only as values — key paths become
+  `json_extract` string literals, which is a different code path from bound
+  values.
+- Each value through `insertOne`/`insertMany`/`updateOne`/`updateMany`/
+  `replaceOne`, and then matched by `find`, `distinct` and `$group._id`.
+
+Dual-engine, so MongoDB decides what "unchanged" means.
+
+---
+
+## 20. A raw SQL escape hatch
+
+**Size: S-M.** Pongo exposes `collection.sql.query` / `sql.command`. There is no
+way out of the document API here, and for a library whose whole pitch is "you
+are on SQLite" that is a strange omission: the moment someone needs a window
+function, a recursive CTE or a join this library will not compile, their only
+option is to open a second connection to the same file.
+
+**Shape.** Something like `db.sql(strings, ...values)` as a tagged template, so
+values are bound and never interpolated - the same posture the query compiler
+takes. Returning raw rows is fine; documents come back as `data` text and the
+caller can run them through the exported parser.
+
+**Decide before building:** whether the rows come back decoded (through
+`parseDocument`, so Dates revive) or raw. Raw is more honest for an escape
+hatch, but then `{"$date":...}` wrappers leak into user code and the EJSON
+contract in DR-1 stops being an implementation detail. Probably: raw by default,
+with the parser exported so decoding is opt-in and visible.
+
+**Also decide** what it does inside `withTransaction` (it should just work - it
+is the same connection) and whether it is allowed to write. A read-only version
+is a much smaller promise and covers most of the need.
+
+---
+
+## 21. Optimistic concurrency
+
+**Size: L, and a DECISION comes first.**
+
+Pongo gives every document a `_version`, accepts `expectedVersion` on writes,
+returns `nextExpectedVersion`, and fails the write when the versions disagree.
+It is genuinely useful: `withTransaction` (item 12) solves the case where the
+read and the write are close together, but not the case where a document is
+read, shown to a user, and written back minutes later. That needs a version.
+
+**Why this is not a straightforward yes.** `_version` has no MongoDB
+counterpart. Adding it would mean:
+
+- a field in every stored document that MongoDB would not have, which changes
+  the storage format (DR-1) and shows up in `find()` results unless it is
+  filtered out of every read path;
+- an option on the write methods that the driver's types do not have, which is
+  the first thing [src/filter-types.ts](src/filter-types.ts) rule 1 forbids -
+  "never add an operator the compiler does not implement" generalises to "never
+  promise an API MongoDB does not have";
+- a story for what the dual-engine specs do with it, since there is nothing to
+  compare against. It would be the first feature with no oracle.
+
+**The honest alternatives**, in increasing order of commitment:
+
+1. **Do nothing.** Document that `withTransaction` covers read-modify-write
+   within one process, and that cross-request concurrency is the application's
+   problem. Cheapest, and defensible for an embedded database where the common
+   case is a single writer.
+2. **Support it without owning it.** `updateOne({ _id, version: 3 }, { $inc: { version: 1 }, ... })`
+   already works today and is pure MongoDB. Document the pattern instead of
+   building a feature. **This is probably the right answer** — it costs a
+   README section and promises nothing.
+3. **Build `_version`** as Pongo does, accepting the divergence and recording it
+   in a DR.
+
+Record the decision either way; do not drift into it.
+
+---
+
+## 22. A `MongoClient`-shaped shim
+
+**Size: M.** Pongo ships one, and it serves a use case this library already
+claims in its README: running a test suite against this instead of a real
+`mongod`. Today that swap means changing `MongoClient.connect(uri)` to
+`Db.fromUrl(path)` and every `client.db(name)`; a shim would make it a
+one-line import change.
+
+The shim is only worth having because of the oracle harness — a drop-in
+replacement is a promise about behaviour, and this is the one project in this
+space that can actually evidence it (see the competitive review above). Build it
+AFTER the subset is wide enough that the promise is not embarrassing, and have
+it throw on anything unimplemented rather than no-op, exactly as the rest of the
+library does.
+
+Depends on nothing, but reads better once items 1-2 (aggregation expression
+operators, `$expr`) land.
+
+---
+
+## 23. Lead with oracle verification
+
+**Size: XS.** The README lists "checked against a real MongoDB" third, in a
+bullet under "Why it exists". The competitive review makes it clear this is the
+single hardest property for anyone else to reproduce - the nearest competitor
+tests against its own shim - and it is the reason to trust a compatibility
+claim from a subset implementation.
+
+Move it up, say what it means concretely (every assertion runs twice; MongoDB
+decides what is correct; a wrong expectation fails the MongoDB side too), and
+give the assertion count. It is a documentation change, not a feature.
+
+---
+
+## DR-3: Which databases should this run on?
+
+**Decided 2026-07-26: SQLite-compatible engines first. PostgreSQL DEFERRED, not
+rejected — and the code should be shaped so that it stays possible.**
+
+Revised the same day. The first draft rejected PostgreSQL outright on cost and
+positioning. That was overruled, correctly: the cost figure below (59% of `src`
+forked) is what porting looks like **without seams**, and it is not a fixed
+property of the problem. With a dialect seam the same work is ADDITIVE - a
+second implementation behind an interface rather than a fork of three files -
+which is a different and much smaller proposition. See "The portability plan".
+
+Prompted by the [Pongo review](#competitive-review-2026-07-26-pongo), which
+carries three backends (PostgreSQL, sqlite3, Cloudflare D1) and so raised the
+question directly.
+
+### Context
+
+The public API is already `async`, which looks like it leaves the door open to
+any driver. It does not: the door is held shut by the SQL, not the API shape.
+
+Measured over `src/` at the time of the decision — 4,612 lines, 169 JSON1 call
+sites, 54 `rowid` references, 33 synchronous statement calls.
+
+### Option A - add PostgreSQL. DEFERRED, and prepared for.
+
+| | lines | JSON1 refs |
+| --- | --- | --- |
+| Ports unchanged (`aggregate`, `bson-order`, `ejson`, `projection`, `filter-types`, `types`, `errors`, `object-id`) | ~1,670 (36%) | 0 |
+| Would have to be FORKED (`query.ts`, `update.ts`, `collection.ts`) | ~2,720 (59%) | 169 |
+
+Four of the differences are redesigns rather than translations:
+
+1. **`$regex` cannot work.** It compiles to `mdb_regexp`, a JAVASCRIPT function
+   registered on the connection, which is what gives it real JS `RegExp`
+   semantics and therefore MongoDB parity. PostgreSQL cannot run JavaScript;
+   `~` is POSIX ARE, with no lookahead and different escapes. `$regex` would
+   become a different operator that mostly agrees - on a project whose whole
+   claim is verified compatibility. PL/v8 is unavailable on most managed
+   PostgreSQL.
+2. **`rowid` has no equivalent.** Single-document writes locate a row and then
+   address it by rowid, and [the gotchas](CLAUDE.md) record why: re-filtering by
+   `_id` made `deleteOne` delete two documents when `_id` was an array.
+   PostgreSQL's `ctid` is not stable across updates or vacuum, so this needs a
+   surrogate key - a storage-format change.
+3. **The indexability design is SQLite-planner-specific.** The implicit-array
+   `rowid IN (scalar UNION ALL element)` form exists because SQLite never
+   applies its OR-optimization to expression indexes (measured: 0.45ms vs 9ms).
+   PostgreSQL has no such limitation but does have GIN and `@>` containment, so
+   porting the SQL would be actively WRONG - the strategy has to be re-derived.
+   [test/query-plan.spec.ts](test/query-plan.spec.ts), the guard for all of
+   this, parses SQLite `EXPLAIN QUERY PLAN` output.
+4. **BSON ordering keys off SQLite's type names.** `json_type` distinguishes
+   `'integer'` from `'real'`, which `$type: 'int'` vs `'double'` depends on;
+   `jsonb_typeof` says only `number`.
+
+**Size: XL**, comparable to the whole project so far, and ~60% of `src` would be
+forked rather than shared. Pongo corroborates the cost: they needed `dumbo`, a
+separate package for connections, pooling, migrations and SQL building, and it
+is the majority of their codebase.
+
+**The positioning tension is real and has to be answered when it ships**, not
+now. The README sells an EMBEDDED document database "backed by a single SQLite
+file", for local-first, CLI, desktop and edge; PostgreSQL is a server. And `pg`
+as a dependency ends "zero runtime dependencies" - so a PostgreSQL backend
+belongs in a SEPARATE package (`sqlite-document-db-postgres`, or a rename of the
+core), never as a dependency of this one. That constraint is worth fixing now
+because it shapes the seam: the core must not import a driver, it must be HANDED
+one.
+
+### The portability plan
+
+Three seams, and they are separable. Introduce each with **exactly one
+implementation** - speculative second implementations are how this kind of
+preparation goes wrong. The value is that the eventual port adds a file instead
+of forking one.
+
+| Seam | What it hides | Needed by | Call sites |
+| --- | --- | --- | --- |
+| ~~**Driver**~~ **DONE 2026-07-26** | `prepare`/`get`/`all`/`run`/`iterate`/`exec`, plus `supportsFunctions` | every non-`node:sqlite` target | was 33, in 2 files |
+| **Dialect** | SQL emission: JSON functions, path syntax, quoting, LIMIT/OFFSET | PostgreSQL only (SQLite engines share the dialect) | 169, in 2 files |
+| **Capability** | whether the engine has user-defined functions (`$regex` push-down vs JS post-filter); rowid vs surrogate key | libSQL, Turso, PostgreSQL | see item 24 |
+
+**Order: driver, then dialect, then capability.** The driver seam is the
+smallest, is needed by every target including the near-term SQLite ones, and is
+a prerequisite for the others. The dialect seam is the big one and buys nothing
+until PostgreSQL is actually attempted, so it comes second. Each step is a
+refactor with NO behaviour change, guarded by the existing suite - which is the
+only reason a change of this size is safe to make speculatively.
+
+**The core must never import a driver.** It should be constructed with one. That
+keeps "zero runtime dependencies" true for the SQLite package no matter what
+else exists.
+
+**The driver seam landed 2026-07-26.** [src/driver.ts](src/driver.ts) is the
+interface, [src/drivers/node-sqlite.ts](src/drivers/node-sqlite.ts) the only
+implementation, and `Db.fromDriver(driver, options)` is the entry point an
+external backend uses - `Db.fromUrl` is now just that with the bundled driver
+chosen. Two shapes in the interface come straight from what the candidate
+engines cannot do, rather than from what `node:sqlite` offers:
+
+- **`iterate()` may materialise.** libSQL's remote client and Turso's JS binding
+  return whole result sets, so a driver without a cursor reads everything and
+  yields it. Callers must not rely on laziness for correctness.
+- **`createFunction` is optional, gated by `supportsFunctions`.** Turso lists
+  `sqlite3_create_function` as "❌ No"; libSQL's clients have no UDF API. Today
+  a `$regex` on such a driver fails loudly (better than a wrong answer); the
+  JavaScript post-filter that closes the gap is the remaining work in item 24.
+
+[test/driver-seam.spec.ts](test/driver-seam.spec.ts) is what makes this a seam
+rather than a type: it runs the library through a SECOND driver that removes
+streaming and user-defined functions, so the abstraction is proven to be
+load-bearing before anything depends on it. **An interface with one
+implementation is a type, not a seam** - if the dialect seam lands next, give it
+the same treatment.
+
+### Option B - other SQLite engines. ACCEPTED in principle, see item 24.
+
+libSQL, Turso, Cloudflare D1 and friends ARE SQLite: same dialect, same JSON1,
+same `rowid`, same `EXPLAIN QUERY PLAN`. `query.ts` and `update.ts` - 148 of the
+169 JSON1 references, the entire compiler - would be **untouched**. Everything
+engine-specific already sits behind `prepare`/`get`/`all`/`run`/`iterate`/`exec`
+in two files.
+
+### Rejected without much thought, and why
+
+- **`sqlite3`** (`TryGhost/node-sqlite3`, the callback-based bindings). The one
+  widely-used ASYNC SQLite driver besides libSQL - and its repository is
+  **archived**, so it is not a foundation to build on. (npm's `deprecated` flag
+  is not set on 6.0.1, so `npm view` will not tell you this; the repo state
+  will.)
+- **`better-sqlite3`.** Synchronous, like `node:sqlite`, with the same
+  user-defined-function support - so it offers nothing this library does not
+  already have, while costing a native dependency and a build step. It is
+  healthy and widely used; it is simply redundant here. Its one possible benefit
+  was a lower Node floor (`engines` says `>=22.13` only because that is when
+  `DatabaseSync.prototype.function`, which `$regex` needs, landed), and that
+  expired when Node 20 reached end of life in April 2026. The floor now excludes
+  only unsupported Node versions.
+
+**So the async-driver landscape really is thin**, which is what makes item 24
+worth considering at all: `node:sqlite` and `better-sqlite3` are synchronous,
+`sqlite3` is archived, and libSQL is what is left.
+
+---
+
+## 24. Other SQLite engines: libSQL, Turso, D1
+
+**Size: M for local, L for remote.** Accepted in principle by
+[DR-3](#dr-3-which-databases-should-this-run-on); not started.
+
+Everything engine-specific is already behind six methods in two files
+(`collection.ts`, `index.ts`), and the compiler is dialect-identical, so the
+work is a driver seam rather than a second implementation. **Do the seam first
+and prove it with `node:sqlite` on both sides** - a refactor with no behaviour
+change, guarded by the existing suite - before adding any engine.
+
+### The blocker, and the way round it: `$regex`
+
+`$regex` compiles to `mdb_regexp`, registered on the connection with
+`db.function()`. Neither libSQL client supports that:
+
+- **`libsql-js`** (native, better-sqlite3-compatible API) documents `function()`
+  as "currently not supported".
+- **`@libsql/client`** has no user-defined-function API at all. libSQL's UDFs are
+  `CREATE FUNCTION ... LANGUAGE wasm`, so a JS-compatible regex engine would have
+  to be compiled to WebAssembly.
+
+**The cheap way out is a post-filter in JavaScript**, and it costs far less than
+it sounds: the benchmarks already describe `$regex` as "JS RegExp per row" - it
+is the second-slowest operator measured. Running the regex in JS over rows
+fetched by the indexable part of the filter changes WHERE the loop runs, not how
+much work it does. That is a bounded performance trade with identical semantics,
+which is the opposite of the PostgreSQL `~` fallback (cheap, but a different
+operator). The compiler already has the shape for it: an operator that cannot be
+pushed down becomes a post-filter, exactly as `aggregate()` splits a pipeline.
+
+### The two clients are not interchangeable
+
+| | `libsql-js` (native) | `@libsql/client` |
+| --- | --- | --- |
+| API | sync, plus `libsql/promise` | async only |
+| `iterate()` streaming | yes | **no** - `execute()` returns every row |
+| User-defined functions | no | no |
+| Remote / embedded replicas | replicas | full remote |
+
+**Local and embedded replicas via `libsql-js` is the M.** The cursor still
+streams, the internals stay synchronous, and only `$regex` needs work.
+
+**Remote (Turso, D1) is the L**, for a structural reason worth knowing before
+anyone starts:
+
+- **This library issues PRE-FLIGHT SELECTs.** `findOneRow` before every
+  single-document write, `assertUpdateApplies` before every update,
+  `assertSortable` and `assertDistinctPath` under `strict`. Each is free on a
+  local synchronous database and becomes a NETWORK ROUND TRIP on a remote one -
+  `updateOne` is two. Those checks exist for good reasons (see the
+  swallowed-exception note in [src/update.ts](src/update.ts)), so remote support
+  means either batching them or redesigning them, not deleting them.
+- **No streaming.** `@libsql/client` returns whole result sets, so cursors
+  materialise. There is no good workaround: [item 1](#1-rework-the-cursor-off-rowid-pagination)
+  moved AWAY from rowid pagination precisely because it defeated indexes.
+- Going async internally also gives up a property the concurrency documentation
+  currently relies on: with `node:sqlite` nothing can interleave mid-operation.
+
+### Worth weighing first
+
+libSQL's own README states that new development has moved to **Turso, a Rust
+rewrite**, with libSQL as the maintained-but-superseded branch. Building on the
+older branch to reach the newer product deserves a look before starting.
+
+**Note that async is not the reason to do this.** The public API is already
+async and the synchronous internals are a documented feature. Async is the PRICE
+of remote, not a benefit - the reason to want this is Turso/edge/embedded
+replicas.

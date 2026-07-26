@@ -311,6 +311,50 @@ document data through it. A database written before it existed still lists its
 simple names — `collection_<name>` does round-trip — and an awkward one
 reappears as soon as anything opens it.
 
+### The driver seam — read this before adding any statement
+
+`node:sqlite` is the only engine today, but **it will not be the only one**
+(BACKLOG [DR-3](BACKLOG.md), item 24: libSQL, Turso and eventually PostgreSQL).
+The seam already exists — [src/driver.ts](src/driver.ts) is the interface,
+[src/drivers/node-sqlite.ts](src/drivers/node-sqlite.ts) the only
+implementation, `Db.fromDriver()` the entry point an external backend uses —
+and it is cheap to keep and expensive to rebuild. Four rules keep it usable:
+
+1. **Only `src/drivers/*` may import `node:sqlite`.** Everything else takes a
+   `Driver`. `grep "from 'node:sqlite'" src/` should return exactly one file.
+2. **Assume the next driver is ASYNC.** libSQL's remote client and Turso's
+   JavaScript binding are promise-based; `node:sqlite` and `better-sqlite3`
+   (both synchronous) are the exception, not the rule. The public API is already
+   `async`, which is what makes this survivable — so **do not add new
+   synchronous assumptions to callers**, and prefer shapes that would still read
+   correctly if every `this.prepare(...).get(...)` gained an `await`.
+3. **Every statement is a possible network round trip.** This library does
+   PRE-FLIGHT SELECTs — `findOneRow` before each single-document write (6 call
+   sites), `assertUpdateApplies` before each update, plus `assertSortable` and
+   `assertDistinctPath` under `strict`. They are free on a local synchronous
+   engine and cost a round trip each on a remote one, so `updateOne` is two.
+   They exist for real reasons and must not simply be deleted — but **prefer one
+   statement to check-then-write when a new feature has the choice**, and do not
+   add a pre-flight check casually.
+4. **Do not rely on capabilities the interface marks optional.** `iterate()` may
+   materialise (libSQL/Turso return whole result sets), so never depend on
+   laziness for CORRECTNESS — only for memory. And `createFunction` may be
+   absent (`supportsFunctions`), which is why `$regex` needs a JavaScript
+   post-filter fallback before either engine can be supported.
+
+**The dialect seam is NOT built.** SQL emission is still SQLite-specific: 169
+JSON1 call sites, 148 of them in [src/query.ts](src/query.ts) and
+[src/update.ts](src/update.ts). That is deliberate — it buys nothing until
+PostgreSQL is actually attempted. The practical consequence for new work:
+**keep SQL emission inside those two files.** A JSON function spelled inline in
+`collection.ts` is one more site to find when the dialect seam does land.
+
+**An interface with one implementation is a type, not a seam.**
+[test/driver-seam.spec.ts](test/driver-seam.spec.ts) runs the whole library
+through a second driver with streaming and user-defined functions removed, which
+is what proves the abstraction is load-bearing. Give the dialect seam the same
+treatment when it arrives.
+
 ### SQL injection posture
 
 User-supplied **values** are bound as named parameters (`bindValue()` →
