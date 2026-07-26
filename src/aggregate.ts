@@ -21,7 +21,7 @@
 
 import { compareBson, equalsBson } from './bson-order.js'
 import { encodeValue } from './ejson.js'
-import type { Document, SortSpecification } from './index.js'
+import type { Document, SortSpecification } from './types.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 
 /** The stages this library implements. Anything else is rejected by name. */

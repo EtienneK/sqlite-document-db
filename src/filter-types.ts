@@ -24,7 +24,7 @@
  *    opt-in, by passing a schema to `db.collection<User>('users')`.
  */
 
-import type { Document } from './index.js'
+import type { Document } from './types.js'
 
 /** True only for `any` - `any` matches both branches of a conditional. */
 type IsAny<T> = 0 extends 1 & T ? true : false

@@ -1,7 +1,7 @@
 /**
  * MongoDB's BSON comparison order, in JavaScript.
  *
- * This is the twin of `bsonRankSql`/`bsonValueSql` in src/query/query.ts, and
+ * This is the twin of `bsonRankSql`/`bsonValueSql` in src/query.ts, and
  * the two MUST agree: a `$sort` stage that runs in SQL (because it led the
  * pipeline) and one that runs here (because it followed a `$group`) have to
  * order identically, or the same pipeline gives different answers depending on

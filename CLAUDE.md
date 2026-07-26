@@ -35,11 +35,25 @@ looks: `node:sqlite` bundles its own SQLite, so the query planner — and theref
 
 ## Architecture
 
-Source files, and the second one is where all the interesting logic lives:
+The tree is FLAT on purpose: one file per concern, no single-file directories.
+(`src/query/query.ts` used to be the exception — a directory holding one
+stuttering file — and it is now `src/query.ts`.)
 
-- [src/index.ts](src/index.ts) — the public API: `Db`, `Collection`, `FindCursor`,
-  `AggregationCursor`.
-- [src/query/query.ts](src/query/query.ts) — **the heart of the project.** Compiles
+**The dependency rule:** `types.ts` is the shared type surface and imports
+nothing that has runtime behaviour; every other module may import it. Nothing
+imports `index.ts`. That rule exists because `aggregate.ts`, `update.ts` and
+`filter-types.ts` all used to import types back OUT of the entry point, which
+made the entry point double as the shared-types module. It was type-only, so it
+was erased at runtime and never broke anything — it just made the graph
+circular and the layout hard to follow. **If you need a type in two modules, it
+belongs in types.ts.**
+
+- [src/index.ts](src/index.ts) — the public entry point: `Db`, and every export.
+- [src/collection.ts](src/collection.ts) — `Collection`: CRUD, queries, indexes,
+  `aggregate()`. Where compiled SQL gets run.
+- [src/types.ts](src/types.ts) — the shared public types (`Document`, result
+  shapes, cursor interfaces, `DbOptions`). No runtime code.
+- [src/query.ts](src/query.ts) — **the heart of the project.** Compiles
   MongoDB filter objects into SQLite `WHERE` clauses.
 - [src/update.ts](src/update.ts) — compiles update documents (`$set`, `$inc`,
   `$push`, `$pull`, …) into ONE SQL expression for the new `data` value.
@@ -424,7 +438,7 @@ Mongodb variant flaky for reasons that are nobody's bug.
   a Date (an *Invalid* Date, serialising to `null`, when the string is not one).
   Consequences:
   documents must go through `stringifyDocument`/`parseDocument`, never raw
-  `JSON.stringify`/`parse`; date comparisons in [src/query/query.ts](src/query/query.ts)
+  `JSON.stringify`/`parse`; date comparisons in [src/query.ts](src/query.ts)
   target the `field.$date` sub-path (ISO strings order lexicographically, which is what
   makes `$gt`/`$lt` work); `$in`/`$nin` with a Date rewrite to `$or`/`$nor` of
   equalities; and any future index over a date field must target the same `.$date`

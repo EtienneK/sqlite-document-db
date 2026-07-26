@@ -24,11 +24,11 @@
  */
 
 import { compareBson, equalsBson } from './bson-order.js'
-import type { Document } from './index.js'
+import type { Document } from './types.js'
 import {
   bindJson, bindRaw, bsonRankSql, bsonValueSql, createBindings, elementCriterionSql,
   toJson1PathString, type QueryFilterDocument, type SqlParams
-} from './query/query.js'
+} from './query.js'
 
 /** The loose shape the compiler works with; the public API narrows to `UpdateFilter`. */
 type AnyUpdate = Record<string, any>

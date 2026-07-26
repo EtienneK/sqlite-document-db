@@ -1,4 +1,4 @@
-import { encodeValue } from '../ejson.js'
+import { encodeValue } from './ejson.js'
 
 export type QueryFilterDocument = Record<string, any>
 
