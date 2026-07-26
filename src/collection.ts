@@ -9,8 +9,11 @@
 
 import { createHash } from 'node:crypto'
 import { compileStages, splitPipeline } from './aggregate.js'
+import {
+  ChangeHub, ChangeStream, changeEvent, updateDescriptionFor, type ChangeHubHost
+} from './change-stream.js'
 import { ClientSession } from './client-session.js'
-import type { Driver, DriverStatement } from './driver.js'
+import type { Driver, DriverRow, DriverStatement } from './driver.js'
 import { compareBson } from './bson-order.js'
 // Documents round-trip through the EJSON layer, not plain JSON: Dates are
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
@@ -25,7 +28,8 @@ import {
 } from './query.js'
 import type {
   AggregateOptions, AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions,
-  BulkWriteResult, CountOptions, CreateIndexOptions, Cursor, DbOptions, DeleteOptions, DeleteResult,
+  BulkWriteResult, ChangeStreamNamespace, ChangeStreamOptions, CountOptions, CreateIndexOptions,
+  Cursor, DbOptions, DeleteOptions, DeleteResult,
   DistinctOptions, Document, DropCollectionOptions, DropIndexOptions,
   EstimatedDocumentCountOptions, InsertManyOptions, FindCursor, FindOneAndDeleteOptions,
   FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions, IndexDescription,
@@ -35,7 +39,7 @@ import type {
   SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
 } from './types.js'
 import {
-  buildUpdateExpression, buildUpsertDocument, collectEqualities,
+  buildUpdateExpression, buildUpsertDocument, collectEqualities, updatedPaths, writesThroughPositional,
   type UpdateCompileOptions, type UpdateExpression
 } from './update.js'
 
@@ -145,6 +149,72 @@ function detachedSessionHost (dbOptions: DbOptions): SessionHost {
     begin: noSessionsHere,
     commit: noSessionsHere,
     rollback: noSessionsHere
+  }
+}
+
+/**
+ * What a `ChangeHub` needs from a connection, for a `Collection` nobody handed
+ * one to - the twin of `detachedSessionHost` above.
+ *
+ * `Db` builds the real one and shares it with every collection it opens, so
+ * that `db.watch()` sees writes to all of them. One built here belongs to this
+ * collection alone, which is the truth about a `Collection` built by hand.
+ */
+export function changeHubHost (db: Driver, options: DbOptions, scope: string): ChangeHubHost {
+  return {
+    databaseName: options.databaseName ?? '',
+    dataVersion: () => {
+      try {
+        const row = db.prepare('PRAGMA data_version').get() as { data_version: number } | undefined
+        return row === undefined ? null : Number(row.data_version)
+      } catch {
+        // An engine without this pragma simply cannot report another
+        // connection's writes; a stream on it is scoped to this one.
+        return null
+      }
+    },
+    match: (filter, docs) => matchDocuments(db, options, scope, filter, docs)
+  }
+}
+
+/**
+ * Applies a filter to documents that are no longer rows in a collection - what
+ * a `$match` after a `$group` needs, and what a `$match` in a `watch()`
+ * pipeline needs.
+ *
+ * The batch goes into a TEMP table and back through the ordinary query
+ * compiler, rather than through a JavaScript re-implementation of the filter
+ * language. A second matcher would be a second set of semantics to keep in
+ * step with the first, and every quirk pinned down in the specs (implicit
+ * array matching, the dotted-array-path rule, Date comparison through
+ * `.$date`) would have to be reproduced and would eventually drift.
+ */
+export function matchDocuments (
+  db: Driver, options: DbOptions, scope: string, filter: AnyFilter, docs: Document[]
+): Document[] {
+  const name = `aggmatch_${scope}_${matchBatchSequence++}`
+  const table = quoteIdentifier(name)
+  const exec = (sql: string): void => {
+    if (options.debug) console.log(sql)
+    db.exec(sql)
+  }
+  const prepare = (sql: string): DriverStatement => {
+    if (options.debug) console.log(sql)
+    return db.prepare(sql)
+  }
+
+  // TEMP, so it never touches the user's schema and disappears with the
+  // connection even if something below throws.
+  exec(`CREATE TEMP TABLE ${table} (data JSON)`)
+  try {
+    const insert = prepare(`INSERT INTO ${table} VALUES(json(?))`)
+    for (const doc of docs) insert.run([stringifyDocument(doc)])
+    const compiled = toSql('data', filter, { table, strict: options.strict })
+    const rows = prepare(`SELECT data FROM ${table} WHERE (${compiled.sql}) ORDER BY rowid`)
+      .all(compiled.params) as Array<{ data: string }>
+    return rows.map(row => parseDocument(row.data))
+  } finally {
+    exec(`DROP TABLE IF EXISTS ${table}`)
   }
 }
 
@@ -319,19 +389,27 @@ export class Collection<TSchema extends Document = Document> {
    * sessions come from a `MongoClient`, and that client owns no such database.
    */
   private readonly sessions: SessionHost
+  /**
+   * Where change events go, and the thing every write path asks before doing
+   * any change-stream work at all. Shared with the `Db` that opened this
+   * collection, so `db.watch()` sees every collection on the connection.
+   */
+  private readonly changes: ChangeHub
 
   constructor (
     name: string, db: Driver, dbOptions: DbOptions, onDrop: () => void = () => {},
     sessions: SessionHost = detachedSessionHost(dbOptions),
-    onRename?: (target: string) => Collection<any>
+    onRename?: (target: string) => Collection<any>,
+    changes?: ChangeHub
   ) {
     assertValidCollectionName(name)
 
     this.db = db
     this.dbOptions = dbOptions
     this.onDrop = onDrop
-    this.onRename = onRename ?? (target => new Collection(target, db, dbOptions, () => {}, sessions))
+    this.onRename = onRename ?? (target => new Collection(target, db, dbOptions, () => {}, sessions, undefined, changes))
     this.sessions = sessions
+    this.changes = changes ?? new ChangeHub(changeHubHost(db, dbOptions, tableNameFor(name)))
     this.collectionName = name
     this.name = tableNameFor(name)
     this.table = quoteIdentifier(this.name)
@@ -363,6 +441,23 @@ export class Collection<TSchema extends Document = Document> {
     const statement = this.prepare(sql)
     try {
       return statement.run(params)
+    } catch (error) {
+      throw this.mapError(error)
+    }
+  }
+
+  /**
+   * Runs a write that reports the rows it touched, via `RETURNING`.
+   *
+   * That clause is what makes a watched `updateMany` or `deleteMany` still ONE
+   * statement: the post-images come back from the statement that did the work
+   * instead of from a second read. Only the change-stream paths use it, so an
+   * engine without `RETURNING` supports everything else (see src/driver.ts).
+   */
+  private allRows (sql: string, params: SqlParams): DriverRow[] {
+    const statement = this.prepare(sql)
+    try {
+      return statement.all(params)
     } catch (error) {
       throw this.mapError(error)
     }
@@ -692,8 +787,9 @@ export class Collection<TSchema extends Document = Document> {
       // CREATE TABLE IF NOT EXISTS per lookup - idempotent, and it keeps the
       // eager-creation behaviour `db.collection()` already has. It shares this
       // collection's session host, so the join is part of the same transaction.
-      async (name, filter) => await new Collection(name, this.db, this.dbOptions, () => {}, this.sessions)
-        .find(filter, session).toArray(),
+      async (name, filter) => await new Collection(
+        name, this.db, this.dbOptions, () => {}, this.sessions, undefined, this.changes
+      ).find(filter, session).toArray(),
       this.dbOptions.strict
     )
 
@@ -774,33 +870,83 @@ export class Collection<TSchema extends Document = Document> {
     return cursor
   }
 
-  /**
-   * Applies a filter to documents that are no longer rows in this collection -
-   * what a `$match` after a `$group` needs.
-   *
-   * The batch goes into a TEMP table and back through the ordinary query
-   * compiler, rather than through a JavaScript re-implementation of the filter
-   * language. A second matcher would be a second set of semantics to keep in
-   * step with the first, and every quirk pinned down in the specs (implicit
-   * array matching, the dotted-array-path rule, Date comparison through
-   * `.$date`) would have to be reproduced and would eventually drift.
-   */
+  /** See `matchDocuments`, which this and `watch()`'s `$match` share. */
   private matchBatch (filter: AnyFilter, docs: Document[]): Document[] {
-    const name = `aggmatch_${this.name}_${matchBatchSequence++}`
-    const table = quoteIdentifier(name)
-    // TEMP, so it never touches the user's schema and disappears with the
-    // connection even if something below throws.
-    this.exec(`CREATE TEMP TABLE ${table} (data JSON)`)
-    try {
-      const insert = this.prepare(`INSERT INTO ${table} VALUES(json(?))`)
-      for (const doc of docs) insert.run([stringifyDocument(doc)])
-      const compiled = toSql('data', filter, { ...this.compileOptions, table })
-      const rows = this.prepare(`SELECT data FROM ${table} WHERE (${compiled.sql}) ORDER BY rowid`)
-        .all(compiled.params) as Array<{ data: string }>
-      return rows.map(row => parseDocument(row.data))
-    } finally {
-      this.exec(`DROP TABLE IF EXISTS ${table}`)
-    }
+    return matchDocuments(this.db, this.dbOptions, this.name, filter, docs)
+  }
+
+  /**
+   * Watches this collection for changes (BACKLOG item 27).
+   *
+   * ```javascript
+   * const stream = orders.watch([{ $match: { operationType: 'insert' } }])
+   * for await (const event of stream) console.log(event.fullDocument)
+   * ```
+   *
+   * Events are emitted by the write methods themselves, buffered inside a
+   * transaction and published when it commits. What that can and cannot see is
+   * set out on `ChangeStream` in src/change-stream.ts; the short version is
+   * that writes made through this library on this connection are reported
+   * exactly, and everything else ends the stream with an `invalidate` rather
+   * than going unmentioned.
+   */
+  watch <TDocument extends Document = TSchema>(
+    pipeline: Document[] = [], options: ChangeStreamOptions = {}
+  ): ChangeStream<TDocument> {
+    this.enlist(options)
+    const stream = new ChangeStream<TDocument>(this.namespace, pipeline, options)
+    stream.listenTo(this.changes)
+    return stream
+  }
+
+  /** This collection, as a change event names it. */
+  private get namespace (): Required<ChangeStreamNamespace> {
+    return { db: this.dbOptions.databaseName ?? '', coll: this.collectionName }
+  }
+
+  /** Emits one change event for this collection. Callers check `changes.watching` first. */
+  private emitChange (
+    operationType: 'insert' | 'update' | 'replace' | 'delete' | 'drop' | 'rename',
+    fields: Partial<Document> = {}
+  ): void {
+    this.changes.emit(changeEvent(operationType, { ns: this.namespace, ...fields }))
+  }
+
+  /**
+   * Emits the `update` event for one row, from its two images and the update
+   * that produced them.
+   *
+   * `updateDescription` is built from the update SPEC (`updatedPaths`) rather
+   * than by diffing the documents, because that is what MongoDB reports - see
+   * the comment on `updatedPaths` in src/update.ts.
+   */
+  private emitUpdate (before: Document, after: Document, update: AnyFilter): void {
+    this.emitChange('update', {
+      documentKey: { _id: after._id },
+      updateDescription: updateDescriptionFor(updatedPaths(update), after, before),
+      fullDocument: after,
+      fullDocumentBeforeChange: before
+    })
+  }
+
+  /**
+   * Under `strict`, refuses an update whose `updateDescription` this library
+   * cannot report the way a server would - which is only ever the positional
+   * operators, and only while something is watching.
+   *
+   * MongoDB names the element the write actually hit (`'grades.1.score'`), and
+   * that is knowable only after the statement has run. This library names the
+   * array instead, which is a true statement about a different thing. Checked
+   * BEFORE the write, so a refusal leaves the collection untouched.
+   */
+  private assertDescribableUpdate (update: AnyFilter): void {
+    if (!this.changes.watching || this.dbOptions.strict !== true) return
+    if (!writesThroughPositional(update)) return
+    throw Error(
+      'strict: this update writes through a positional operator ($, $[] or $[<identifier>]) while a change ' +
+      "stream is open - MongoDB's updateDescription would name the element it hit (like 'grades.1.score') " +
+      "and this library can only name the array ('grades')"
+    )
   }
 
   /** The SELECT `find()` would build, for AggregationCursor.explain(). */
@@ -1131,6 +1277,13 @@ export class Collection<TSchema extends Document = Document> {
     this.exec(`DROP TABLE IF EXISTS ${this.table}`)
     unregisterCollection(this.db, this.name)
     this.onDrop()
+    if (this.changes.watching) {
+      // `drop` then `invalidate`, in that order, as the server emits them. Both
+      // go through the hub, so a drop inside a transaction that rolls back
+      // publishes neither.
+      this.emitChange('drop')
+      this.changes.emitInvalidate(this.namespace)
+    }
     return true
   }
 
@@ -1181,6 +1334,10 @@ export class Collection<TSchema extends Document = Document> {
     }
 
     this.onDrop()
+    if (this.changes.watching) {
+      this.emitChange('rename', { to: { db: this.namespace.db, coll: target } })
+      this.changes.emitInvalidate(this.namespace)
+    }
     return this.onRename(target) as Collection<TSchema>
   }
 
@@ -1269,20 +1426,44 @@ export class Collection<TSchema extends Document = Document> {
     }
   }
 
-  /** Applies a compiled update expression to exactly one row. */
-  private updateRow (expr: UpdateExpression, rowid: number): number {
+  /**
+   * Applies a compiled update expression to exactly one row.
+   *
+   * `watched` is the pre-image and the update that produced it, supplied only
+   * when something is watching: with it the statement gains a `RETURNING`
+   * clause and emits the event, without it the SQL is exactly what it always
+   * was.
+   */
+  private updateRow (
+    expr: UpdateExpression, rowid: number, watched?: { before: Document, update: AnyFilter }
+  ): number {
     this.assertUpdateApplies(expr, 'rowid = :rowid', { rowid })
     // `data != <expr>` makes a no-op update report modifiedCount 0, like
     // MongoDB. Each 'u' parameter binds once for both occurrences of expr.
     const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE rowid = :rowid AND data != ${expr.sql}`
-    return Number(this.run(sql, { ...expr.params, rowid }).changes)
+    const params = { ...expr.params, rowid }
+    if (watched === undefined) return Number(this.run(sql, params).changes)
+
+    const rows = this.allRows(`${sql} RETURNING data`, params)
+    for (const row of rows) this.emitUpdate(watched.before, parseDocument(row.data as string), watched.update)
+    return rows.length
   }
 
   /** Replaces exactly one row's document, keeping its `_id`. */
-  private replaceRow (rowid: number, doc: WithoutId<TSchema>, id: unknown): number {
+  private replaceRow (rowid: number, doc: WithoutId<TSchema>, id: unknown, before?: Document): number {
     // One named parameter serves both occurrences of the new document.
     const sql = `UPDATE ${this.table} SET data = json(:doc) WHERE rowid = :rowid AND data != json(:doc)`
-    return Number(this.run(sql, { rowid, doc: stringifyDocument({ ...doc, _id: id }) }).changes)
+    const params = { rowid, doc: stringifyDocument({ ...doc, _id: id }) }
+    if (before === undefined) return Number(this.run(sql, params).changes)
+
+    const rows = this.allRows(`${sql} RETURNING data`, params)
+    for (const row of rows) {
+      const after = parseDocument(row.data as string)
+      this.emitChange('replace', {
+        documentKey: { _id: after._id }, fullDocument: after, fullDocumentBeforeChange: before
+      })
+    }
+    return rows.length
   }
 
   /**
@@ -1305,14 +1486,40 @@ export class Collection<TSchema extends Document = Document> {
     const { rowid } = found
 
     const result = this.run(`DELETE FROM ${this.table} WHERE rowid = :rowid`, { rowid })
-    return { acknowledged: true, deletedCount: Number(result.changes) }
+    const deletedCount = Number(result.changes)
+    // The pre-image is already in hand: findOneRow read it to find the rowid.
+    if (this.changes.watching && deletedCount > 0) this.emitDelete(parseDocument(found.data))
+    return { acknowledged: true, deletedCount }
   }
 
   async deleteMany (filter: Filter<TSchema>, options: DeleteOptions = {}): Promise<DeleteResult> {
     this.enlist(options)
     const compiled = toSql('data', filter, this.compileOptions)
-    const result = this.run(`DELETE FROM ${this.table} WHERE (${compiled.sql})`, compiled.params)
-    return { acknowledged: true, deletedCount: Number(result.changes) }
+    const sql = `DELETE FROM ${this.table} WHERE (${compiled.sql})`
+    if (!this.changes.watching) {
+      const result = this.run(sql, compiled.params)
+      return { acknowledged: true, deletedCount: Number(result.changes) }
+    }
+
+    // RETURNING hands back every deleted document in the statement that
+    // deleted it, so the events cost no extra read - and the row count IS the
+    // deleted count.
+    const rows = this.allRows(`${sql} RETURNING rowid, data`, compiled.params)
+    for (const row of Collection.inRowidOrder(rows)) this.emitDelete(parseDocument(row.data as string))
+    return { acknowledged: true, deletedCount: rows.length }
+  }
+
+  private emitDelete (document: Document): void {
+    this.emitChange('delete', { documentKey: { _id: document._id }, fullDocumentBeforeChange: document })
+  }
+
+  /**
+   * `RETURNING` does not promise an order, and rowid order is the order
+   * `find()` reports documents in - so events describe a batch the same way
+   * every other read of it does.
+   */
+  private static inRowidOrder (rows: DriverRow[]): DriverRow[] {
+    return rows.toSorted((left, right) => Number(left.rowid) - Number(right.rowid))
   }
 
   /** Rejects a replacement document and returns the `_id` it pins, if any. */
@@ -1334,18 +1541,20 @@ export class Collection<TSchema extends Document = Document> {
       return (await this.insertUpserted(this.upsertReplacement(filter, doc, givenId), session)).result
     }
 
-    const id = parseDocument(found.data)._id
+    const before = parseDocument(found.data)
+    const id = before._id
     if (givenId != null && id !== givenId) throw Error('_id field is immutable and cannot be changed')
 
     // A no-op replacement reports modifiedCount 0, matching MongoDB - SQLite
     // would otherwise count every touched row.
-    return updateResult(1, this.replaceRow(found.rowid, doc, id))
+    return updateResult(1, this.replaceRow(found.rowid, doc, id, this.changes.watching ? before : undefined))
   }
 
   /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
   async updateOne (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
     const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
+    this.assertDescribableUpdate(update)
 
     const found = this.findOneRow(filter)
     if (found === null) {
@@ -1353,21 +1562,29 @@ export class Collection<TSchema extends Document = Document> {
       return (await this.insertUpserted(buildUpsertDocument(filter, update), session)).result
     }
 
-    return updateResult(1, this.updateRow(expr, found.rowid))
+    return updateResult(1, this.updateRow(expr, found.rowid, this.watched(found.data, update)))
   }
 
   /** Updates every document matching `filter` with $set/$unset/$inc operators. */
   async updateMany (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
     const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
+    this.assertDescribableUpdate(update)
+    const watching = this.changes.watching
+    const compiled = toSql('data', filter, this.compileOptions)
 
-    const matchedCount = await this.countDocuments(filter, session)
+    // While something is watching, the matched rows are READ rather than
+    // counted: the events need their pre-images, and reading them replaces the
+    // count instead of adding a statement to it.
+    const before = watching
+      ? this.allRows(`SELECT rowid, data FROM ${this.table} WHERE (${compiled.sql})`, compiled.params)
+      : undefined
+    const matchedCount = before?.length ?? await this.countDocuments(filter, session)
     // An upsert that matches nothing inserts exactly ONE document, as it does
     // for updateOne - "many" describes what is updated, not what is created.
     if (matchedCount === 0 && options.upsert === true) {
       return (await this.insertUpserted(buildUpsertDocument(filter, update), session)).result
     }
-    const compiled = toSql('data', filter, this.compileOptions)
 
     // Checked across every matched row before anything is written, so a bad
     // $inc or $push target leaves the collection untouched rather than
@@ -1378,8 +1595,20 @@ export class Collection<TSchema extends Document = Document> {
     // The expression's 'u' params and the filter's 'p' params merge without
     // collisions, by construction (see bindValue / buildUpdateExpression).
     const sql = `UPDATE ${this.table} SET data = ${expr.sql} WHERE (${compiled.sql}) AND data != ${expr.sql}`
-    const result = this.run(sql, { ...expr.params, ...compiled.params })
-    return updateResult(matchedCount, Number(result.changes))
+    const params = { ...expr.params, ...compiled.params }
+    if (before === undefined) return updateResult(matchedCount, Number(this.run(sql, params).changes))
+
+    const after = this.allRows(`${sql} RETURNING rowid, data`, params)
+    const preImages = new Map(before.map(row => [Number(row.rowid), row.data as string]))
+    for (const row of Collection.inRowidOrder(after)) {
+      this.emitUpdate(parseDocument(preImages.get(Number(row.rowid))!), parseDocument(row.data as string), update)
+    }
+    return updateResult(matchedCount, after.length)
+  }
+
+  /** What `updateRow` needs to emit an event, or undefined when nothing is watching. */
+  private watched (before: string, update: AnyFilter): { before: Document, update: AnyFilter } | undefined {
+    return this.changes.watching ? { before: parseDocument(before), update } : undefined
   }
 
   /**
@@ -1395,6 +1624,7 @@ export class Collection<TSchema extends Document = Document> {
   ): Promise<WithId<TSchema> | null> {
     const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
+    this.assertDescribableUpdate(update)
     const found = this.findOneRow(filter, options.sort)
 
     if (found === null) {
@@ -1403,7 +1633,7 @@ export class Collection<TSchema extends Document = Document> {
     }
 
     const before = parseDocument(found.data) as WithId<TSchema>
-    this.updateRow(expr, found.rowid)
+    this.updateRow(expr, found.rowid, this.changes.watching ? { before, update } : undefined)
     return this.returnWritten(before, found.rowid, options, filter)
   }
 
@@ -1422,7 +1652,7 @@ export class Collection<TSchema extends Document = Document> {
 
     const before = parseDocument(found.data) as WithId<TSchema>
     if (givenId != null && before._id !== givenId) throw Error('_id field is immutable and cannot be changed')
-    this.replaceRow(found.rowid, replacement, before._id)
+    this.replaceRow(found.rowid, replacement, before._id, this.changes.watching ? before : undefined)
     return this.returnWritten(before, found.rowid, options, filter)
   }
 
@@ -1434,6 +1664,7 @@ export class Collection<TSchema extends Document = Document> {
 
     const document = parseDocument(found.data) as WithId<TSchema>
     this.run(`DELETE FROM ${this.table} WHERE rowid = :rowid`, { rowid: found.rowid })
+    if (this.changes.watching) this.emitDelete(document)
     return this.applyProjection(document, options.projection, filter)
   }
 
@@ -1526,6 +1757,10 @@ export class Collection<TSchema extends Document = Document> {
       try {
         this.exec('BEGIN')
         owned = true
+        // A change buffer pairs with the transaction, exactly as it does for
+        // `Db.withTransaction`: the events become visible when (and only if)
+        // this batch's own COMMIT makes the documents visible.
+        this.changes.enter()
       } catch {
         owned = false
       }
@@ -1535,14 +1770,17 @@ export class Collection<TSchema extends Document = Document> {
     const keepWhatLanded = (): void => {
       if (!owned) return
       owned = false
+      let committed = true
       try {
         this.exec('COMMIT')
       } catch {
         // A constraint failure aborts the statement, not the transaction, so
         // COMMIT normally succeeds. If SQLite did abort it, the prefix is gone
         // either way and the only correct move is to leave no transaction open.
+        committed = false
         try { this.exec('ROLLBACK') } catch { /* already closed */ }
       }
+      this.changes.leave(committed)
     }
 
     try {
@@ -1557,13 +1795,20 @@ export class Collection<TSchema extends Document = Document> {
         if (Array.isArray(doc._id)) throw Error(`the _id field cannot be an array (at index ${index})`)
         const id = (doc._id == null) ? objectIdHexString() : doc._id;
         (doc as unknown as WithId<TSchema>)._id = id
+        const stored = stringifyDocument({ _id: id, ...doc })
         try {
-          stmt.run([stringifyDocument({ _id: id, ...doc })])
+          stmt.run([stored])
         } catch (error) {
           throw this.mapError(error)
         }
         insertedIds[index] = id
         insertedCount++
+        // The stored TEXT, decoded - not `doc`. The storage layer decides the
+        // final shape (dropped `undefined`s, Date round-trip, key order), and
+        // an event must report what a reader would find.
+        if (this.changes.watching) {
+          this.emitChange('insert', { documentKey: { _id: id }, fullDocument: parseDocument(stored) })
+        }
       }
     } catch (error) {
       keepWhatLanded()
@@ -1602,13 +1847,17 @@ export class Collection<TSchema extends Document = Document> {
         if (Array.isArray(doc._id)) throw Error(`the _id field cannot be an array (at index ${index})`)
         const id = (doc._id == null) ? objectIdHexString() : doc._id;
         (doc as unknown as WithId<TSchema>)._id = id
+        const stored = stringifyDocument({ _id: id, ...doc })
         try {
-          stmt.run([stringifyDocument({ _id: id, ...doc })])
+          stmt.run([stored])
         } catch (error) {
           throw this.mapError(error)
         }
         insertedIds[index] = id
         insertedCount++
+        if (this.changes.watching) {
+          this.emitChange('insert', { documentKey: { _id: id }, fullDocument: parseDocument(stored) })
+        }
       } catch (error) {
         firstError ??= error
       }

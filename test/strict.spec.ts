@@ -17,6 +17,10 @@ const seedArrayValued = async (db: Db): Promise<void> => {
   await db.collection('t').insertMany([{ _id: 1, v: [5, 1] }, { _id: 2, v: 3 }])
 }
 
+const seedGrades = async (db: Db): Promise<void> => {
+  await db.collection('t').insertOne({ _id: 1, grades: [{ score: 40 }, { score: 90 }] })
+}
+
 const seedEmbedded = async (db: Db): Promise<void> => {
   await db.collection('t').insertOne({ _id: 1, instock: [{ qty: 5 }, { qty: 7 }] })
 }
@@ -265,6 +269,51 @@ describe('strict mode', () => {
       await items.insertOne({ _id: 1 } as any)
       expect(await items.countDocuments({})).toStrictEqual(1)
       await client.close()
+    })
+  })
+
+  describe('a positional update while a change stream is open', () => {
+    it('should report the ARRAY by default, where MongoDB names the element', async () => {
+      const db = await open(false)
+      await seedGrades(db)
+      const stream = db.collection('t').watch()
+      await stream.tryNext()
+
+      await db.collection('t').updateOne({ _id: 1 }, { $set: { 'grades.$[e].score': 50 } },
+        { arrayFilters: [{ 'e.score': { $lt: 50 } }] })
+
+      // MongoDB would say `{ 'grades.0.score': 50 }`; the concrete index is not
+      // knowable until the statement has run, so this names the array instead.
+      expect((await stream.next()).updateDescription!.updatedFields)
+        .toStrictEqual({ grades: [{ score: 50 }, { score: 90 }] })
+      await stream.close()
+      await db.close()
+    })
+
+    it('should reject the update under strict', async () => {
+      const db = await open(true)
+      await seedGrades(db)
+      const stream = db.collection('t').watch()
+      await stream.tryNext()
+
+      await expect(db.collection('t').updateOne({ _id: 1 }, { $set: { 'grades.$[e].score': 50 } },
+        { arrayFilters: [{ 'e.score': { $lt: 50 } }] })).rejects.toThrow(/strict.*positional/)
+      // Checked BEFORE the write, so the refusal leaves the document alone.
+      expect((await db.collection('t').findOne({ _id: 1 }))?.grades)
+        .toStrictEqual([{ score: 40 }, { score: 90 }])
+      await stream.close()
+      await db.close()
+    })
+
+    it('should allow the same update when nothing is watching', async () => {
+      const db = await open(true)
+      await seedGrades(db)
+      // There is no event to describe, so there is nothing to describe wrongly.
+      await db.collection('t').updateOne({ _id: 1 }, { $set: { 'grades.$[e].score': 50 } },
+        { arrayFilters: [{ 'e.score': { $lt: 50 } }] })
+      expect((await db.collection('t').findOne({ _id: 1 }))?.grades)
+        .toStrictEqual([{ score: 50 }, { score: 90 }])
+      await db.close()
     })
   })
 

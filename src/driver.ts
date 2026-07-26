@@ -25,6 +25,11 @@
  *   `$regex` is already "JS RegExp per row".
  * - **Results are plain rows**, so nothing here knows about documents, JSON, or
  *   the storage encoding.
+ * - **`RETURNING` is assumed, but only by change streams.** The watched write
+ *   paths read their post-images back through `all()` on an `UPDATE`/`DELETE`,
+ *   which is what keeps a watched `updateMany` one statement (rule 3 below).
+ *   Every engine DR-3 names has the clause, and an engine without it supports
+ *   the whole library except `watch()` - the unwatched paths never emit one.
  *
  * The interface is deliberately SYNCHRONOUS, matching `node:sqlite`. Async
  * engines are a separate step (see item 24): the public API is already async,

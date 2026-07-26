@@ -187,19 +187,19 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Item 26 asked whether SQLite could report changes; the answer is that this library already knows. `RETURNING` makes per-document events free, and `PRAGMA data_version` turns the one real limit into an `invalidate` event instead of a silence. |
-| 2 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 3 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. |
-| 4 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 5 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 6 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 6= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
-| 7 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
-| 8 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
-| 9 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
-| 10 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
-| 11 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
-| 12 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 2 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. **One new consumer:** `updatedPaths` (src/update.ts) derives a change event's `updateDescription` from the update spec, and a pipeline update has no spec of that shape - decide what it reports. |
+| 3 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 4 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 5 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 5= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 6 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 7 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
+| 8 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
+| 9 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
+| 10 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
+| 11 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [Change streams](#27-change-streams-reopened-2026-07-26) | M | **DONE 2026-07-26.** Events from the WRITE PATH, `RETURNING` for the post-images (so a watched `updateMany` is still one statement), buffered per transaction and flushed on commit. Every event shape is dual-engine against the replica set; the two blind spots - another connection, and `db.sql` - are DETECTED and end the stream with an `invalidate`. `resumeAfter` is refused, with the reason. |
 | — | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **DONE 2026-07-26** apart from pipeline updates and date arithmetic, both M and both listed above. `$currentDate`, `$bit`, `$comment`, `$sampleRate`, the regex/set/object/array/byte-string/trigonometry/`$convert` expression families, eleven accumulators, `$unset` and `$sortByCount`. |
 | — | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | **DONE 2026-07-26** for `sparse`, `partialFilterExpression`, `hint`, `createIndexes()`, `dropIndexes()` and `indexExists()`. The measurement that shaped it: SQLite forbids SUBQUERIES in a partial index, and every comparison this compiler emits has one. |
 | — | [Cursor methods, `find().explain()`, `renameCollection`, `db.stats()`](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | **DONE 2026-07-26.** `hasNext`/`tryNext`/`forEach`/`map`/`rewind`/`count`, the query plan behind a `find()`, and the two admin methods. |
@@ -210,10 +210,10 @@ the closed items are listed after it for provenance.
 | — | [`$text` and `$search`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so `$text` could not be oracle-verified; `$search` is Atlas-only, so it cannot be verified even in principle. [Item 31](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) is the feature under a name that promises what it can keep. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
-**Sessions landed 2026-07-26** ([item 25](#25-clientsession-for-the-shim)),
-which closes the `MongoClient` shim: the only method left that throws is
-`watch()`, and that is a decision rather than a gap. Two things from it are
-worth carrying forward:
+**Sessions landed 2026-07-26** ([item 25](#25-clientsession-for-the-shim)) and
+change streams the same day ([item 27](#27-change-streams-reopened-2026-07-26)),
+which together close the `MongoClient` shim: **no method on it throws any more.**
+Two things from the session work are worth carrying forward:
 
 - **The test suite has two servers now, and the reason is a real constraint.**
   MongoDB refuses transactions on a standalone mongod, so a whole feature would
@@ -254,12 +254,13 @@ forward:
 **Not planned, and worth saying so:** multi-document atomicity beyond a single
 connection, replication, sharding, `$where`, server-side JavaScript, the
 wire protocol. A process that needs those needs a server.
-[Change streams](#26-change-streams-decided-against-2026-07-26) and
-[`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) are in the
-same category but were investigated far enough to be worth writing down, so each
+[`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) is in the
+same category but was investigated far enough to be worth writing down, so it
 has a decision record rather than a line here. `startSession()` was never in
 this category and is now implemented - see
-[item 25](#25-clientsession-for-the-shim).
+[item 25](#25-clientsession-for-the-shim); change streams WERE, and are now
+implemented too - see the note below and
+[item 27](#27-change-streams-reopened-2026-07-26).
 
 **GridFS left this list on 2026-07-26, and it should never have been on it.**
 It is a driver-side convention over two ordinary collections, so "needs a
@@ -274,10 +275,17 @@ it. The decision record in [item 26](#26-change-streams-decided-against-2026-07-
 is sound about what it measured and asked the wrong question: it looked for a
 way to recover changes FROM SQLITE, when the write path already knows what it
 did. [Item 27](#27-change-streams-reopened-2026-07-26) is the version built from
-that end - which lands the feature for a single process and, crucially, makes
-the boundary of that scope a loud `invalidate` event rather than a silence.
-`$text` and `$search` did NOT move: their problem is that the answers differ,
-which no amount of implementation fixes.
+that end, and it SHIPPED the same day: the feature works for a single process
+and, crucially, the boundary of that scope is a loud `invalidate` event rather
+than a silence. `$text` and `$search` did NOT move: their problem is that the
+answers differ, which no amount of implementation fixes.
+
+The lesson worth keeping is about the decision record, not the feature. Item 26
+measured carefully and concluded correctly *about the question it asked* - and
+the question was wrong, because it looked for the answer in the engine rather
+than in the code that had it all along. **A "decided against" that turns on a
+measurement should name the question the measurement answered**, which is the
+only reason this one could be re-opened rather than quietly re-litigated.
 
 ---
 
@@ -314,7 +322,7 @@ priority table above.
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
 | 25 | ~~[`ClientSession` for the shim](#25-clientsession-for-the-shim)~~ | S-M | **DONE 2026-07-26** — sessions, `{ session }` everywhere, oracle-verified on a replica set |
-| 27 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Open — supersedes 26: emit from the write path, `RETURNING` for post-images, `data_version` for `invalidate` |
+| 27 | ~~[Change streams, reopened](#27-change-streams-reopened-2026-07-26)~~ | M | **DONE 2026-07-26** — supersedes 26. `watch()` on collection, database and client; the oracle corrected `updateDescription` (spec-derived, and array appends name the index) and refused `resumeAfter` outright |
 | 28 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **The S half DONE 2026-07-26** — `$currentDate`, `$bit`, `$comment`, `$sampleRate`, seven expression families, eleven accumulators, `$unset`, `$sortByCount`. Pipeline updates and date arithmetic (both M) remain |
 | 29 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | **DONE 2026-07-26** except TTL — `sparse`, `partialFilterExpression` (narrower than MongoDB's, and it says why), `hint`, `createIndexes`, `dropIndexes`, `indexExists` |
 | 30 | [Geospatial queries](#30-geospatial-queries) | M | Open — R-Tree and geopoly are compiled in; spherical-vs-planar is the real work |
@@ -2171,11 +2179,14 @@ signal.
 
 ---
 
-## 27. Change streams, REOPENED 2026-07-26
+## 27. Change streams, REOPENED 2026-07-26 — **DONE 2026-07-26**
 
-**Size: M.** This supersedes [item 26](#26-change-streams-decided-against-2026-07-26),
-which stays where it is: its measurements are still correct, and they are the
-reason this item exists in a different shape.
+**Size: M. Shipped**, essentially as designed below; what the build changed is
+recorded in [What the oracle changed](#what-the-oracle-changed) at the end of
+this item. This supersedes
+[item 26](#26-change-streams-decided-against-2026-07-26), which stays where it
+is: its measurements are still correct, and they are the reason this item exists
+in a different shape.
 
 **Item 26 answered the wrong question.** It asked "can SQLite tell us what
 changed?" and measured its way to no - no update hook, and the session extension
@@ -2243,6 +2254,64 @@ is crossed the stream says so.
 engine for the boundary (another connection writes -> `invalidate`), the way
 [test/strict.spec.ts](test/strict.spec.ts) handles the rest of the known
 divergences.
+
+### What the oracle changed
+
+Built 2026-07-26 in [src/change-stream.ts](src/change-stream.ts), with 56
+dual-engine assertions in
+[test/change-streams.spec.ts](test/change-streams.spec.ts) and 16 single-engine
+ones in
+[test/change-stream-boundaries.spec.ts](test/change-stream-boundaries.spec.ts).
+Four things the design above got wrong or left open, all settled by asking the
+server:
+
+- **`updateDescription` is NOT a diff of the two images.** It is derived from
+  the update SPEC, and that is not a shortcut - it is the only thing that
+  works. `$set: { a: { b: 1, c: 2 } }` over an existing `a` reports `a`, where
+  any minimal diff reports `a.b` and `a.c`. `updatedPaths` in
+  [src/update.ts](src/update.ts) is that derivation; the values are then read
+  out of the post-image, so present means updated and absent means removed, and
+  `$unset`, `$rename` and `$pop`-to-empty need no case of their own.
+- **Except for array appends, which name the INDEX.** `$push`/`$addToSet` report
+  `{ 'tags.1': 'z' }` while `$pop`/`$pull` report the whole rebuilt array - and
+  the same is true at 40 elements, so it is a rule about the OPERATION and not a
+  size heuristic. A `$push` with `$position`, `$sort` or `$slice` does not
+  extend the array and comes back whole, which falls out of testing whether the
+  new array is the old one plus a tail rather than by inspecting the operator.
+- **`truncatedArrays` is always empty, measured rather than assumed.** No
+  operator this library implements made the server produce one, `$pop` and
+  `$pull` over a 40-element array included.
+- **`resumeAfter` is REFUSED, not approximated.** The design said a foreign
+  token must throw; the build found that a token this process issued is no
+  better, because the events behind it are held only by the streams that were
+  open at the time. Any resume would mean starting from now and calling it a
+  resume. `startAfter` and `startAtOperationTime` go the same way, each with the
+  reason and the alternative (open the stream first).
+
+Three things went further than the design:
+
+- **`db.sql` writes are no longer invisible.** The design gave them up as
+  un-interceptable without parsing SQL, which is true - but `total_changes()`
+  answers the only question that matters, "did this statement move rows?", for
+  two cheap statements and only while something is watching. It brackets all
+  three templates, because `RETURNING` makes `all` and `get` write paths too.
+- **The invalidate travels the transaction buffer**, so a `drop` or a raw write
+  inside a transaction that rolls back kills nothing. Only the foreign-write
+  invalidate is published immediately, because another connection's COMMIT is
+  not undone by this one's rollback.
+- **`strict` polices one divergence**: a positional update while a stream is
+  open, where MongoDB names the concrete element (`grades.1.score`) and this
+  library can only name the array.
+
+**What it cost**: `RETURNING` on the watched paths, so a watched `updateMany`
+and `deleteMany` are still one statement each, and `updateMany`'s pre-image read
+REPLACES its `countDocuments`. An unwatched database pays nothing, which is
+pinned as a shape assertion (no `RETURNING` in the compiled SQL) rather than as
+a timing.
+
+**Left for someone who asks**: the driver's `EventEmitter` surface
+(`stream.on('change', …)`), and a bounded history buffer, which is the only
+thing that would make a real `resumeAfter` possible.
 
 ---
 

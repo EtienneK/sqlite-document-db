@@ -201,9 +201,11 @@ describe('MongoClient', () => {
 
     it('fails loudly on the surface it does not have', async () => {
       const client = await ShimClient.connect(':memory:')
-      // Sessions DO work (see test/client-session.spec.ts); change streams
-      // cannot, and say so rather than answering with nothing.
-      expect(() => client.watch()).toThrow(/change streams/)
+      // Sessions and change streams both work now (test/client-session.spec.ts,
+      // test/change-streams.spec.ts). What a change stream cannot do is resume
+      // from a token, because there is no oplog to point one into - and it says
+      // so rather than starting from now and calling that a resume.
+      expect(() => client.watch([], { resumeAfter: { _data: '1' } })).toThrow(/oplog/)
       await client.close()
     })
 

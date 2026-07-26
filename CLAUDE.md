@@ -61,6 +61,8 @@ belongs in types.ts.**
 - [src/client-session.ts](src/client-session.ts) — `ClientSession`:
   `startSession()`, `withTransaction`, and the rules for `{ session }`
   (see below).
+- [src/change-stream.ts](src/change-stream.ts) — `watch()`: the per-connection
+  `ChangeHub` and the `ChangeStream` it feeds (see below).
 - [src/collection.ts](src/collection.ts) — `Collection`: CRUD, queries, indexes,
   `aggregate()`. Where compiled SQL gets run.
 - [src/types.ts](src/types.ts) — the shared public types (`Document`, result
@@ -419,10 +421,12 @@ index-eligible, which is pinned by a plan-regression test in
 reports the boundary; **that method is the contract**, so keep it accurate.
 
 **Non-obvious detail — a mid-pipeline `$match` goes back through SQLite** via a
-TEMP table (`Collection.matchBatch`), not through a JS re-implementation of the
-filter language. A second matcher would be a second set of semantics to keep in
-step, and every quirk the specs pin down would eventually drift apart. If you
-are tempted to write `matchesFilter(doc, filter)` in JavaScript, don't.
+TEMP table (`matchDocuments`, which `Collection.matchBatch` delegates to), not
+through a JS re-implementation of the filter language. A second matcher would be
+a second set of semantics to keep in step, and every quirk the specs pin down
+would eventually drift apart. If you are tempted to write
+`matchesFilter(doc, filter)` in JavaScript, don't. A `$match` in a `watch()`
+pipeline runs through the same function, on a one-document batch.
 
 **Non-obvious detail — `setPathImmutable`, not a shallow copy.** `$unwind`
 emits several documents from one source; `{ ...doc }` shares its nested objects,
@@ -626,6 +630,78 @@ exact drift the shim exists to prevent. `test/client-session.spec.ts` holding
 both at one interface is what caught it. `inTransaction()` is the public
 spelling.
 
+### Change streams (src/change-stream.ts)
+
+`watch()` on `Collection`, `Db` and `MongoClient`. **Events come from the WRITE
+PATH, not from the engine** — BACKLOG item 26 asked whether SQLite could report
+what changed, measured its way to no, and asked the wrong question: every write
+here already goes through a `Collection` method that knows what it did.
+`ChangeHub` is the per-connection bus, built by `Db` and handed to every
+`Collection` exactly as `SessionHost` is.
+
+**Non-obvious detail — an unwatched database must pay NOTHING**, and that is a
+shape test, not a hope. Every write path asks `changes.watching` first and takes
+its original statements when the answer is no;
+[test/change-stream-boundaries.spec.ts](test/change-stream-boundaries.spec.ts)
+asserts the compiled SQL contains no `RETURNING` in that case, the same trick
+[test/query-plan.spec.ts](test/query-plan.spec.ts) uses for index eligibility.
+
+**Non-obvious detail — the post-images come from `RETURNING`, so a watched
+multi-document write is still ONE statement.** `UPDATE … RETURNING rowid, data`
+and `DELETE … RETURNING rowid, data` hand back every row the statement touched;
+under driver-seam rule 3 (every statement is a possible round trip) reading them
+back separately would have doubled the cost. `updateMany`'s pre-images REPLACE
+its `countDocuments`, so watching adds no statement there either. `RETURNING` is
+the one SQL feature only this path needs — every engine DR-3 names has it.
+
+**Non-obvious detail — `updateDescription` is built from the update SPEC, not
+from a diff.** `updatedPaths` (src/update.ts) lists the paths an update writes
+and each is then looked up in the new document; present means updated, absent
+means removed, which is what makes `$unset` and a `$rename`'s source fall out
+without a case each. A document diff would be WRONG:
+`$set: { a: { b: 1, c: 2 } }` over an existing `a` reports `a`, not `a.b`/`a.c`.
+The oracle settled two more rules: `$push`/`$addToSet` name the appended INDEX
+(`tags.1`) when the array is genuinely extended, while `$pop`/`$pull` — and a
+`$push` with `$position`/`$sort`/`$slice` — report the whole rebuilt array, at
+any length (measured at 40 elements, so it is not a size heuristic).
+`truncatedArrays` is always empty because no operator this library implements
+produced one.
+
+**Non-obvious detail — events are buffered per transaction and flushed on
+COMMIT**, which is why `ChangeHub.enter`/`leave` pair with `Db`'s transaction
+frames and with `insertMany`'s own batch transaction. An invalidate travels the
+same path (a `PendingEvent` carrying what it ends) rather than going straight to
+the streams — otherwise a `drop` inside a transaction that rolled back would
+still have killed the stream.
+
+**Non-obvious detail — every limit is an `invalidate`, never a silence.** Only
+writes made through this library on this connection can be described. The other
+two cases are DETECTED: `PRAGMA data_version` moves when another connection
+commits and not for this one's own writes (measured), and `db.sql` is bracketed
+by `total_changes()` because describing raw SQL would mean parsing it. Both end
+the stream with `invalidateReason` set. The `data_version` check runs when a
+reader is blocked (an unref'd poll, `pollIntervalMS`) and on every `tryNext()`.
+
+**Non-obvious detail — the pipeline runs at READ time.** A change-stream stage
+is per-event, so `$match` goes through `matchDocuments` (the `matchBatch` engine,
+now shared) on a one-document batch rather than through a second JavaScript
+matcher. Running it when the event is read keeps the write path synchronous, and
+the stage list is MongoDB's own allow-list intersected with what this library
+implements — the blocking stages could never complete over a stream that never
+ends, which is why the server refuses them too.
+
+**`resumeAfter`/`startAfter` are REFUSED, not approximated.** A resume token
+points into an oplog. Accepting one would mean starting from now and calling it
+a resume, which is the silent gap the whole design avoids. `clusterTime` is
+absent for a related reason: it is a BSON Timestamp
+[src/ejson.ts](src/ejson.ts) cannot store, describing a clock that does not
+exist.
+
+The one divergence `strict` polices: a positional update (`$`, `$[]`,
+`$[<id>]`) while a stream is open, because MongoDB names the concrete element it
+hit (`grades.1.score`) and this library can only name the array. Checked before
+the write, so the refusal leaves the document alone.
+
 ### The MongoClient shim
 
 `MongoClient` (src/mongo-client.ts) exists for ONE use case: a test suite
@@ -651,8 +727,12 @@ error, not a second view of the same collections — that silent merge is exactl
 what `tableNameFor` prevents one level down. It is also why a session's
 transaction covers one database: each `db(name)` owns a connection.
 
-`startSession()`/`withSession()` are real (see Sessions above); `watch()` is the
-only method left that throws, and it is a decision rather than a gap.
+`startSession()`/`withSession()` are real (see Sessions above), and so is
+`watch()` (see Change streams above) — **no method on the shim throws any
+more.** A client-wide `watch()` subscribes to the hub of every database the
+client has opened AND of any opened later, which is why `MongoClient` keeps its
+open streams: a cluster-wide stream on a real deployment sees collections
+created after it started, and here a new database is a new connection.
 
 [test/mongo-client.spec.ts](test/mongo-client.spec.ts) and
 [test/client-session.spec.ts](test/client-session.spec.ts) run the same test
@@ -816,11 +896,16 @@ Other things to know:
   also imports `Db as Mdb` as a **value** (not `import type`) because its
   assertions use `instanceof Mdb`.
 
-- Two specs deliberately run against this library **alone**, and say so at the
+- Three specs deliberately run against this library **alone**, and say so at the
   top: [test/cursor.spec.ts](test/cursor.spec.ts) (statement lifetime has no
-  MongoDB analogue) and the rejection half of
+  MongoDB analogue), the rejection half of
   [test/collections.spec.ts](test/collections.spec.ts) (the driver defers name
-  validation to the server). Everything else is dual-engine.
+  validation to the server) and
+  [test/change-stream-boundaries.spec.ts](test/change-stream-boundaries.spec.ts)
+  (a server has an oplog and so has none of these limits). Everything else is
+  dual-engine — including every change EVENT, in
+  [test/change-streams.spec.ts](test/change-streams.spec.ts), which is the
+  second spec to inject `mongoReplicaSetUri`.
 - [test/operators/operator-edge-cases.spec.ts](test/operators/operator-edge-cases.spec.ts)
   collects the compiler's edge cases — empty arrays, scalars where arrays were
   expected, malformed operators. When a query "returns nothing" or dies with a

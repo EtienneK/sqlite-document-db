@@ -114,6 +114,21 @@ describe('driver seam', () => {
       expect(await db.collection('items').countDocuments({})).toStrictEqual(25)
     })
 
+    it('should still report changes, which need RETURNING rather than a cursor', async () => {
+      // A change stream's multi-document paths use `UPDATE`/`DELETE ...
+      // RETURNING` to get their post-images in one statement. That is a
+      // property of the SQL, not of the driver's streaming, so a materialising
+      // engine reports the same events - which is what this pins.
+      const stream = db.collection('items').watch()
+      await stream.tryNext()
+      await db.collection('items').updateMany({ n: { $lt: 3 } }, { $set: { seen: true } })
+
+      const keys = []
+      for (let i = 0; i < 3; i++) keys.push((await stream.next()).documentKey!._id)
+      expect(keys).toStrictEqual([0, 1, 2])
+      await stream.close()
+    })
+
     it('should still run raw SQL, in the shape the escape hatch promises', async () => {
       // db.sql goes through the driver like everything else, and its rows are
       // normalised here rather than being whatever the engine returns.

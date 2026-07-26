@@ -31,6 +31,7 @@ code the import is just `import Db from 'sqlite-document-db'`.
 | [14-transactions-and-joins.mjs](14-transactions-and-joins.mjs) | `withTransaction`, `bulkWrite`, `$lookup`, and the admin surface |
 | [15-raw-sql.mjs](15-raw-sql.mjs) | `db.sql` — window functions and CTEs, bound values, raw rows |
 | [16-mongo-client.mjs](16-mongo-client.mjs) | The `MongoClient` shim and `startSession()` — swapping one import for a test suite |
+| [17-change-streams.mjs](17-change-streams.mjs) | `watch()`, event pipelines, and the `invalidate` that marks the edge of what a stream can see |
 | [deno.ts](deno.ts) | The same quickstart, run by Deno |
 
 ## Deno

@@ -1,6 +1,8 @@
 import { describe, expectTypeOf, it } from 'vitest'
 
-import type { ClientSession, Collection, Db, Document, Filter, UpdateFilter, WithId } from '../src/index.js'
+import type {
+  ChangeStreamDocument, ClientSession, Collection, Db, Document, Filter, UpdateFilter, WithId
+} from '../src/index.js'
 
 /**
  * Type-level tests for BACKLOG item 5b.
@@ -281,5 +283,33 @@ describe('{ session }', () => {
     expectTypeOf(await session.withTransaction(async () => 42)).toEqualTypeOf<number>()
     expectTypeOf(session.inTransaction()).toEqualTypeOf<boolean>()
     expectTypeOf(session.hasEnded).toEqualTypeOf<boolean>()
+  })
+})
+
+describe('watch()', () => {
+  it('types an event, and the document inside it', async () => {
+    const stream = col.watch()
+    const event = await stream.next()
+    expectTypeOf(event).toEqualTypeOf<ChangeStreamDocument<Item>>()
+    expectTypeOf(event.operationType).toEqualTypeOf<
+    'insert' | 'update' | 'replace' | 'delete' | 'drop' | 'rename' | 'dropDatabase' | 'invalidate'>()
+    // The images carry the collection's schema, so a mistyped field in an
+    // event handler is a compile error like anywhere else.
+    expectTypeOf(event.fullDocument).toEqualTypeOf<WithId<Item> | undefined>()
+    expectTypeOf(event.documentKey).toEqualTypeOf<{ _id: any } | undefined>()
+    await stream.close()
+  })
+
+  it('accepts the options MongoDB has, and refuses the ones it does not', async () => {
+    col.watch([], { fullDocument: 'updateLookup' })
+    col.watch([], { fullDocumentBeforeChange: 'whenAvailable' })
+    col.watch([{ $match: { operationType: 'insert' } }], { session })
+    // @ts-expect-error - 'always' is not one of MongoDB's fullDocument values,
+    // and a value that is silently ignored is the failure mode this avoids.
+    col.watch([], { fullDocument: 'always' })
+  })
+
+  it('is on the database and the client too', async () => {
+    expectTypeOf(db.watch()).toEqualTypeOf<import('../src/index.js').ChangeStream<Document>>()
   })
 })

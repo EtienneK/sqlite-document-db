@@ -56,9 +56,9 @@ test fixtures, small services. Anywhere "just use SQLite" is right but modelling
 documents as columns is not.
 
 **A poor fit for** lifting an existing MongoDB application over unchanged. This
-is a subset — no change streams, no sharding, no replica sets, and an
-aggregation pipeline that covers the common shapes rather than all of them.
-[Missing Features](#missing-features) is the exact list.
+is a subset — no sharding, no replica sets, change streams that see one process,
+and an aggregation pipeline that covers the common shapes rather than all of
+them. [Missing Features](#missing-features) is the exact list.
 
 **Using it as a MongoDB test double** works, and is a deliberate use case — it
 starts in milliseconds where `mongodb-memory-server` takes seconds, and
@@ -825,9 +825,8 @@ mean editing the very line the shim exists to leave alone. A file path or
   operator they cannot make an answer wrong. `strict`, `busyTimeoutMs` and
   `debug` are read from the same object.
 - **`startSession()` and `withSession()` work** — see below.
-- **`watch()` throws**, naming what to use instead. Change streams are decided
-  against, not missing: they need an oplog, and the local approximations are
-  connection-local, unresumable and unverifiable. See BACKLOG.md.
+- **`watch()` works**, within a stated scope — see
+  [Change streams](#change-streams).
 
 The tests for this run the *same* code through both this shim and the real
 driver, which is the only way a drop-in claim can be more than a claim.
@@ -873,6 +872,65 @@ Session options (`causalConsistency`, `readConcern`, `writeConcern`, …) are
 ignored, on the same grounds as the connection options: one connection to a
 local file satisfies the first trivially, and there is no replica set for the
 others to mean anything against.
+
+### Change streams
+
+`watch()` on a collection, a database or a client, returning an async iterable
+of the same change events a server emits.
+
+```javascript
+const stream = orders.watch([{ $match: { operationType: 'insert' } }])
+
+for await (const event of stream) {
+  console.log(event.operationType, event.documentKey, event.fullDocument)
+}
+```
+
+Events are emitted by the write methods themselves rather than recovered from
+the engine, which is what makes the shapes exact: `insert`, `update`, `replace`,
+`delete`, `drop`, `rename`, `dropDatabase` and `invalidate`, each with the `_id`
+resume token, `ns`, `documentKey`, `wallTime` and — where MongoDB has one —
+`updateDescription`. All of them are checked against a real replica set, so
+`updateDescription` reports what a server reports, down to naming an appended
+array element by index (`{ 'tags.1': 'z' }`) where a rebuilt array comes back
+whole.
+
+- **Inside a transaction, events are buffered and published on COMMIT.** A
+  rollback discards them, exactly as a server does not publish uncommitted
+  transaction data.
+- **The pipeline is MongoDB's allow-list**, intersected with what this library
+  implements: `$match`, `$project`, `$addFields`, `$set` and `$unset`. A
+  blocking stage could never complete over a stream that does not end, which is
+  why the server refuses those too.
+- **`fullDocument`** defaults to MongoDB's default — an `update` event carries
+  a diff and no document until you ask with `fullDocument: 'updateLookup'`.
+  `fullDocumentBeforeChange` also works, and unlike on a server it needs no
+  collection option, because the pre-image is already in hand.
+- **An unwatched database pays nothing.** Every write path checks whether
+  anything is watching before doing any of this, and the post-images the
+  multi-document writes need come from `UPDATE`/`DELETE … RETURNING` — so a
+  watched `updateMany` is still one statement.
+
+**What a stream here can see, and what it says when it cannot.** Only writes
+made through this library, on this connection, can be described. That is a real
+limit, and the design is built so it is never a silent one:
+
+> Anything else **ends the stream with an `invalidate`** — the event MongoDB
+> already has for a stream that cannot continue, and that callers already
+> handle.
+
+Two things trigger it. Another connection committing to the same file is
+detected with `PRAGMA data_version`, which SQLite bumps for everyone else's
+writes and not for your own; and a `db.sql` statement that changed rows is
+detected by counting them, because describing raw SQL would mean parsing it.
+Both arrive as `{ operationType: 'invalidate', invalidateReason: 'foreignWrite' }`
+(or `'rawSqlWrite'`), the reason being this library's own addition to the shape.
+
+`resumeAfter` and `startAfter` are **refused**, with that reason: a resume token
+points into an oplog, and the events here exist only while a stream is open.
+Open the stream before the writes it must not miss. `clusterTime` is absent for
+the same kind of reason — it is a BSON Timestamp describing a replication clock
+that does not exist.
 
 ### Raw SQL
 
@@ -1044,15 +1102,16 @@ Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
 `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
 `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()` `createIndex()`
 `createIndexes()` `dropIndex()` `dropIndexes()` `indexes()` `listIndexes()`
-`indexExists()` `rename()` `drop()`, each taking `{ session }`; on cursors,
+`indexExists()` `rename()` `drop()` [`watch()`](#change-streams), each taking
+`{ session }`; on cursors,
 `next()` `tryNext()` `hasNext()` `toArray()` `forEach()` `map()` `rewind()`
 `count()` `close()` `explain()` and the chainable `sort()` `limit()` `skip()`
 `project()`; on `Db`, `withTransaction()` `listCollections()`
-`createCollection()` `renameCollection()` `dropDatabase()` `stats()`
+`createCollection()` `renameCollection()` `dropDatabase()` `stats()` `watch()`
 `databaseName`, and [`sql`](#raw-sql) / `table()` for SQL this library does not
 compile; plus a [`MongoClient` shim](#a-mongoclient-shaped-entry-point) with
-[`startSession()`](#sessions-and-the-one-thing-they-cannot-do) and
-`withSession()`.
+[`startSession()`](#sessions-and-the-one-thing-they-cannot-do), `withSession()`
+and `watch()`.
 
 `db.stats()`'s COUNTS (`collections`, `objects`, `dataSize`) mean what they do
 on MongoDB; the byte figures under them describe a SQLite file —
@@ -1177,13 +1236,13 @@ how each piece would be implemented. The headlines:
 - `$group` accumulators beyond those listed above — `$median` and `$percentile`,
   whose interpolation rule has to be taken from the server rather than guessed
 
-**Change streams** — `watch()` throws today. The first attempt to build them
-asked SQLite what had changed and got nothing back (no update hook; the session
-extension records zero bytes for these tables). The version now planned emits
-events from this library's own write path instead, which works for a single
-process — and uses `PRAGMA data_version` to detect another connection's writes,
-so the limit of that scope surfaces as an `invalidate` event rather than as
-silence. BACKLOG.md items 26 and 27 have the measurements and the design.
+**Change streams see one process.** [`watch()`](#change-streams) is implemented
+and its event shapes are verified against a real replica set, but the events
+come from this library's own write path, so a write from another connection —
+or through `db.sql` — cannot be described. Neither is passed over: both end the
+stream with an `invalidate`. `resumeAfter` is refused rather than approximated,
+because there is no oplog for a token to point into. BACKLOG.md items 26 and 27
+have the measurements behind both halves.
 
 **Not planned**
 

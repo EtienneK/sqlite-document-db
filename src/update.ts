@@ -148,6 +148,68 @@ function updateTargets (update: AnyUpdate): Array<[string, string]> {
   return targets
 }
 
+/** One path an update writes to. See `updatedPaths`. */
+export interface UpdatedPath {
+  path: string
+  /**
+   * True for the operators that can EXTEND an array at the end (`$push`,
+   * `$addToSet`), which MongoDB reports one appended index at a time.
+   */
+  appends: boolean
+}
+
+/** The operators MongoDB reports by appended index rather than by whole array. */
+const APPENDING_OPERATORS = new Set(['$push', '$addToSet'])
+
+/**
+ * Every document path an update WRITES TO - what a change event's
+ * `updateDescription` names (BACKLOG item 27).
+ *
+ * Taken from the update SPEC rather than from a diff of the before and after
+ * documents, because the spec is what MongoDB reports and a diff cannot
+ * reproduce it. Verified against the server: `$set: { a: { b: 1, c: 2 } }` over
+ * an existing `a` names `'a'` and NOT `'a.b'`/`'a.c'`, which is exactly the
+ * answer a minimal diff would get wrong. The VALUES are read out of the new
+ * document afterwards (`updateDescriptionFor` in src/change-stream.ts), so a
+ * path missing there is a removal - which is what makes `$unset` and a
+ * `$rename`'s source fall out of one rule instead of a case each.
+ *
+ * Two things the oracle settled, both pinned in test/change-streams.spec.ts:
+ *
+ * - **`$push` and `$addToSet` name the appended INDEX** (`'tags.1'`), where
+ *   `$pop` and `$pull` name the whole rebuilt array - even a 40-element one, so
+ *   this is not a size heuristic. `appends` is what carries that distinction;
+ *   the append is only reported per-index when the new array actually extends
+ *   the old one, which is why `$push` with `$position`, `$sort` or `$slice`
+ *   comes back whole.
+ * - **A path written THROUGH a positional operator is reported as the array**:
+ *   `'grades.$[e].score'` becomes `'grades'`. MongoDB names the concrete
+ *   element it hit (`'grades.1.score'`), which is not knowable until the
+ *   statement has run - `strict` refuses that case rather than quietly
+ *   reporting the wider path.
+ */
+export function updatedPaths (update: AnyUpdate): UpdatedPath[] {
+  const paths: UpdatedPath[] = []
+  for (const [operator, field] of updateTargets(update)) {
+    // $setOnInsert shapes the document an upsert INSERTS and never modifies an
+    // existing one, so it is not part of any update event.
+    if (operator === '$setOnInsert') continue
+    const segments = field.split('.')
+    const at = segments.findIndex(segment => POSITIONAL_SEGMENT.test(segment))
+    const path = at === -1 ? field : segments.slice(0, at).join('.')
+    if (paths.some(seen => seen.path === path)) continue
+    paths.push({ path, appends: at === -1 && APPENDING_OPERATORS.has(operator) })
+  }
+  return paths
+}
+
+/** True when an update writes through `$`, `$[]` or `$[<identifier>]`. See `updatedPaths`. */
+export function writesThroughPositional (update: AnyUpdate): boolean {
+  return updateTargets(update).some(
+    ([, field]) => field.split('.').some(segment => POSITIONAL_SEGMENT.test(segment))
+  )
+}
+
 /**
  * Rejects an update whose operators target the same path twice, or a path and
  * one of its ancestors - MongoDB's "would create a conflict at" error. Every

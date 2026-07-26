@@ -118,6 +118,119 @@ export interface SessionHost {
   rollback: (frame: TransactionFrame) => void
 }
 
+// ---------------------------------------------------------------------------
+// Change streams (BACKLOG item 27). The runtime is src/change-stream.ts; these
+// are here for the same reason the session types are - `Collection`, `Db` and
+// `MongoClient` all name them, and types.ts is the module that may be imported
+// from anywhere.
+// ---------------------------------------------------------------------------
+
+/**
+ * A change event's `_id`, and the thing `resumeAfter` takes.
+ *
+ * MongoDB's is an opaque hex string encoding a cluster time and a document key;
+ * this library's is a counter for the lifetime of the PROCESS, because there is
+ * no oplog to point into. That difference is why a token from an earlier run
+ * cannot be resumed from and is refused rather than quietly ignored - see
+ * `ChangeStreamOptions.resumeAfter`.
+ */
+export interface ResumeToken {
+  _data: string
+}
+
+/** The collection an event happened in. `coll` is absent on `dropDatabase`. */
+export interface ChangeStreamNamespace {
+  db: string
+  coll?: string
+}
+
+/** What an `update` event says changed. See the note in src/change-stream.ts. */
+export interface UpdateDescription {
+  /** The paths the update wrote, with their values in the new document. */
+  updatedFields: Document
+  /** The paths the update removed - `$unset`, and a `$rename`'s source. */
+  removedFields: string[]
+  /**
+   * Always empty. MongoDB reports arrays shortened in place here; every array
+   * this library's update operators rebuild comes back whole in
+   * `updatedFields`, so there is nothing to put in it.
+   */
+  truncatedArrays: Document[]
+}
+
+export type ChangeStreamOperationType =
+  | 'insert' | 'update' | 'replace' | 'delete'
+  | 'drop' | 'rename' | 'dropDatabase' | 'invalidate'
+
+/**
+ * Why a stream ended for a reason MongoDB does not have.
+ *
+ * Absent on the `invalidate` events a real server also emits (after a `drop`,
+ * `rename` or `dropDatabase`); present on the two boundaries that are this
+ * library's alone, where the honest report is "there were changes, and they
+ * cannot be described".
+ */
+export type InvalidateReason = 'foreignWrite' | 'rawSqlWrite'
+
+export interface ChangeStreamDocument<TSchema extends Document = Document> {
+  _id: ResumeToken
+  operationType: ChangeStreamOperationType
+  /** When the event was emitted. */
+  wallTime: Date
+  ns?: ChangeStreamNamespace
+  /** Where a `rename` sent the collection. */
+  to?: ChangeStreamNamespace
+  documentKey?: { _id: any }
+  fullDocument?: WithId<TSchema>
+  fullDocumentBeforeChange?: WithId<TSchema>
+  updateDescription?: UpdateDescription
+  /** Set only on the invalidates this library emits of its own accord. */
+  invalidateReason?: InvalidateReason
+}
+
+export interface ChangeStreamOptions extends SessionOption {
+  /**
+   * Whether an `update` event carries the document as well as the diff.
+   *
+   * `'default'` (the default) omits it, exactly as MongoDB does; any of
+   * `'updateLookup'`, `'whenAvailable'` and `'required'` includes it. The
+   * document is the POST-IMAGE - the row as this update left it - where
+   * MongoDB's `updateLookup` re-reads the document when the event is delivered
+   * and so can return a later version. Ours is the more useful answer and it is
+   * certainly a different one.
+   */
+  fullDocument?: 'default' | 'updateLookup' | 'whenAvailable' | 'required'
+  /**
+   * Whether an `update`, `replace` or `delete` event carries the document as it
+   * was BEFORE the change.
+   *
+   * MongoDB requires the collection to have been created with
+   * `changeStreamPreAndPostImages` and errors otherwise; here the pre-image is
+   * already in hand (the single-document writes read the row first, and
+   * `deleteMany` gets it back from `RETURNING`), so it is simply provided.
+   */
+  fullDocumentBeforeChange?: 'off' | 'whenAvailable' | 'required'
+  /**
+   * Resume after a token this PROCESS issued, and only when nothing has
+   * happened since - there is no oplog to replay from, so any other token is
+   * refused rather than silently skipped over.
+   */
+  resumeAfter?: ResumeToken
+  /** As `resumeAfter`; MongoDB distinguishes them only across an invalidate. */
+  startAfter?: ResumeToken
+  /** Ignored - it describes a network batch, and there is no network. */
+  batchSize?: number
+  /** Ignored - `next()` waits for an event however long that takes. */
+  maxAwaitTimeMS?: number
+  /**
+   * How often (ms) to check whether ANOTHER connection has written, which is
+   * what turns "events you cannot see" into an `invalidate`. This library's own
+   * option; MongoDB has nothing to poll for. Only checked while a reader is
+   * waiting, and only meaningful for a file-backed database.
+   */
+  pollIntervalMS?: number
+}
+
 export type IndexDirection = 1 | -1
 
 export type IndexSpecification = string | Record<string, IndexDirection>

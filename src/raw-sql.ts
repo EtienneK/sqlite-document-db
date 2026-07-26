@@ -75,7 +75,20 @@ export interface RawSql {
   run: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<{ changes: number }>
 }
 
-export function createRawSql (db: Driver, isDebug: () => boolean): RawSql {
+/**
+ * Wraps every statement `db.sql` runs.
+ *
+ * It exists for change streams (BACKLOG item 27): a raw statement can write
+ * rows that no change event describes, and `Db` uses this to notice and end the
+ * stream rather than let it look complete. It wraps ALL THREE templates because
+ * `RETURNING` makes `all` and `get` write too. The default runs the statement
+ * and nothing else.
+ */
+export type StatementObserver = <T>(statement: () => T) => T
+
+export function createRawSql (
+  db: Driver, isDebug: () => boolean, observe: StatementObserver = statement => statement()
+): RawSql {
   const compile = (strings: TemplateStringsArray, values: unknown[]): { sql: string, params: Bindable[] } => {
     const compiled = compileTemplate(strings, values)
     if (isDebug()) console.log(compiled.sql, compiled.params)
@@ -85,16 +98,16 @@ export function createRawSql (db: Driver, isDebug: () => boolean): RawSql {
   return {
     all: async <T = DriverRow>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T[]> => {
       const { sql, params } = compile(strings, values)
-      return db.prepare(sql).all(params).map(plainRow) as T[]
+      return observe(() => db.prepare(sql).all(params).map(plainRow)) as T[]
     },
     get: async <T = DriverRow>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T | undefined> => {
       const { sql, params } = compile(strings, values)
-      const row = db.prepare(sql).get(params)
+      const row = observe(() => db.prepare(sql).get(params))
       return (row === undefined ? undefined : plainRow(row)) as T | undefined
     },
     run: async (strings: TemplateStringsArray, ...values: unknown[]): Promise<{ changes: number }> => {
       const { sql, params } = compile(strings, values)
-      return { changes: Number(db.prepare(sql).run(params).changes) }
+      return { changes: Number(observe(() => db.prepare(sql).run(params)).changes) }
     }
   }
 }

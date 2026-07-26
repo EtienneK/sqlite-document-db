@@ -26,6 +26,8 @@ export type { MongoClientOptions } from './mongo-client.js'
 // `client.startSession()`, and the `{ session }` every operation accepts.
 export { ClientSession } from './client-session.js'
 export type { ClientSessionOptions, TransactionOptions } from './client-session.js'
+// `watch()` on a collection, a database or a client.
+export { ChangeStream } from './change-stream.js'
 export type { Driver, DriverParams, DriverRow, DriverStatement } from './driver.js'
 export { DUPLICATE_KEY_ERROR, MongoServerError } from './errors.js'
 export type { PartialWriteResult } from './errors.js'
@@ -36,14 +38,17 @@ export type {
 } from './filter-types.js'
 export type {
   AggregateOptions, AggregationCursor, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult,
+  ChangeStreamDocument, ChangeStreamNamespace, ChangeStreamOperationType, ChangeStreamOptions,
   CollectionInfo, CountOptions, CreateCollectionOptions, CreateIndexOptions, Cursor, DbOptions,
   DbStats, DbStatsOptions, DeleteOptions, DeleteResult, DistinctOptions, Document, DropCollectionOptions,
   DropDatabaseOptions, DropIndexOptions, EstimatedDocumentCountOptions, FindCursor,
   FindOneAndDeleteOptions, FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions,
   Hint, IndexDescription, IndexDescriptionInput, IndexDirection, IndexSpecification,
-  InsertManyOptions, InsertManyResult, InsertOneOptions, InsertOneResult, ListCollectionsOptions,
+  InsertManyOptions, InsertManyResult, InsertOneOptions, InsertOneResult, InvalidateReason,
+  ListCollectionsOptions,
   ListIndexesOptions, PipelineExplanation, QueryExplanation, RenameOptions, ReplaceOptions,
-  SessionOption, SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
+  ResumeToken, SessionOption, SortSpecification, UpdateDescription, UpdateOptions, UpdateResult,
+  WithId, WithoutId
 } from './types.js'
 
 export default Db

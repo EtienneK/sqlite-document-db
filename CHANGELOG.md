@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Change streams.** `watch()` on a collection, a database and the
+  `MongoClient` shim, returning an async iterable of the change events a server
+  emits — `insert`, `update`, `replace`, `delete`, `drop`, `rename`,
+  `dropDatabase` and `invalidate`, each with `_id`, `ns`, `documentKey`,
+  `wallTime` and, where MongoDB has one, `updateDescription`. Every shape is
+  verified against a real replica set, which is what corrected two rules
+  reasoning would have got wrong: `updateDescription` follows the update SPEC
+  (so `$set: { a: { b: 1 } }` names `a`, not `a.b`), and an array append names
+  the appended index (`{ 'tags.1': 'z' }`) where a rebuilt array comes back
+  whole.
+  - Events are emitted by the write methods themselves, buffered inside a
+    transaction and published on COMMIT; a rollback discards them.
+  - A pipeline argument accepts MongoDB's allow-list, intersected with what this
+    library implements: `$match`, `$project`, `$addFields`, `$set`, `$unset`.
+  - `fullDocument` defaults to MongoDB's default (an update carries a diff, not
+    a document); `fullDocumentBeforeChange` works and, unlike on a server, needs
+    no collection option.
+  - **An unwatched database pays nothing**, and that is a shape assertion rather
+    than a hope: the post-images come from `UPDATE`/`DELETE … RETURNING`, so a
+    watched `updateMany` is still one statement, and an unwatched one compiles
+    the SQL it always did.
+  - **Every limit is an `invalidate`, never a silence.** Only writes made
+    through this library on this connection can be described; another
+    connection committing (`PRAGMA data_version`) and a `db.sql` statement that
+    changed rows (`total_changes()`) both END the stream, with
+    `invalidateReason` saying which. `resumeAfter`/`startAfter` are refused,
+    with the reason: a resume token points into an oplog, and there is none.
 - **The operator gap sweep.** Everything the MongoDB manual lists that was
   small enough to be an afternoon, in one pass and oracle-verified:
   - Update operators **`$currentDate`** and **`$bit`**, both usable through the

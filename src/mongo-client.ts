@@ -10,17 +10,19 @@
  * import { MongoClient } from 'sqlite-document-db'   // was: from 'mongodb'
  * ```
  *
- * **It is a shim, not a driver.** There is no server and no connection pool, and
- * the surface here says so rather than pretending: `watch` throws an error
- * naming what to use instead. What it does promise is the part this library can
- * evidence - the CRUD, query, update, aggregation and transaction subset,
- * checked assertion for assertion against a real MongoDB.
+ * **It is a shim, not a driver.** There is no server and no connection pool.
+ * What it promises is the part this library can evidence - the CRUD, query,
+ * update, aggregation, transaction and change-stream subset, checked assertion
+ * for assertion against a real MongoDB.
  *
- * `startSession()` DOES work (see src/client-session.ts), because
- * `session.withTransaction()` is how a great deal of MongoDB transaction code
- * is written and rewriting it is the one thing this file exists to avoid. What
- * a session cannot do here is route an operation around a transaction, and that
- * limit is documented on `ClientSession` and enforced under `strict`.
+ * No method here throws any more. `startSession()` works (see
+ * src/client-session.ts) because `session.withTransaction()` is how a great
+ * deal of MongoDB transaction code is written and rewriting it is the one thing
+ * this file exists to avoid; `watch()` works (see src/change-stream.ts) within
+ * a scope it states. Each has one limit that is documented where it lives and
+ * enforced under `strict`: a session cannot route an operation AROUND a
+ * transaction, and a change stream cannot describe a write made by another
+ * connection - it ends with an `invalidate` instead of going quiet.
  *
  * Two deliberate leniencies, both because refusing would defeat the point:
  *
@@ -34,9 +36,10 @@
  *   (`strict`, `busyTimeoutMs`, `debug`) are read from the same object.
  */
 
+import { ChangeStream } from './change-stream.js'
 import { ClientSession, type ClientSessionOptions } from './client-session.js'
 import { Db } from './db.js'
-import type { DbOptions } from './types.js'
+import type { ChangeStreamOptions, DbOptions, Document } from './types.js'
 
 /** Where a `MongoClient` URL points, once the MongoDB spellings are resolved. */
 interface Target {
@@ -77,6 +80,12 @@ export class MongoClient {
   private readonly databases = new Map<string, Db>()
   /** Live sessions, so `close()` can end them the way the driver does. */
   private readonly sessions = new Set<ClientSession>()
+  /**
+   * Client-wide change streams, so a database opened AFTER `watch()` is still
+   * covered - a cluster-wide stream on a real deployment sees collections
+   * created later, and here a new database is a new connection with its own hub.
+   */
+  private readonly streams = new Set<ChangeStream<any>>()
   private closed = false
 
   constructor (url: string, options: MongoClientOptions = {}) {
@@ -133,12 +142,16 @@ export class MongoClient {
     }
 
     const opened = Db.openSync(this.target.file, { ...this.options, databaseName: name })
+    // A client-wide watch() covers this database too, however late it arrives.
+    for (const stream of this.streams) opened.attachChangeStream(stream)
     this.databases.set(name, opened)
     return opened
   }
 
-  /** Closes every database this client opened, ending its sessions first. */
+  /** Closes every database this client opened, ending its streams and sessions first. */
   async close (): Promise<void> {
+    for (const stream of Array.from(this.streams)) await stream.close()
+    this.streams.clear()
     // Ending a session rolls back any transaction still open on it, so this
     // order is what keeps a forgotten commit from being decided by db.close().
     // Over a copy: endSession removes the session from the set it is iterating.
@@ -182,10 +195,32 @@ export class MongoClient {
     }
   }
 
-  watch (): never {
-    throw Error(
-      'change streams are not supported: they read a replica set oplog, which an embedded database ' +
-      'does not have. A process that needs them needs a server'
-    )
+  /**
+   * Watches every database this client has opened, or will open (BACKLOG
+   * item 27).
+   *
+   * ```javascript
+   * const stream = client.watch([{ $match: { operationType: 'insert' } }])
+   * for await (const event of stream) console.log(event.ns, event.fullDocument)
+   * ```
+   *
+   * A client here can hold several databases and each is its own connection, so
+   * a client-wide stream subscribes to each of their event hubs - and to the
+   * hub of any database opened later, which is why open streams are remembered.
+   * `db.watch()` and `collection.watch()` are the narrower scopes.
+   *
+   * What a stream can and cannot see is set out on `ChangeStream` in
+   * src/change-stream.ts. The short version: writes made through this library
+   * are reported exactly, and anything else ends the stream with an
+   * `invalidate` rather than being passed over in silence.
+   */
+  watch <TDocument extends Document = Document>(
+    pipeline: Document[] = [], options: ChangeStreamOptions = {}
+  ): ChangeStream<TDocument> {
+    if (this.closed) throw Error('MongoClient is closed')
+    const stream = new ChangeStream<TDocument>({}, pipeline, options)
+    for (const db of this.databases.values()) db.attachChangeStream(stream)
+    this.streams.add(stream)
+    return stream
   }
 }
