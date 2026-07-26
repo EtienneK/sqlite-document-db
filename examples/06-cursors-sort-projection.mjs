@@ -40,4 +40,27 @@ console.log('exclude    ', await items.findOne({ item: 'paper' }, { projection: 
 console.log('nested     ', await items.findOne({ item: 'paper' }, { projection: { 'size.uom': 1, _id: 0 } }))
 console.log('chainable  ', await items.find().project({ item: 1, _id: 0 }).toArray())
 
+// The array operators. $slice takes a window; note it decides NOTHING about
+// inclusion or exclusion on its own - the whole document comes back, shortened.
+const orders = db.collection('orders')
+await orders.insertMany([
+  { who: 'ann', lines: [{ sku: 'a', qty: 1 }, { sku: 'b', qty: 9 }, { sku: 'c', qty: 4 }] },
+  { who: 'bob', lines: [{ sku: 'a', qty: 7 }] }
+])
+
+console.log('\n$slice     ', JSON.stringify(await orders.findOne({ who: 'ann' }, { projection: { _id: 0, lines: { $slice: 2 } } })))
+console.log('$slice last', JSON.stringify(await orders.findOne({ who: 'ann' }, { projection: { _id: 0, who: 1, lines: { $slice: -1 } } })))
+
+// $elemMatch returns the FIRST element matching a criterion, and is an
+// inclusion - so `who` has to be asked for.
+console.log('$elemMatch ', JSON.stringify(await orders.find(
+  {}, { projection: { who: 1, _id: 0, lines: { $elemMatch: { qty: { $gt: 5 } } } } }
+).toArray()))
+
+// $ returns the element that matched the QUERY, so the query has to say
+// something about that array - without a condition it is an error, not a guess.
+console.log('positional ', JSON.stringify(await orders.find(
+  { 'lines.qty': { $gt: 5 } }, { projection: { _id: 0, who: 1, 'lines.$': 1 } }
+).toArray()))
+
 await db.close()

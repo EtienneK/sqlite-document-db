@@ -267,6 +267,38 @@ db.collection('items').find().project({ 'size.uom': 0 })
 db.collection('items').find().project({ item: 1, 'instock.qty': 1 })
 ```
 
+The three array operators are supported too:
+
+```javascript
+// $slice — a window over an array
+db.collection('posts').find().project({ comments: { $slice: 5 } })      // the first five
+db.collection('posts').find().project({ comments: { $slice: -5 } })     // the last five
+db.collection('posts').find().project({ comments: { $slice: [10, 5] } }) // skip 10, take 5
+
+// $elemMatch — the first element matching a criterion
+db.collection('students').find().project({ grades: { $elemMatch: { score: { $gt: 80 } } } })
+
+// $ positional — the element that matched the query
+db.collection('students').find({ 'grades.score': { $gt: 80 } }).project({ 'grades.$': 1 })
+```
+
+Two rules are easy to get wrong, and both are copied from the server:
+
+- **`$slice` decides nothing about inclusion or exclusion.** A projection of
+  nothing but `$slice` returns whole documents with one array shortened;
+  alongside `{ name: 1 }` it behaves as an inclusion, and alongside
+  `{ name: 0 }` the sliced field is kept. `$elemMatch` and `$` are ordinary
+  inclusions.
+- **A field with no matching element is omitted**, not returned empty — for
+  both `$elemMatch` and `$`.
+
+`$` needs the query to constrain the array it projects (that is where the
+matching element comes from), cannot be combined with exclusion, and may appear
+once per projection; each of those is an error rather than a quiet answer.
+Deciding *which* element matched is done by the query engine, as an extra
+column of the query already being run — so `find()` pays no extra statement for
+it, and there is only ever one implementation of the filter language.
+
 ### Sort, limit and skip
 
 ```javascript
@@ -845,7 +877,6 @@ how each piece would be implemented. The headlines:
 
 **Querying**
 
-- Projection `$`-operators: `$slice`, `$elemMatch`, `$` positional
 - `$text`. It needs a stemming full-text index, and SQLite's FTS5 stemmer does
   not agree with MongoDB's — the same query would return different documents on
   the two, which is the one thing this library will not do quietly. Use

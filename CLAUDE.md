@@ -74,7 +74,20 @@ belongs in types.ts.**
   `$sort` at the head of a pipeline. Pinned by
   [test/unicode.spec.ts](test/unicode.spec.ts).
 - [src/ejson.ts](src/ejson.ts) — storage serialization (see the EJSON gotcha below).
-- [src/projection.ts](src/projection.ts) — MongoDB projection semantics, applied in JS.
+- [src/projection.ts](src/projection.ts) — MongoDB projection semantics, applied
+  in JS. **The `$`-operators do not decide which element matched — SQLite does.**
+  `$elemMatch` and `$` both need "the first element of this array satisfying a
+  criterion", and the criterion is written in the filter language, so answering
+  it here would be a second implementation of that language. Instead a compiled
+  projection declares `probes`, `find()` compiles each into an extra column of
+  the query it was already running (`firstMatchingElementSql` in query.ts), and
+  `project()` is handed the indexes. `findOneAnd*` has no cursor to hang a
+  column off, so it pays ONE extra statement — only when a probe exists.
+  **Non-obvious detail: `$slice` decides nothing about inclusion or exclusion.**
+  A spec of nothing but `$slice` returns whole documents with one array
+  shortened, so it must not touch the include/exclude counts — but it DOES have
+  to join the inclusion tree when the mode is inclusion, or the sliced field
+  vanishes.
 - [src/errors.ts](src/errors.ts) — `MongoServerError` / `DUPLICATE_KEY_ERROR` (11000).
 - [src/filter-types.ts](src/filter-types.ts) — `Filter<TSchema>` / `UpdateFilter<TSchema>`
   and the dot-notation path algebra behind them. Types only; no runtime code.

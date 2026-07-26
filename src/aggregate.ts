@@ -653,7 +653,9 @@ function compileProject (stage: string, value: unknown, strict: boolean): Stage 
     const excludeSpec: ProjectionSpec = {}
     for (const field of exclusions) excludeSpec[field] = 0
     if (idExplicit) excludeSpec._id = keepId ? 1 : 0
-    project = Object.keys(excludeSpec).length === 0 ? (doc: any) => doc : compileProjection(excludeSpec)
+    // An aggregation $project never carries the $-operators (it has expressions
+    // instead), so this compiled projection never has probes to resolve.
+    project = Object.keys(excludeSpec).length === 0 ? (doc: any) => doc : compileProjection(excludeSpec).project
   } else if (Object.keys(inclusions).length === 0) {
     // Nothing to include but the computed fields: the base document is `_id`
     // alone, which no include/exclude spec can express.
@@ -661,7 +663,7 @@ function compileProject (stage: string, value: unknown, strict: boolean): Stage 
       ? (doc: any) => ('_id' in doc ? { _id: doc._id } : {})
       : () => ({})
   } else {
-    project = compileProjection({ ...inclusions, _id: keepId ? 1 : 0 })
+    project = compileProjection({ ...inclusions, _id: keepId ? 1 : 0 }).project
   }
 
   return async function * (input) {

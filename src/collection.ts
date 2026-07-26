@@ -17,8 +17,11 @@ import { parse as parseDocument, stringify as stringifyDocument } from './ejson.
 import { attach, toMongoError, withPartialResult } from './errors.js'
 import type { Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
-import { compileProjection, type ProjectionSpec } from './projection.js'
-import { quoteIdentifier, toJson1PathString, toSortSql, toSql, type CompileOptions, type SqlParams } from './query.js'
+import { compileProjection, type CompiledProjection, type ProjectionSpec } from './projection.js'
+import {
+  bindRaw, createBindings, firstMatchingElementSql, quoteIdentifier, toJson1PathString, toSortSql, toSql,
+  type CompileOptions, type SqlParams
+} from './query.js'
 import type {
   AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions, BulkWriteResult,
   CountOptions, CreateIndexOptions, DbOptions, DeleteResult, Document, InsertManyOptions,
@@ -33,10 +36,8 @@ function updateResult (matchedCount: number, modifiedCount: number): UpdateResul
   return { acknowledged: true, matchedCount, modifiedCount, upsertedCount: 0, upsertedId: null }
 }
 
-/** Applies a projection to a single document, when one was requested. */
-function applyProjection<T> (doc: T, spec?: ProjectionSpec): T {
-  return spec == null ? doc : compileProjection(spec)(doc)
-}
+/** Column alias for a projection probe's answer. See firstMatchingElementSql. */
+const PROBE_COLUMN = '_sdb_probe'
 
 function assertLimit (count: number): void {
   if (typeof count !== 'number' || !Number.isFinite(count)) throw Error(`limit must be a finite number; but got: ${String(count)}`)
@@ -298,7 +299,7 @@ export class Collection<TSchema extends Document = Document> {
     let limitCount = options.limit
     let skipCount = options.skip
     let projectionSpec = options.projection
-    let projector: ((doc: any) => any) | undefined
+    let projector: CompiledProjection | undefined
     let rows: Iterator<unknown> | undefined
     let done = false
 
@@ -316,8 +317,16 @@ export class Collection<TSchema extends Document = Document> {
       const normalizedSort = typeof sortSpec === 'string' ? { [sortSpec]: 1 } : sortSpec
       if (normalizedSort != null) this.assertSortable(normalizedSort)
       const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
-      const filter = toSql('data', query, this.compileOptions)
-      let sql = `SELECT data FROM ${this.table} WHERE (${filter.sql}) ORDER BY ${orderBy}`
+      // One parameter registry for the filter AND the projection probes, so
+      // the two sets of placeholders cannot collide in the same statement.
+      const bindings = createBindings()
+      const filter = toSql('data', query, { ...this.compileOptions, bindings })
+      // $elemMatch / $ positional ask which element matched; the answer comes
+      // back as extra columns of this same query rather than a second one.
+      const probes = (projector?.probes ?? []).map((probe, index) =>
+        `, ${firstMatchingElementSql('data', probe.path, probe.criterion, bindings)} AS ${PROBE_COLUMN}${index}`
+      ).join('')
+      let sql = `SELECT data${probes} FROM ${this.table} WHERE (${filter.sql}) ORDER BY ${orderBy}`
 
       if (limitCount != null || skipCount != null) {
         // MongoDB: limit(0) means no limit (SQLite spells that -1), and a
@@ -337,8 +346,10 @@ export class Collection<TSchema extends Document = Document> {
       if (done) return null
       if (rows === undefined) {
         // Compiling here (not in find()) surfaces invalid projections as a
-        // rejected promise, matching where the driver reports them.
-        projector = projectionSpec == null ? undefined : compileProjection(projectionSpec)
+        // rejected promise, matching where the driver reports them. The filter
+        // is passed too: the `$` positional operator reads the condition on the
+        // projected array out of it.
+        projector = projectionSpec == null ? undefined : compileProjection(projectionSpec, query)
         const { sql, params } = buildStatement()
         rows = this.prepare(sql).iterate(params)
       }
@@ -347,8 +358,13 @@ export class Collection<TSchema extends Document = Document> {
         done = true
         return null
       }
-      const document = parseDocument((row.value as { data: string }).data)
-      return projector === undefined ? document : projector(document)
+      const columns = row.value as Record<string, unknown>
+      const document = parseDocument(columns.data as string)
+      if (projector === undefined) return document
+      return projector.project(
+        document,
+        projector.probes.map((_, index) => columns[`${PROBE_COLUMN}${index}`] as number | null)
+      )
     }
 
     const close = async (): Promise<void> => {
@@ -924,12 +940,12 @@ export class Collection<TSchema extends Document = Document> {
 
     if (found === null) {
       if (options.upsert !== true) return null
-      return await this.returnUpserted(buildUpsertDocument(filter, update), options)
+      return await this.returnUpserted(buildUpsertDocument(filter, update), options, filter)
     }
 
     const before = parseDocument(found.data) as WithId<TSchema>
     this.updateRow(expr, found.rowid)
-    return this.returnWritten(before, found.rowid, options)
+    return this.returnWritten(before, found.rowid, options, filter)
   }
 
   /** As `findOneAndUpdate`, but with a whole replacement document. */
@@ -941,13 +957,13 @@ export class Collection<TSchema extends Document = Document> {
 
     if (found === null) {
       if (options.upsert !== true) return null
-      return await this.returnUpserted(this.upsertReplacement(filter, replacement, givenId), options)
+      return await this.returnUpserted(this.upsertReplacement(filter, replacement, givenId), options, filter)
     }
 
     const before = parseDocument(found.data) as WithId<TSchema>
     if (givenId != null && before._id !== givenId) throw Error('_id field is immutable and cannot be changed')
     this.replaceRow(found.rowid, replacement, before._id)
-    return this.returnWritten(before, found.rowid, options)
+    return this.returnWritten(before, found.rowid, options, filter)
   }
 
   /** Deletes one document and returns it, or null when nothing matched. */
@@ -957,23 +973,48 @@ export class Collection<TSchema extends Document = Document> {
 
     const document = parseDocument(found.data) as WithId<TSchema>
     this.run(`DELETE FROM ${this.table} WHERE rowid = :rowid`, { rowid: found.rowid })
-    return applyProjection(document, options.projection)
+    return this.applyProjection(document, options.projection, filter)
   }
 
   /** The 'before'/'after' choice, for a row that was just written in place. */
   private returnWritten (
-    before: WithId<TSchema>, rowid: number, options: FindOneAndUpdateOptions
+    before: WithId<TSchema>, rowid: number, options: FindOneAndUpdateOptions, filter: Filter<TSchema>
   ): WithId<TSchema> | null {
-    if (options.returnDocument !== 'after') return applyProjection(before, options.projection)
+    if (options.returnDocument !== 'after') return this.applyProjection(before, options.projection, filter)
     const row = this.prepare(`SELECT data FROM ${this.table} WHERE rowid = :rowid`).get({ rowid }) as { data: string } | undefined
-    return row === undefined ? null : applyProjection(parseDocument(row.data), options.projection)
+    return row === undefined ? null : this.applyProjection(parseDocument(row.data), options.projection, filter)
   }
 
   /** The 'before'/'after' choice for an upsert: there is no 'before' version. */
-  private async returnUpserted (doc: Document, options: FindOneAndUpdateOptions): Promise<WithId<TSchema> | null> {
+  private async returnUpserted (
+    doc: Document, options: FindOneAndUpdateOptions, filter: Filter<TSchema>
+  ): Promise<WithId<TSchema> | null> {
     const { document } = await this.insertUpserted(doc)
     if (options.returnDocument !== 'after') return null
-    return applyProjection(document, options.projection)
+    return this.applyProjection(document, options.projection, filter)
+  }
+
+  /**
+   * Applies a projection to a document already in hand - the findOneAnd*
+   * methods, which have no cursor to hang extra columns off.
+   *
+   * An ordinary projection is pure JavaScript. One using `$elemMatch` or `$`
+   * costs ONE extra statement, because deciding which element matched is the
+   * query engine's job (see firstMatchingElementSql); `find()` gets the same
+   * answers for free as columns of the query it was already running.
+   */
+  private applyProjection<T>(doc: T, spec?: ProjectionSpec, filter: Filter<TSchema> = {} as Filter<TSchema>): T {
+    if (spec == null) return doc
+    const compiled = compileProjection(spec, filter)
+    if (compiled.probes.length === 0) return compiled.project(doc)
+
+    const bindings = createBindings('q')
+    const document = `json(${bindRaw(bindings, stringifyDocument(doc))})`
+    const columns = compiled.probes.map((probe, index) =>
+      `${firstMatchingElementSql(document, probe.path, probe.criterion, bindings)} AS ${PROBE_COLUMN}${index}`
+    )
+    const row = this.prepare(`SELECT ${columns.join(', ')}`).get(bindings.values) as Record<string, unknown>
+    return compiled.project(doc, compiled.probes.map((_, index) => row[`${PROBE_COLUMN}${index}`] as number | null))
   }
 
   async insertOne (doc: TSchema): Promise<InsertOneResult> {

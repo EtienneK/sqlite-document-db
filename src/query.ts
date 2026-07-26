@@ -418,6 +418,38 @@ export function elementCriterionSql (
   return convert({ col: alias, bindings, ...depths }, { $and })
 }
 
+/**
+ * The INDEX of the first element of `path` satisfying `criterion`, or NULL.
+ *
+ * This is what the `$elemMatch` and `$` positional PROJECTION operators need
+ * (BACKLOG item 7). It is emitted as an extra column of the query that was
+ * already being run, so those projections cost no additional statement - and,
+ * more importantly, the criterion is compiled by the same `elementCriterionSql`
+ * the `$elemMatch` QUERY operator uses, so there is no second implementation of
+ * the filter language deciding which element matched.
+ *
+ * The CASE is load-bearing twice over: it restricts this to real arrays (a
+ * json_each over an OBJECT yields text keys, and over a scalar a NULL one), and
+ * SQLite evaluates only the taken branch, so the subquery never runs for a
+ * document that has no array there.
+ *
+ * `documentExpr` is a SQL expression for the document - `"data"` for a
+ * collection scan, `json(:p)` for a single document already in hand.
+ */
+export function firstMatchingElementSql (
+  documentExpr: string, path: string, criterion: QueryFilterDocument, bindings: SqlBindings
+): string {
+  const pathString = toJson1PathString([path])
+  const alias = 'valueJson1'
+  const predicate = elementCriterionSql(alias, criterion, bindings, { elemMatchDepth: 1 })
+  return (
+    `CASE WHEN json_type(${documentExpr}, ${pathString}) = 'array' THEN (` +
+    `SELECT MIN(idx) FROM (` +
+    `SELECT json_each.key AS idx, ${ELEMENT_WRAPPER} AS ${alias} FROM json_each(${documentExpr}, ${pathString})` +
+    `) WHERE (${predicate})) END`
+  )
+}
+
 /** Operators that address a field's VALUE, and so follow the array-path rule. */
 const ARRAY_PATH_OPS = new Set([
   '$eq', '$gt', '$gte', '$lt', '$lte', '$in', '$regex', '$mod', '$type', '$exists', '$size', '$all', '$elemMatch',

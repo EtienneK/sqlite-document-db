@@ -181,14 +181,13 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. The last unimplemented family in the CRUD surface. |
-| 2 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 3 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. The subset is now wide enough that the promise is not embarrassing. |
-| 4 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 5 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 6 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 7 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 8 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 2 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. The subset is now wide enough that the promise is not embarrassing. |
+| 3 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 4 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 5 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 6 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 7 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
@@ -238,7 +237,7 @@ priority table above.
 | 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — core 2026-07-22; upsert + findOneAnd* 2026-07-25; array/field operators 2026-07-25. `$position`/positional still open |
 | 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25**, extended for the array operators and `aggregate<T>()` |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
-| 7 | ~~[Projection](#7-projection)~~ | M | **DONE 2026-07-22** — include/exclude/nested/into-arrays; `$`-operators still open |
+| 7 | ~~[Projection](#7-projection)~~ | M | **DONE** — include/exclude/nested/into-arrays 2026-07-22; `$slice`/`$elemMatch`/`$` positional 2026-07-26 |
 | 8 | ~~[Remaining query operators](#8-remaining-query-operators)~~ | M | `$regex`/`$type`/`$mod` **DONE 2026-07-22**; `$expr` and `$bits*` **DONE 2026-07-26**; `$text` decided against, with the reason |
 | 9 | ~~[Bound parameters](#9-use-bound-parameters-instead-of-string-interpolation)~~ | M | **DONE 2026-07-22** — named params for all values; statement caching still open |
 | 10 | ~~[Error normalisation](#10-normalise-errors-to-mongodb-shapes)~~ | S | **DONE 2026-07-25** — `MongoServerError` with `code: 11000`, dual-engine verified |
@@ -776,7 +775,34 @@ Deliberately applied **in JS to decoded documents, not in SQL**: `json_object`
 reconstruction cannot distinguish missing fields from null ones (MongoDB omits
 missing), and array-of-documents projection is trivial in JS. Invalid projections
 (inclusion/exclusion mixes, path collisions) throw at iteration time, where the
-driver reports them. **Deferred:** `$slice`, `$elemMatch`, `$` positional.
+driver reports them.
+
+**The `$`-operators landed 2026-07-26** — `$slice`, `$elemMatch` and `$`
+positional, dual-engine in
+[test/operators/projection-operators.spec.ts](test/operators/projection-operators.spec.ts).
+
+**The design question was where "which element matched" gets decided.**
+`$elemMatch` and `$` both need the first element of an array satisfying a
+criterion, and that criterion is written in the FILTER language — so answering
+it in JavaScript would have been the second matcher this library refuses to
+have. Instead a compiled projection declares what it needs as `probes`, and
+`find()` compiles each into an extra column of the query it was already running
+(`firstMatchingElementSql`, which reuses the same `elementCriterionSql` the
+`$elemMatch` query operator uses). No extra statement, no second matcher.
+`findOneAnd*` has no cursor to hang a column off and pays one extra statement,
+but only when a probe exists.
+
+**What the oracle settled**, none of which was guessable from the names:
+
+- **`$slice` decides nothing about inclusion or exclusion.** A spec of nothing
+  but `$slice` returns WHOLE documents with one array shortened. Alongside an
+  inclusion it behaves as one; alongside an exclusion the sliced field is kept.
+  `$elemMatch` and `$` are ordinary inclusions.
+- **A field with no matching element is omitted**, not returned empty — and a
+  `$slice` of a non-array leaves the value alone rather than removing it.
+- `$` is refused without a query condition on the array, with exclusion, and
+  more than once per projection.
+
 Original analysis follows (note it proposed the SQL-side approach — superseded).
 
 ---

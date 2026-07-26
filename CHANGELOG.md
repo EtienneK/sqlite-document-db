@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The projection `$`-operators**: `$slice` (a window over an array, in either
+  the `n` or the `[skip, limit]` form), `$elemMatch` (the first element matching
+  a criterion) and `$` positional (the element that matched the query). Which
+  element matched is decided by the query engine, as an extra column of the
+  query already being run, so `find()` pays no extra statement for it.
+  `$slice` decides nothing about inclusion or exclusion, matching the server.
 - **`$expr`**, which puts an aggregation expression in a filter — the way to
   compare two fields of the same document
   (`{ $expr: { $gt: ['$spent', '$budget'] } }`). It works anywhere a filter
