@@ -21,7 +21,7 @@
 
 import { compareBson, equalsBson } from './bson-order.js'
 import { encodeValue } from './ejson.js'
-import { assertPositiveN, evaluateExpression, pathValue } from './expression.js'
+import { assertPositiveN, evaluateExpression, pathValue, substituteVariables } from './expression.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 import { ownField, setField } from './safe-object.js'
 import type { Document, SortSpecification } from './types.js'
@@ -490,11 +490,15 @@ type Stage = (input: AsyncIterable<Document>) => AsyncIterable<Document>
 export type BatchMatcher = (filter: Document, docs: Document[]) => Document[]
 
 /**
- * Reads every document of another collection matching a filter - what
+ * Runs a pipeline against another collection and returns every result - what
  * `$lookup` joins against. Supplied by the caller (Collection.aggregate)
- * because this module has no way to reach a sibling collection.
+ * because this module has no way to reach a sibling collection. It is a whole
+ * PIPELINE, not a filter: the classic `$lookup` sends `[{ $match: ... }]`
+ * (which the pushdown compiles to exactly the `find()` it always was), and the
+ * `let`+`pipeline` form sends its substituted sub-pipeline, so one hook - and
+ * one execution path, `aggregate()` itself - serves both.
  */
-export type ForeignReader = (collection: string, filter: Document) => Promise<Document[]>
+export type ForeignReader = (collection: string, pipeline: Document[]) => Promise<Document[]>
 
 /**
  * Compiles the stages that did not get pushed into SQL.
@@ -702,14 +706,29 @@ function compileLookup (value: unknown, readForeign: ForeignReader, strict: bool
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw Error('$lookup requires a document')
   }
-  const { from, localField, foreignField, as: asField, ...rest } = value as Record<string, unknown>
+  const { from, localField, foreignField, as: asField, let: letSpec, pipeline, ...rest } = value as Record<string, unknown>
   const unknown = Object.keys(rest)[0]
-  if (unknown !== undefined) {
-    throw Error(unknown === 'pipeline' || unknown === 'let'
-      ? `the ${unknown} form of $lookup is not supported (use localField/foreignField)`
-      : `unrecognized option to $lookup: ${unknown}`)
+  if (unknown !== undefined) throw Error(`unrecognized option to $lookup: ${unknown}`)
+  for (const [name, option] of [['from', from], ['as', asField]]) {
+    if (typeof option !== 'string' || option === '') {
+      throw Error(`$lookup requires a non-empty string for '${String(name)}'`)
+    }
   }
-  for (const [name, option] of [['from', from], ['localField', localField], ['foreignField', foreignField], ['as', asField]]) {
+
+  if (pipeline !== undefined || letSpec !== undefined) {
+    if (localField !== undefined || foreignField !== undefined) {
+      // MongoDB 4.4+ combines the equality match WITH a pipeline; its
+      // array-vs-$eq matching rules are their own project, so the combination
+      // is refused as unimplemented rather than approximated.
+      throw Error(
+        'the combined localField/foreignField + pipeline form of $lookup is not implemented ' +
+        '(spell the equality inside the pipeline with $match + $expr)'
+      )
+    }
+    return compilePipelineLookup(from as string, asField as string, letSpec, pipeline, readForeign, strict)
+  }
+
+  for (const [name, option] of [['localField', localField], ['foreignField', foreignField]]) {
     if (typeof option !== 'string' || option === '') {
       throw Error(`$lookup requires a non-empty string for '${String(name)}'`)
     }
@@ -740,7 +759,8 @@ function compileLookup (value: unknown, readForeign: ForeignReader, strict: bool
 
     // $in over the foreign field. It follows the implicit-array rule already,
     // so a foreign document whose field is an ARRAY containing the key matches.
-    const matches = await readForeign(from as string, { [foreign]: { $in: keys } })
+    // As a leading $match it compiles to exactly the find() it always was.
+    const matches = await readForeign(from as string, [{ $match: { [foreign]: { $in: keys } } }])
 
     const byKey = new Map<string, Document[]>()
     for (const match of matches) {
@@ -770,6 +790,137 @@ function compileLookup (value: unknown, readForeign: ForeignReader, strict: bool
       yield setPathImmutable(doc, target, joined)
     }
   }
+}
+
+/**
+ * `$lookup`'s `let` + `pipeline` form - the correlated subquery (BACKLOG
+ * item 16, priority 1 after pipeline updates).
+ *
+ * Per input document: evaluate the `let` expressions, SUBSTITUTE every
+ * `$$variable` reference in the sub-pipeline with its value as a `$literal`
+ * (`substituteVariables` in src/expression.ts, which owns the scoping rules),
+ * and run the now-variable-free pipeline as an ordinary aggregation on the
+ * foreign collection. That is the whole design: the sub-pipeline gets
+ * `aggregate()`'s own machinery - the `$match` pushdown (so a correlated
+ * equality is INDEX-eligible on the foreign table), `$expr` through
+ * `mdb_expr`, nested `$lookup`s - rather than a second execution path.
+ *
+ * The correlation makes this per-document work, so identical executions are
+ * MEMOIZED on the variable VALUES (the only thing that varies): an
+ * uncorrelated pipeline costs ONE foreign query however many input documents,
+ * and repeated keys are deduplicated. Two escapes keep the memo honest: a
+ * pipeline containing `$rand`/`$sampleRate` is never memoized (two executions
+ * legitimately differ), and a variable value the storage encoder cannot render
+ * (a `$literal` RegExp) skips the cache rather than failing the key.
+ */
+function compilePipelineLookup (
+  from: string, target: string, letSpec: unknown, pipeline: unknown,
+  readForeign: ForeignReader, strict: boolean
+): Stage {
+  if (letSpec !== undefined && (letSpec === null || typeof letSpec !== 'object' || Array.isArray(letSpec))) {
+    throw Error('the let option to $lookup must be a document of { name: <expression> }')
+  }
+  if (!Array.isArray(pipeline)) {
+    throw Error("the pipeline form of $lookup requires 'pipeline' to be an array of stages")
+  }
+  splitPipeline(pipeline) // surfaces a malformed sub-pipeline eagerly, as aggregate() itself would
+  const letEntries = Object.entries((letSpec ?? {}) as Document)
+  for (const [name] of letEntries) {
+    if (name === '' || name.startsWith('$')) throw Error(`invalid $lookup let variable name: '${name}'`)
+  }
+  const cacheable = !/"\$(?:rand|sampleRate)"/.test(JSON.stringify(pipeline))
+
+  return async function * (input) {
+    const cache = new Map<string, Document[]>()
+    for await (const doc of input) {
+      const vars: Record<string, unknown> = Object.create(null)
+      for (const [name, expression] of letEntries) vars[name] = evaluateExpression(expression, doc, strict)
+      const substituted = pipeline.map(stage => substituteStageVariables(stage, vars))
+      const key = cacheable ? varsKey(vars) : null
+      let joined = key === null ? undefined : cache.get(key)
+      if (joined === undefined) {
+        joined = await readForeign(from, substituted)
+        if (key !== null) cache.set(key, joined)
+      }
+      yield setPathImmutable(doc, target, joined)
+    }
+  }
+}
+
+/**
+ * The memo key for one sub-pipeline execution: the variable VALUES, which are
+ * the only thing substitution lets vary between input documents. Through the
+ * storage encoder so a Date keys as its wrapper rather than colliding with the
+ * string that looks like it - the `groupKey` reasoning.
+ */
+function varsKey (vars: Record<string, unknown>): string | null {
+  try {
+    return JSON.stringify(encodeValue(vars)) ?? 'missing'
+  } catch {
+    // A value the storage encoder cannot render. Correctness costs a query.
+    return null
+  }
+}
+
+/**
+ * One sub-pipeline stage with the outer `let` variables substituted in - the
+ * stage-shaped half of `substituteVariables`, here because it has to know
+ * WHERE expressions live in each stage. The `$match` rule is the load-bearing
+ * one: a `$match` is QUERY syntax, where `'$$var'` is a literal string except
+ * inside `$expr` - substituting elsewhere would rewrite values the server
+ * compares verbatim.
+ */
+function substituteStageVariables (stage: Document, vars: Record<string, unknown>): Document {
+  const [name, value] = singleStageEntry(stage)
+  switch (name) {
+    case '$match':
+      return { $match: substituteMatchVariables(value, vars) as Document }
+    case '$project':
+    case '$addFields':
+    case '$set':
+    case '$group':
+    case '$sortByCount':
+      return { [name]: substituteVariables(value, vars) }
+    case '$lookup': {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return stage
+      const spec = { ...(value as Document) }
+      // An inner `let` VALUE evaluates in the outer scope; the inner PIPELINE
+      // sees the outer variables minus the ones the inner `let` shadows. The
+      // still-unresolved inner references substitute when THIS lookup runs,
+      // one level down - the recursion is the ordinary aggregate() one.
+      if (spec.let !== null && typeof spec.let === 'object' && !Array.isArray(spec.let)) {
+        spec.let = substituteVariables(spec.let, vars)
+      }
+      if (Array.isArray(spec.pipeline)) {
+        const remaining: Record<string, unknown> = Object.create(null)
+        const shadowed = spec.let !== null && typeof spec.let === 'object' ? Object.keys(spec.let as Document) : []
+        for (const [outer, outerValue] of Object.entries(vars)) {
+          if (!shadowed.includes(outer)) remaining[outer] = outerValue
+        }
+        spec.pipeline = (spec.pipeline as Document[]).map(inner => substituteStageVariables(inner, remaining))
+      }
+      return { $lookup: spec }
+    }
+    default:
+      // $sort, $limit, $skip, $count, $unwind, $unset: no expression positions.
+      return stage
+  }
+}
+
+/** A `$match`'s filter document: only `$expr` holds expressions; `$and`/`$or`/`$nor` recurse. */
+function substituteMatchVariables (filter: unknown, vars: Record<string, unknown>): unknown {
+  if (filter === null || typeof filter !== 'object' || Array.isArray(filter)) return filter
+  const result: Document = {}
+  for (const [key, value] of Object.entries(filter as Document)) {
+    if (key === '$expr') {
+      setField(result, key, substituteVariables(value, vars))
+    } else if ((key === '$and' || key === '$or' || key === '$nor') && Array.isArray(value)) {
+      setField(result, key, value.map(term => substituteMatchVariables(term, vars)))
+    } else {
+      setField(result, key, value)
+    }
+  }
+  return result
 }
 
 function compileUnwind (value: unknown, strict: boolean): Stage {

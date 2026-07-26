@@ -800,9 +800,12 @@ export class Collection<TSchema extends Document = Document> {
       // CREATE TABLE IF NOT EXISTS per lookup - idempotent, and it keeps the
       // eager-creation behaviour `db.collection()` already has. It shares this
       // collection's session host, so the join is part of the same transaction.
-      async (name, filter) => await new Collection(
+      // A whole aggregate(), not a find(): the classic $lookup sends one
+      // [{ $match }] (same SQL by pushdown), and the let+pipeline form sends
+      // its substituted sub-pipeline - one execution path for both.
+      async (name, foreignPipeline) => await new Collection(
         name, this.db, this.dbOptions, () => {}, this.sessions, undefined, this.changes
-      ).find(filter, session).toArray(),
+      ).aggregate(foreignPipeline, session).toArray(),
       this.dbOptions.strict
     )
 

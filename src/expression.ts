@@ -132,6 +132,95 @@ function variableValue (name: string, ctx: EvalContext): unknown {
   throw Error(`undefined variable: $$${name}`)
 }
 
+/** The variables `evaluate` resolves without a binding. Never substituted. */
+const SYSTEM_VARIABLES = new Set(['ROOT', 'CURRENT', 'REMOVE', 'NOW', 'CLUSTER_TIME'])
+
+/**
+ * Returns `expression` with every reference to a variable in `vars` replaced by
+ * its VALUE, wrapped in `$literal` - what `$lookup`'s `let` needs (BACKLOG
+ * item 16).
+ *
+ * The sub-pipeline of a correlated `$lookup` runs as an ordinary aggregation on
+ * the foreign collection, and its `$match` travels through SQL (`mdb_expr`),
+ * where an `EvalContext` cannot follow. Substituting the values as literals is
+ * what lets ONE pipeline execution path serve both - `$literal` survives the
+ * `$expr` serialisation because a Date encodes through the storage wrapper, and
+ * `assertKnownExpressionOperators` never walks a `$literal`'s argument.
+ *
+ * Scope-aware, which is the part that would go quietly wrong without it: an
+ * inner `$let`/`$map`/`$filter`/`$reduce` binding SHADOWS an outer `let`
+ * variable of the same name, so a shadowed reference is left for the evaluator
+ * to resolve. A `$$name` that names no variable at all is also left alone -
+ * "undefined variable" is the evaluator's error to raise, at evaluation time,
+ * exactly as the server raises it.
+ */
+export function substituteVariables (expression: unknown, vars: Record<string, unknown>): unknown {
+  return substitute(expression, vars, new Set())
+}
+
+function substitute (expression: unknown, vars: Record<string, unknown>, bound: Set<string>): unknown {
+  if (typeof expression === 'string') {
+    if (!expression.startsWith('$$')) return expression
+    const [name, ...rest] = expression.slice(2).split('.')
+    if (SYSTEM_VARIABLES.has(name!) || bound.has(name!) || !Object.hasOwn(vars, name!)) return expression
+    const value = rest.length === 0 ? vars[name!] : pathValue(vars[name!], rest.join('.'))
+    // `{ $literal: undefined }` would not survive JSON serialisation (the key
+    // vanishes), and $$REMOVE already means exactly "the missing value".
+    return value === undefined ? '$$REMOVE' : { $literal: value }
+  }
+  if (expression === null || typeof expression !== 'object' || expression instanceof Date ||
+    expression instanceof RegExp) return expression
+  if (Array.isArray(expression)) return expression.map(element => substitute(element, vars, bound))
+
+  const entries = Object.entries(expression as Document)
+  const operator = entries.length === 1 ? entries[0]![0] : undefined
+  // $literal's argument is DATA - a '$$name' inside it is a string, not a
+  // reference - so it is not walked, mirroring assertKnownExpressionOperators.
+  if (operator === '$literal') return expression
+
+  if (operator === '$let') {
+    const spec = expression as { $let: { vars?: Document, in?: unknown } }
+    const bindings = spec.$let?.vars ?? {}
+    const substituted: Document = {}
+    // Binding VALUES evaluate in the OUTER scope; only `in` sees the names.
+    for (const [name, value] of Object.entries(bindings)) setField(substituted, name, substitute(value, vars, bound))
+    const inner = new Set([...bound, ...Object.keys(bindings)])
+    return { $let: { ...spec.$let, vars: substituted, in: substitute(spec.$let?.in, vars, inner) } }
+  }
+  if (operator === '$map' || operator === '$filter') {
+    const spec = (expression as Document)[operator] as Document
+    if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) return expression
+    const name = typeof spec.as === 'string' ? spec.as : 'this'
+    const inner = new Set([...bound, name])
+    const body = operator === '$map' ? 'in' : 'cond'
+    return {
+      [operator]: {
+        ...spec,
+        ...(spec.input === undefined ? {} : { input: substitute(spec.input, vars, bound) }),
+        ...(spec.limit === undefined ? {} : { limit: substitute(spec.limit, vars, bound) }),
+        ...(spec[body] === undefined ? {} : { [body]: substitute(spec[body], vars, inner) })
+      }
+    }
+  }
+  if (operator === '$reduce') {
+    const spec = (expression as Document).$reduce as Document
+    if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) return expression
+    const inner = new Set([...bound, 'this', 'value'])
+    return {
+      $reduce: {
+        ...spec,
+        ...(spec.input === undefined ? {} : { input: substitute(spec.input, vars, bound) }),
+        ...(spec.initialValue === undefined ? {} : { initialValue: substitute(spec.initialValue, vars, bound) }),
+        ...(spec.in === undefined ? {} : { in: substitute(spec.in, vars, inner) })
+      }
+    }
+  }
+
+  const result: Document = {}
+  for (const [key, value] of entries) setField(result, key, substitute(value, vars, bound))
+  return result
+}
+
 // ---------------------------------------------------------------------------
 // Argument helpers
 // ---------------------------------------------------------------------------

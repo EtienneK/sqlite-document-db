@@ -152,11 +152,13 @@ describe('$lookup', () => {
     const run = async (pipeline: any[]): Promise<any[]> =>
       await dbs.sqlite().collection('orders').aggregate(pipeline).toArray()
 
-    it('should reject the pipeline/let form by name rather than ignoring it', async () => {
-      await expect(run([{ $lookup: { from: 'inventory', pipeline: [], as: 'x' } }]))
-        .rejects.toThrow(/pipeline form of \$lookup is not supported/)
-      await expect(run([{ $lookup: { from: 'inventory', let: {}, pipeline: [], as: 'x' } }]))
-        .rejects.toThrow(/not supported/)
+    it('should reject the COMBINED localField/foreignField + pipeline form by name', async () => {
+      // The pipeline/let form itself is implemented now - see
+      // test/lookup-pipeline.spec.ts. What is still refused is combining it
+      // with localField/foreignField (MongoDB 4.4+), whose array-vs-$eq
+      // equality rules are their own project.
+      await expect(run([{ $lookup: { from: 'inventory', localField: 'item', foreignField: 'sku', pipeline: [], as: 'x' } }]))
+        .rejects.toThrow(/not implemented/)
     })
 
     it('should reject a missing or empty option', async () => {

@@ -497,6 +497,29 @@ emits several documents from one source; `{ ...doc }` shares its nested objects,
 so writing each element into the same nested object left every emitted document
 holding the last one.
 
+**Non-obvious detail — `$lookup`'s `let`+`pipeline` form SUBSTITUTES, then
+delegates.** Per input document the `let` expressions are evaluated and every
+`$$variable` in the sub-pipeline is replaced by its value as a `$literal`
+(`substituteVariables` in src/expression.ts — scope-aware, because an inner
+`$let`/`$map`/`$filter`/`$reduce` binding shadows an outer variable), and the
+now-variable-free pipeline runs as an ORDINARY `aggregate()` on the foreign
+collection. That is what buys the `$match` pushdown (index-eligible on the
+foreign table), `$expr` through `mdb_expr` (a `$literal` survives its
+serialization because Dates encode through the storage wrapper and
+`assertKnownExpressionOperators` never walks a `$literal`), and nested
+`$lookup`s — with no second execution path. The stage-shaped half
+(`substituteStageVariables` in src/aggregate.ts) knows the one load-bearing
+rule: a `$match` is QUERY syntax, where `'$$var'` is a literal string except
+inside `$expr`. Executions are MEMOIZED on the variable VALUES — the only thing
+substitution lets vary — so an uncorrelated pipeline is one foreign query
+total; a pipeline containing `$rand`/`$sampleRate` is never memoized. The
+classic `localField`/`foreignField` form now reads its foreign batch through
+the same hook as `[{ $match: { field: { $in: keys } } }]`, which the pushdown
+compiles to exactly the `find()` it always was. Combining the two forms
+(MongoDB 4.4+) is REFUSED as unimplemented. Pinned dual-engine in
+[test/lookup-pipeline.spec.ts](test/lookup-pipeline.spec.ts), statement counts
+included.
+
 **Non-obvious detail — the strict `$sort` check runs before sorting.**
 `Array.prototype.sort` never calls the comparator for a one-element list, so a
 check inside the comparator missed a `$group` that produced a single row.

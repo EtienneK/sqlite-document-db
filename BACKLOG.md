@@ -187,17 +187,17 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 2 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 3 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 3= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
-| 4 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
-| 5 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
-| 6 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
-| 7 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
-| 8 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
-| 9 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
-| 10 | [Optimistic concurrency](#21-optimistic-concurrency) | S | **DECIDED, and deliberately last.** Was position 1 as a gating decision; the decision is made (no `_version`), so what is left is a README section for a pattern that already works. It is documentation of DRIVER usage, not parity, and everything above it is parity. Do it when the list above is shorter. |
+| 1 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 2 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 2= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 3 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 4 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
+| 5 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
+| 6 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
+| 7 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
+| 8 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 9 | [Optimistic concurrency](#21-optimistic-concurrency) | S | **DECIDED, and deliberately last.** Was position 1 as a gating decision; the decision is made (no `_version`), so what is left is a README section for a pattern that already works. It is documentation of DRIVER usage, not parity, and everything above it is parity. Do it when the list above is shorter. |
+| — | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | **DONE 2026-07-26.** Substitute, then delegate: per input document the `let` variables are evaluated and every `$$var` in the sub-pipeline becomes a `$literal` (scope-aware - inner bindings shadow), and the result runs as an ORDINARY aggregate() on the foreign collection - so the `$match` pushdown, `mdb_expr` and nested `$lookup`s came free. Executions memoize on the variable VALUES: an uncorrelated pipeline is one query total. The classic form now reads through the same hook as `[{ $match: { field: { $in: keys } } }]`. Combining localField/foreignField WITH a pipeline (4.4+) is refused as unimplemented. |
 | — | [Pipeline updates](#28-the-operator-gap-sweep) | M | **DONE 2026-07-26.** `updateOne(filter, [{ $set: … }])` on the three update methods and `bulkWrite`. Evaluates in JS through the SAME stages `aggregate()` runs (the `$expr` precedent, followed); `updateMany` reads the matched rows and writes every result back in ONE `json_each` statement. The change event's `updateDescription` is DIFFED from the images - which is what the server does for a pipeline write, granularly - and the one divergence (MongoDB's oplog size heuristic flips small-document events to `replace`) is refused under strict, like the positional one. The oracle also caught `$set`-to-missing keeping the old value in `aggregate()` - it must REMOVE the field. |
 | — | [Change streams](#27-change-streams-reopened-2026-07-26) | M | **DONE 2026-07-26.** Events from the WRITE PATH, `RETURNING` for the post-images (so a watched `updateMany` is still one statement), buffered per transaction and flushed on commit. Every event shape is dual-engine against the replica set; the two blind spots - another connection, and `db.sql` - are DETECTED and end the stream with an `invalidate`. `resumeAfter` is refused, with the reason. |
 | — | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **DONE 2026-07-26** apart from date arithmetic (M, listed above). `$currentDate`, `$bit`, `$comment`, `$sampleRate`, the regex/set/object/array/byte-string/trigonometry/`$convert` expression families, eleven accumulators, `$unset` and `$sortByCount` - and, the same day, pipeline updates. |
@@ -1353,8 +1353,15 @@ The general rule underneath: **a wrong TYPE throws, a missing VALUE does not.**
 string. `$sum`/`$avg`/`$min`/`$max` now exist twice on purpose — accumulators in
 `$group`, array operators everywhere else — which is MongoDB's design.
 
+**`$lookup`'s `let`+`pipeline` form landed 2026-07-26** - see the priority
+table's DONE row for the design (substitute the variables as literals, then
+delegate to an ordinary foreign `aggregate()`), and
+[test/lookup-pipeline.spec.ts](test/lookup-pipeline.spec.ts) for the
+dual-engine record, statement counts included.
+
 **Still open:** `$facet`, `$bucket`, `$replaceRoot`, `$out`/`$merge`,
-`$sample`, `$graphLookup`; `$lookup`'s `let`+`pipeline` form; the set and
+`$sample`, `$graphLookup`; `$lookup` combining localField/foreignField WITH a
+pipeline (4.4+, refused as unimplemented); the set and
 trigonometry expression families, `$dateFromString`, the date-arithmetic
 operators, and timezone support (a `timezone` option throws today, because
 answering it in UTC would be a wrong answer that looks right).

@@ -669,8 +669,35 @@ await db.collection('orders').aggregate([
 It is a left outer join — `stock` is always an array, empty when nothing
 matches — and it is array-aware on both sides, so a local `['a','b']` joins to
 documents keyed `a` and `b` alike. One query fetches all of them, regardless of
-how many input documents there are. Only the `localField`/`foreignField` form
-is implemented; the `let`+`pipeline` form is rejected by name.
+how many input documents there are.
+
+The `let` + `pipeline` form — the correlated subquery — works too:
+
+```javascript
+await db.collection('orders').aggregate([
+  { $lookup: {
+    from: 'warehouses',
+    let: { order_item: '$item', order_qty: '$ordered' },
+    pipeline: [
+      { $match: { $expr: { $and: [
+        { $eq: ['$stock_item', '$$order_item'] },
+        { $gte: ['$instock', '$$order_qty'] }
+      ] } } },
+      { $project: { stock_item: 0, _id: 0 } }
+    ],
+    as: 'stockdata'
+  } }
+]).toArray()
+```
+
+Per input document the `let` variables are evaluated and the sub-pipeline runs
+as an ordinary aggregation on the foreign collection — so a `$match` head is
+index-eligible there, and any supported stage (a `$group`, a nested `$lookup`)
+is allowed. Identical executions are deduplicated: an *uncorrelated* pipeline
+(no `let`) costs one query however many input documents, and repeated variable
+values reuse their result. Combining `localField`/`foreignField` *with* a
+pipeline (MongoDB 4.4+) is not implemented — spell the equality inside the
+pipeline with `$match` + `$expr`.
 
 Accumulators: `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`, `$push`,
 `$addToSet`, `$count`.
@@ -1120,7 +1147,9 @@ Accumulators: `$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
 `$minN` `$top` `$topN` `$bottom` `$bottomN`.
 
 Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
-`$project` `$addFields`/`$set` `$unset` `$sortByCount` `$unwind` `$lookup`.
+`$project` `$addFields`/`$set` `$unset` `$sortByCount` `$unwind` `$lookup`
+(both the `localField`/`foreignField` form and `let` + `pipeline`, though not
+the two combined).
 
 Expression operators, for `$project`, `$addFields`, `$group._id` and
 accumulator arguments:
@@ -1286,7 +1315,8 @@ how each piece would be implemented. The headlines:
 
 - Stages: `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`,
   `$sample`, `$graphLookup`, `$unionWith`, `$documents`, `$setWindowFields`; and
-  `$lookup`'s `let`+`pipeline` form
+  `$lookup` combining `localField`/`foreignField` *with* a pipeline (the plain
+  `let`+`pipeline` form works — see [Aggregate](#aggregate))
 - Expression operators outside the table above: `$dateFromString` and the rest
   of the date arithmetic (`$dateAdd`, `$dateDiff`, `$dateTrunc`,
   `$dateFromParts`, …), timezone support on the date operators, and `$meta`
