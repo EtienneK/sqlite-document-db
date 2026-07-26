@@ -306,6 +306,17 @@ every operator reads **`data`**, the original column, never the partially-built
 expression (safe only because `assertNoConflictingPaths` rejects overlapping
 paths); and anything that can fail is checked **before** the UPDATE, as a guard.
 
+**Non-obvious detail — a write through a non-traversable parent is guarded, not
+silently dropped.** `json_set`/`json_insert` NO-OP when a dotted path runs
+through a scalar (or an array reached by a field name), so `$set: { 'a.b': 1 }`
+over `{ a: 5 }` used to vanish and — worst of all — `$rename` into such a path
+DESTROYED the source, because its `json_remove` still fired while the `json_set`
+did nothing (`modifiedCount: 1`, source gone). `traversalGuards` emits one
+pre-flight guard per ancestor (mirroring MongoDB's "cannot use the part … to
+traverse" error) for every dotted write except `$unset`, which MongoDB treats as
+a no-op there. `$rename`'s guard is conditioned on the source existing, since
+renaming a missing field must stay a no-op whatever the target looks like.
+
 **Non-obvious detail — a rebuilt array loses type information twice.** Any
 operator that rebuilds an array (`$pull`, `$addToSet`, `$push` with
 `$sort`/`$slice`) streams elements through a nested SELECT, and
@@ -852,6 +863,20 @@ that object is built with `Object.create(null)` — the projection path tree
 not decoration: a projection of `{ '__proto__.x': 1 }` used to write to
 `Object.prototype`, and a document field named `toString` used to find a function
 where a subtree was expected.
+
+Objects that are HANDED BACK to the caller (projection/aggregation output, the
+document an upsert inserts, a `$group` result) cannot be null-proto without
+changing their shape, so they go through [src/safe-object.ts](src/safe-object.ts)
+instead: `setField` creates a field as an own data property even when it is named
+`__proto__` (only that name needs it — `constructor`/`prototype` are ordinary
+data members that assignment already shadows), and `ownField` reads a path
+segment without mistaking an INHERITED member for a present field. Both matter
+because MongoDB stores `__proto__` as ordinary data and pollutes nothing; every
+walking `setPath`/`getPath` (upsert builder in [src/update.ts](src/update.ts),
+`$group`/`$addFields` in [src/aggregate.ts](src/aggregate.ts), the projected-doc
+walkers) and every user-keyed output write routes through these. Before them, an
+upsert with `{ $set: { '__proto__.x': … } }` and a `$group` output field named
+`__proto__.x` poisoned `Object.prototype` for the whole process.
 
 ## Testing approach
 

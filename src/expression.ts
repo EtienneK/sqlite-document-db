@@ -31,6 +31,7 @@
 
 import { compareBson, equalsBson } from './bson-order.js'
 import { toRegExp } from './regex.js'
+import { ownField, setField } from './safe-object.js'
 import type { Document } from './types.js'
 
 /** What an expression is evaluated against. */
@@ -62,7 +63,7 @@ export function pathValue (doc: unknown, path: string, strict = false): unknown 
         'and this library reads as missing - use $unwind first'
       )
     }
-    node = node[segment]
+    node = ownField(node as Record<string, unknown>, segment)
   }
   return node
 }
@@ -99,7 +100,7 @@ export function evaluate (expression: unknown, ctx: EvalContext): unknown {
   const result: Document = {}
   for (const [key, value] of entries) {
     const evaluated = evaluate(value, ctx)
-    if (evaluated !== undefined) result[key] = evaluated
+    if (evaluated !== undefined) setField(result, key, evaluated)
   }
   return result
 }
@@ -390,8 +391,13 @@ const OPERATORS: Record<string, Operator> = {
       throw Error('$switch requires a non-empty array of branches')
     }
     for (const branch of branches) {
-      const { case: condition, then } = options('a $switch branch', branch, ['case', 'then'])
-      if (isTruthy(evaluate(condition, ctx))) return evaluate(then, ctx)
+      const parsed = options('a $switch branch', branch, ['case', 'then'])
+      // Presence, not just recognised names: a branch missing its `case`
+      // evaluated to undefined -> false, so MongoDB's error became a silent
+      // "no match" that fell through to the default.
+      if (!Object.hasOwn(parsed, 'case')) throw Error("$switch requires each branch have a 'case' expression")
+      if (!Object.hasOwn(parsed, 'then')) throw Error("$switch requires each branch have a 'then' expression")
+      if (isTruthy(evaluate(parsed.case, ctx))) return evaluate(parsed.then, ctx)
     }
     if (!Object.hasOwn(spec, 'default')) {
       throw Error('$switch could not find a matching branch and no default was given')
@@ -431,8 +437,11 @@ const OPERATORS: Record<string, Operator> = {
     if (isNullish(value)) return null
     const points = [...asString('$indexOfCP', value)]
     const needle = [...asString('$indexOfCP', search)]
-    const from = start === undefined ? 0 : asNumber('$indexOfCP', start)
-    const to = end === undefined ? points.length : asNumber('$indexOfCP', end)
+    // A non-integral or negative start is an error in MongoDB, exactly as in the
+    // byte twin below - not a silently-truncated or always-missing index.
+    const from = start === undefined ? 0 : wholeNumber('$indexOfCP', start)
+    const to = end === undefined ? points.length : wholeNumber('$indexOfCP', end)
+    if (from < 0) throw Error('$indexOfCP requires a non-negative starting index')
     for (let i = from; i + needle.length <= Math.min(to, points.length); i++) {
       if (needle.every((point, offset) => points[i + offset] === point)) return i
     }
@@ -562,14 +571,14 @@ const OPERATORS: Record<string, Operator> = {
         if (entry.length !== 2) {
           throw Error(`$arrayToObject requires an array of size 2 arrays, found array of size: ${entry.length}`)
         }
-        result[asString('$arrayToObject', entry[0])] = entry[1]
+        setField(result, asString('$arrayToObject', entry[0]), entry[1])
         continue
       }
       const pair = asDocument('$arrayToObject', entry)
       if (!Object.hasOwn(pair, 'k') || !Object.hasOwn(pair, 'v')) {
         throw Error("$arrayToObject requires an object with keys 'k' and 'v'")
       }
-      result[asString('$arrayToObject', pair.k)] = pair.v
+      setField(result, asString('$arrayToObject', pair.k), pair.v)
     }
     return result
   },
@@ -583,7 +592,7 @@ const OPERATORS: Record<string, Operator> = {
   $getField: (raw, ctx) => {
     const { field, input } = fieldTarget('$getField', raw, ctx, ['field', 'input'])
     if (isNullish(input)) return null
-    return asDocument('$getField', input)[field]
+    return ownField(asDocument('$getField', input), field)
   },
 
   /** Setting a field to `$$REMOVE` (an expression evaluating to missing) drops it. */
@@ -593,7 +602,7 @@ const OPERATORS: Record<string, Operator> = {
     const result = { ...asDocument('$setField', input) }
     const value = evaluate(spec.value, ctx)
     if (value === undefined) delete result[field]
-    else result[field] = value
+    else setField(result, field, value)
     return result
   },
 
@@ -868,7 +877,7 @@ const OPERATORS: Record<string, Operator> = {
     const spec = options('$let', raw, ['vars', 'in'])
     const bindings = options('the vars option to $let', spec.vars, Object.keys(spec.vars as Document ?? {}))
     const vars = { ...ctx.vars }
-    for (const [name, expression] of Object.entries(bindings)) vars[name] = evaluate(expression, ctx)
+    for (const [name, expression] of Object.entries(bindings)) setField(vars, name, evaluate(expression, ctx))
     return evaluate(spec.in, { ...ctx, vars })
   },
 

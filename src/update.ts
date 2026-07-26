@@ -24,6 +24,7 @@
  */
 
 import { compareBson, equalsBson } from './bson-order.js'
+import { ownField, setField } from './safe-object.js'
 import type { Document } from './types.js'
 import {
   bindJson, bindRaw, bsonRankSql, bsonValueSql, createBindings, elementCriterionSql,
@@ -334,6 +335,36 @@ function datePathOf (path: string): string {
 function nonArrayAt (field: string): string {
   const path = toJson1PathString([field])
   return `(json_type(data, ${path}) IS NOT NULL AND json_type(data, ${path}) != 'array')`
+}
+
+/**
+ * Guards rejecting a write whose dotted path runs THROUGH a value that cannot be
+ * traversed. MongoDB errors ("cannot use the part … to traverse the element")
+ * and leaves the document untouched; SQLite's `json_set`/`json_insert` silently
+ * NO-OP on such a path, which drops the write - and for `$rename`, whose
+ * `json_remove` still fires, DESTROYS the source while never creating the
+ * target. Each ancestor that exists must be an object, except that an ancestor
+ * reached by an array INDEX may also be an array.
+ *
+ * `when` restricts the check to rows where a further condition holds - `$rename`
+ * passes "the source exists", because renaming a missing field is a no-op that
+ * must not raise however the target path looks.
+ */
+function traversalGuards (field: string, when?: string): UpdateGuard[] {
+  const segments = field.split('.')
+  const result: UpdateGuard[] = []
+  for (let i = 1; i < segments.length; i++) {
+    const prefix = segments.slice(0, i)
+    const type = `json_type(data, ${toJson1PathString(prefix)})`
+    const blocked = /^\d+$/.test(segments[i]!)
+      ? `${type} IS NOT NULL AND ${type} NOT IN ('object','array')`
+      : `${type} IS NOT NULL AND ${type} != 'object'`
+    result.push({
+      test: when === undefined ? `(${blocked})` : `(${when} AND (${blocked}))`,
+      message: `Cannot create field '${segments[i]}' in element {${prefix.join('.')}: <not an object>} (field ${field})`
+    })
+  }
+  return result
 }
 
 /**
@@ -754,6 +785,10 @@ function applyFieldWrite (
   const target = parsePositional(operator, field)
 
   if (target === undefined) {
+    // $unset through a non-traversable parent is a no-op in MongoDB, not an
+    // error - every other field operator raises rather than silently dropping
+    // the write, which is what a bare json_set would do here.
+    if (operator !== '$unset') ctx.guards.push(...traversalGuards(field))
     if (guard !== undefined) {
       ctx.guards.push({ test: guard.test('data', toJson1PathString([field])), message: guard.message })
     }
@@ -878,6 +913,11 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
     parsePositional('$rename', field) // rejects a positional path with a clear message
     const target = renameTarget(field, to)
     const from = toJson1PathString([field])
+    // The target's parents must be traversable, or `json_set` no-ops while the
+    // `json_remove` below still fires - which used to DESTROY the source and
+    // report success. Only checked when the source exists (a rename of a missing
+    // field is a no-op MongoDB does not raise on).
+    guards.push(...traversalGuards(target, `json_type(data, ${from}) IS NOT NULL`))
     // A rename whose SOURCE is missing is a no-op in MongoDB - and has to be
     // written as one, because json_extract of a missing path is SQL NULL and
     // json_quote turns that into the JSON value `null`, which would set the
@@ -1028,6 +1068,7 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
     }
 
     expr = `json_set(${ensureParents(expr, field)}, ${toJson1PathString([field])}, ${applyEachModifiers(array, spec)})`
+    guards.push(...traversalGuards(field))
     guards.push({ test: nonArrayAt(field), message: `Cannot apply $push to a non-array value (field ${field})` })
   }
 
@@ -1052,6 +1093,7 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
       // find an existing `true` and decide the value was already there.
       `SELECT c.value, c.type FROM json_each(${bound}) c WHERE NOT EXISTS (SELECT 1 FROM json_each(${array}) e WHERE e.value IS c.value AND e.type = c.type)`
     )})`
+    guards.push(...traversalGuards(field))
     guards.push({ test: nonArrayAt(field), message: `Cannot apply $addToSet to a non-array value (field ${field})` })
   }
 
@@ -1160,11 +1202,16 @@ function setPath (doc: Document, field: string, value: unknown): void {
   const segments = field.split('.')
   let node = doc
   for (const segment of segments.slice(0, -1)) {
-    const existing = node[segment]
-    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) node[segment] = {}
-    node = node[segment] as Document
+    const existing = ownField(node, segment)
+    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) {
+      const child: Document = {}
+      setField(node, segment, child)
+      node = child
+    } else {
+      node = existing as Document
+    }
   }
-  node[segments[segments.length - 1]!] = value
+  setField(node, segments[segments.length - 1]!, value)
 }
 
 /** Reads a dotted path out of a document, or undefined when any level is missing. */
@@ -1172,7 +1219,7 @@ function getPath (doc: Document, field: string): unknown {
   let node: any = doc
   for (const segment of field.split('.')) {
     if (node === null || typeof node !== 'object') return undefined
-    node = node[segment]
+    node = ownField(node, segment)
   }
   return node
 }
@@ -1183,7 +1230,7 @@ function deletePath (doc: Document, field: string): void {
   let node: any = doc
   for (const segment of segments.slice(0, -1)) {
     if (node === null || typeof node !== 'object') return
-    node = node[segment]
+    node = ownField(node, segment)
   }
   if (node !== null && typeof node === 'object') delete node[segments[segments.length - 1]!]
 }

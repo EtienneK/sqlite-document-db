@@ -20,6 +20,8 @@
  * `project()` is handed the resulting indexes. One statement, one matcher.
  */
 
+import { ownField, setField } from './safe-object.js'
+
 export type ProjectionSpec = Record<string, any>
 
 /**
@@ -86,9 +88,9 @@ function projectInclude (value: Record<string, unknown> | unknown[], tree: Tree)
     const subtree = tree[key]
     if (subtree === undefined) continue
     if (subtree === true) {
-      result[key] = fieldValue
+      setField(result, key, fieldValue)
     } else if (Array.isArray(fieldValue) || isProjectable(fieldValue)) {
-      result[key] = projectInclude(fieldValue, subtree)
+      setField(result, key, projectInclude(fieldValue, subtree))
     }
     // A scalar with a deeper path requested is omitted, like MongoDB.
   }
@@ -105,9 +107,9 @@ function projectExclude (value: Record<string, unknown> | unknown[], tree: Tree)
     const subtree = tree[key]
     if (subtree === true) continue
     if (subtree === undefined) {
-      result[key] = fieldValue
+      setField(result, key, fieldValue)
     } else {
-      result[key] = (Array.isArray(fieldValue) || isProjectable(fieldValue)) ? projectExclude(fieldValue, subtree) : fieldValue
+      setField(result, key, (Array.isArray(fieldValue) || isProjectable(fieldValue)) ? projectExclude(fieldValue, subtree) : fieldValue)
     }
   }
   return result
@@ -207,7 +209,7 @@ function getPath (doc: any, field: string): unknown {
   let node = doc
   for (const segment of field.split('.')) {
     if (!isProjectable(node)) return undefined
-    node = node[segment]
+    node = ownField(node, segment)
   }
   return node
 }
@@ -217,12 +219,13 @@ function setPath (doc: any, field: string, value: unknown, remove = false): void
   const segments = field.split('.')
   let node = doc
   for (const segment of segments.slice(0, -1)) {
-    if (!isProjectable(node[segment])) return
-    node = node[segment]
+    const child = ownField(node, segment)
+    if (!isProjectable(child)) return
+    node = child
   }
   const leaf = segments[segments.length - 1]!
   if (remove) delete node[leaf]
-  else if (leaf in node || !remove) node[leaf] = value
+  else setField(node, leaf, value)
 }
 
 // ---------------------------------------------------------------------------

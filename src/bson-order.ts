@@ -15,6 +15,8 @@
  * their JSON text. `strict: true` rejects the sorts where that shows.
  */
 
+import { encodeValue } from './ejson.js'
+
 /** Where a value sits in the BSON type order. Missing sorts with null. */
 export function bsonRank (value: unknown): number {
   if (value === null || value === undefined) return 0
@@ -48,8 +50,13 @@ export function compareBson (a: unknown, b: unknown): number {
     }
     default: {
       // Objects and arrays: JSON text, matching what the SQL side compares.
-      const x = JSON.stringify(a)
-      const y = JSON.stringify(b)
+      // Encoded FIRST so a nested Date serialises as its {"$date":...} wrapper -
+      // the exact text the storage layer and bsonValueSql compare against.
+      // Plain JSON.stringify would call Date.prototype.toJSON and render a bare
+      // ISO string, which made a JS $sort disagree with the SQL one and let
+      // equalsBson equate { v: <Date> } with { v: "<iso>" }.
+      const x = JSON.stringify(encodeValue(a))
+      const y = JSON.stringify(encodeValue(b))
       return x === y ? 0 : (x < y ? -1 : 1)
     }
   }

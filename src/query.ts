@@ -568,7 +568,10 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
   // negative operators are deliberately absent from ARRAY_PATH_OPS: they are
   // the complement of their positive twin and already delegate to it, so
   // expanding them here would OR arms into a negation and invert the meaning.
-  if ((ctx.arrayPathDepth ?? 0) < MAX_ARRAY_PATH_DEPTH && field.includes('.') && ARRAY_PATH_OPS.has(op)) {
+  // `$exists: false` is the same trap wearing a positive operator's name - it
+  // delegates to NOT `$exists: true` in the switch, so it must not expand here.
+  const expandable = ARRAY_PATH_OPS.has(op) && !(op === '$exists' && value === false)
+  if ((ctx.arrayPathDepth ?? 0) < MAX_ARRAY_PATH_DEPTH && field.includes('.') && expandable) {
     const arms = arrayPathArms(ctx, field, op, value)
     if (arms.length > 0) {
       const plain = convertOp({ ...ctx, arrayPathDepth: MAX_ARRAY_PATH_DEPTH }, field, op, value)
@@ -614,17 +617,25 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       const boundValue = bindValue(ctx, extractValue)
 
 
-      // Range operators need type bracketing, like MongoDB's: a number query
-      // must not match strings/arrays/objects. Without this, SQLite's type
-      // ordering (numbers < text) makes `extract > 25` true for EVERY array
-      // or object field, since those extract as text ('[...', '{...').
+      // Type bracketing, like MongoDB's: a query value only matches a stored
+      // value of a COMPATIBLE type. Two reasons it is load-bearing:
+      //  - Range operators: SQLite's type ordering (numbers < text) makes
+      //    `extract > 25` true for EVERY array or object field, since those
+      //    extract as text ('[...', '{...').
+      //  - Equality with a boolean or a number: json_extract renders JSON
+      //    true/false as SQLite's 1/0, so `{ a: true }` would also match a
+      //    stored `1` and `{ a: 1 }` a stored `true`. MongoDB never equates the
+      //    two, so the json_type has to disambiguate.
       let scalarTypeGuard = ''
       let elemTypeGuard = ''
-      if (op !== '$eq' && !isDate) {
-        if (typeof value === 'number') {
+      if (!isDate) {
+        if (typeof value === 'boolean') {
+          scalarTypeGuard = ` AND ${jsonType(ctx, field)} IN ('true','false')`
+          elemTypeGuard = " AND json_each.type IN ('true','false')"
+        } else if (typeof value === 'number') {
           scalarTypeGuard = ` AND ${jsonType(ctx, field)} IN ('integer','real')`
           elemTypeGuard = " AND json_each.type IN ('integer','real')"
-        } else if (typeof value === 'string') {
+        } else if (op !== '$eq' && typeof value === 'string') {
           scalarTypeGuard = ` AND ${jsonType(ctx, field)} = 'text'`
           elemTypeGuard = " AND json_each.type = 'text'"
         }
@@ -646,11 +657,33 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
         return convert(ctx, { $or: value.map(element => ({ [field]: element })) })
       }
       if (value.length === 0) return 'FALSE' // $in on an empty list matches nothing
-      const list = `(${value.map(element => bindValue(ctx, element)).join(',')})`
-      const scalarNull = value.includes(null) ? ` OR ${extract(ctx, field)} IS NULL` : ''
-      const elemNull = value.includes(null) ? ' OR value IS NULL' : ''
-      const scalarPred = `${extract(ctx, field)} IN ${list}${scalarNull}`
-      const elemPred = `value IN ${list}${elemNull}`
+      // Partition the list by JSON type. json_extract renders true/false as
+      // SQLite's 1/0, so a numeric entry `1` and a boolean `true` would match
+      // each other; each group carries the json_type that tells them apart,
+      // exactly as $eq does. Objects and arrays compare as JSON text and need
+      // no guard.
+      const groups: Array<{ members: unknown[], scalarType: string, elemType: string }> = [
+        { members: value.filter(el => typeof el === 'number'), scalarType: ` AND ${jsonType(ctx, field)} IN ('integer','real')`, elemType: " AND json_each.type IN ('integer','real')" },
+        { members: value.filter(el => typeof el === 'string'), scalarType: ` AND ${jsonType(ctx, field)} = 'text'`, elemType: " AND json_each.type = 'text'" },
+        { members: value.filter(el => typeof el === 'boolean'), scalarType: ` AND ${jsonType(ctx, field)} IN ('true','false')`, elemType: " AND json_each.type IN ('true','false')" },
+        { members: value.filter(el => el !== null && typeof el === 'object'), scalarType: '', elemType: '' }
+      ]
+      const scalarArms: string[] = []
+      const elemArms: string[] = []
+      for (const group of groups) {
+        if (group.members.length === 0) continue
+        // Bound once, reused in both arms - the same named parameters.
+        const list = `(${group.members.map(element => bindValue(ctx, element)).join(',')})`
+        scalarArms.push(`(${extract(ctx, field)} IN ${list}${group.scalarType})`)
+        elemArms.push(`(value IN ${list}${group.elemType})`)
+      }
+      if (value.includes(null)) {
+        scalarArms.push(`${extract(ctx, field)} IS NULL`)
+        elemArms.push('value IS NULL')
+      }
+      if (scalarArms.length === 0) return 'FALSE'
+      const scalarPred = scalarArms.join(' OR ')
+      const elemPred = elemArms.join(' OR ')
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
     case '$nin': {
@@ -739,6 +772,12 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
     }
     case '$exists': {
       if (typeof value !== 'boolean') throw Error(`$exists expects value to be of type: boolean; but got: ${typeof value}`)
+      // A field that exists only inside an array element still exists, so over a
+      // dotted path `$exists: false` is the exact complement of `$exists: true`
+      // - which DOES expand across arrays (above). Negating the positive form
+      // gets that right; the plain `json_type IS NULL` alone would report a
+      // document whose `a` array holds an element with `b` as missing `a.b`.
+      if (value === false && field.includes('.')) return `NOT (${convertOp(ctx, field, '$exists', true)})`
       // json_type is NULL for an absent path and non-NULL for every present
       // one - including JSON null, which MongoDB also counts as existing.
       // (The previous json_each form counted ROWS, so an empty array or

@@ -22,8 +22,9 @@
 import { compareBson, equalsBson } from './bson-order.js'
 import { encodeValue } from './ejson.js'
 import { assertPositiveN, evaluateExpression, pathValue } from './expression.js'
-import type { Document, SortSpecification } from './types.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
+import { ownField, setField } from './safe-object.js'
+import type { Document, SortSpecification } from './types.js'
 
 /** The stages this library implements. Anything else is rejected by name. */
 const SUPPORTED_STAGES = [
@@ -154,13 +155,14 @@ function setPathImmutable (doc: Document, field: string, value: unknown): Docume
   const root: Document = { ...doc }
   let node = root
   for (const segment of segments.slice(0, -1)) {
-    const existing = node[segment]
-    node[segment] = (existing === null || typeof existing !== 'object' || Array.isArray(existing) || existing instanceof Date)
+    const existing = ownField(node, segment)
+    const child: Document = (existing === null || typeof existing !== 'object' || Array.isArray(existing) || existing instanceof Date)
       ? {}
       : { ...(existing as Document) }
-    node = node[segment] as Document
+    setField(node, segment, child)
+    node = child
   }
-  node[segments[segments.length - 1]!] = value
+  setField(node, segments[segments.length - 1]!, value)
   return root
 }
 
@@ -169,11 +171,16 @@ function setPath (doc: Document, field: string, value: unknown): void {
   const segments = field.split('.')
   let node = doc
   for (const segment of segments.slice(0, -1)) {
-    const existing = node[segment]
-    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) node[segment] = {}
-    node = node[segment] as Document
+    const existing = ownField(node, segment)
+    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) {
+      const child: Document = {}
+      setField(node, segment, child)
+      node = child
+    } else {
+      node = existing as Document
+    }
   }
-  node[segments[segments.length - 1]!] = value
+  setField(node, segments[segments.length - 1]!, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -818,7 +825,7 @@ function compileProject (stage: string, value: unknown, strict: boolean): Stage 
       keepId = Boolean(entry)
       idExplicit = true
     } else if (entry) {
-      inclusions[field] = 1
+      setField(inclusions, field, 1)
     } else {
       exclusions.push(field)
     }
@@ -835,7 +842,7 @@ function compileProject (stage: string, value: unknown, strict: boolean): Stage 
   let project: (doc: any) => any
   if (!include) {
     const excludeSpec: ProjectionSpec = {}
-    for (const field of exclusions) excludeSpec[field] = 0
+    for (const field of exclusions) setField(excludeSpec, field, 0)
     if (idExplicit) excludeSpec._id = keepId ? 1 : 0
     // An aggregation $project never carries the $-operators (it has expressions
     // instead), so this compiled projection never has probes to resolve.
