@@ -233,4 +233,12 @@ export interface DbOptions {
    * serialises writers, and SQLite's default of 0 fails instantly on contention.
    */
   busyTimeoutMs: number
+  /**
+   * What `db.databaseName` reports.
+   *
+   * A SQLite file has no name of its own the way a MongoDB database does, so
+   * this is carried rather than derived. It names nothing physical - two `Db`s
+   * on the same file with different names are the same data.
+   */
+  databaseName?: string
 }

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A `MongoClient`-shaped entry point**, so a test suite can swap
+  `from 'mongodb'` for `from 'sqlite-document-db'` and change nothing else. A
+  `mongodb://` connection string is accepted and opens an in-memory database;
+  connection options are ignored, and `startSession`/`watch` throw with the
+  alternative named. `Db` gained `databaseName` and `createCollection()`, and
+  `Db.openSync()` for the synchronous `client.db(name)` the driver has.
 - **`$position` inside `$push`**, which inserts at an index instead of
   appending (negative counts from the end), applied before `$sort`/`$slice`.
 - **The positional update operators** `$`, `$[]` and `$[<identifier>]`, with the

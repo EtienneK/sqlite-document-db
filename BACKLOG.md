@@ -181,12 +181,11 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. The subset is now wide enough that the promise is not embarrassing - the CRUD surface has no unimplemented families left. |
-| 2 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 3 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 4 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 5 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 6 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 2 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 3 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 4 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 5 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
@@ -251,7 +250,7 @@ priority table above.
 | 19 | ~~[Unicode round-trips](#19-unicode-and-special-character-round-trips)~~ | S | **DONE 2026-07-26** — [test/unicode.spec.ts](test/unicode.spec.ts); found and fixed a real string-ordering bug |
 | 20 | ~~[Raw SQL escape hatch](#20-a-raw-sql-escape-hatch)~~ | S-M | **DONE 2026-07-26** — `db.sql.all/get/run` + `db.table()`; raw rows, writable |
 | 21 | [Optimistic concurrency](#21-optimistic-concurrency) | L | Open — **decide first**; option 2 (document the pure-MongoDB pattern) is likely |
-| 22 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Open — wants a wider subset first |
+| 22 | ~~[`MongoClient` shim](#22-a-mongoclient-shaped-shim)~~ | M | **DONE 2026-07-26** — tested through the real driver AND the shim, at one type |
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
 
@@ -1588,7 +1587,46 @@ Record the decision either way; do not drift into it.
 
 ## 22. A `MongoClient`-shaped shim
 
-**Size: M.** Pongo ships one, and it serves a use case this library already
+**Size: M — DONE 2026-07-26.** `MongoClient` in
+[src/mongo-client.ts](src/mongo-client.ts), exported from the entry point, so a
+suite swaps `from 'mongodb'` for `from 'sqlite-document-db'` and changes nothing
+else. `Db` gained `databaseName` and `createCollection()` to complete the shape.
+
+**The test is the interesting part.** The same test bodies run through the shim
+AND the real driver, both held at ONE structural interface with no cast — so a
+drift in shape fails to COMPILE rather than to run.
+[test/mongo-client.spec.ts](test/mongo-client.spec.ts). That is the strongest
+form the dual-engine harness has taken, and it is only possible because a
+drop-in claim is literally "the same code runs through both".
+
+**Three decisions:**
+
+- **`db()` is synchronous, like the driver's**, which is what `Db.openSync` is
+  for. A deliberate synchronous assumption, contrary to the driver-seam rule,
+  documented on the method and a compile-time change when an async engine
+  lands. (The first attempt tried to unwrap `Db.fromUrl`'s promise in place;
+  `.then()` on a resolved promise runs in a MICROTASK, so the value is never
+  there. Worth remembering.)
+- **A `mongodb://` URI opens an in-memory database, and connection options are
+  IGNORED.** Both are leniencies the rest of the library would not grant, and
+  both are justified the same way: they describe a network client that is not
+  here, they cannot make an answer wrong, and refusing them means editing the
+  very line the shim exists to leave alone. An unimplemented OPERATOR is a
+  different thing and still throws — as do `startSession`, `withSession` and
+  `watch`, each naming what to use instead.
+- **A file-backed client has ONE database.** A second `db(name)` on a file is an
+  error rather than a second view of the same collections; that silent merge is
+  what `tableNameFor` prevents one level down.
+
+**One divergence found by writing the test:** the real driver builds a FRESH
+`Db` object per `client.db(name)` call, over one pooled connection. The shim
+caches, because each `Db` here owns a connection and a second in-memory one
+would be a second, empty database. What both promise — and what the test asserts
+— is that the NAME identifies the data.
+
+### Original analysis
+
+Pongo ships one, and it serves a use case this library already
 claims in its README: running a test suite against this instead of a real
 `mongod`. Today that swap means changing `MongoClient.connect(uri)` to
 `Db.fromUrl(path)` and every `client.db(name)`; a shim would make it a

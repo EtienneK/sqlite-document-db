@@ -34,8 +34,8 @@ await users.find({ tags: 'admin' }).toArray()
   than the code. The rules nobody would guess right get copied from the server
   instead of invented — what `$pull` does with a document criterion, whether
   `$addToSet` counts `1` and `true` as equal, what an upsert seeds a new
-  document with, how `$ne` behaves against an array field. That is **925 tests
-  across 41 spec files**, nearly all of them matched pairs, and it is what turns
+  document with, how `$ne` behaves against an array field. That is **1026 tests
+  across 44 spec files**, nearly all of them matched pairs, and it is what turns
   "MongoDB-like" from a description into something that fails a build. Where the
   two are known to differ, [`strict: true`](#strict-mode) turns the difference
   into an error instead of a surprise.
@@ -61,9 +61,11 @@ aggregation pipeline that covers the common shapes rather than all of them.
 [Missing Features](#missing-features) is the exact list.
 
 **Using it as a MongoDB test double** works, and is a deliberate use case — it
-starts in milliseconds where `mongodb-memory-server` takes seconds. Turn on
-[`strict: true`](#strict-mode) if you do: it fails the constructs whose answer
-is known to differ, so a passing test means more.
+starts in milliseconds where `mongodb-memory-server` takes seconds, and
+[a `MongoClient` shim](#a-mongoclient-shaped-entry-point) makes the swap a
+one-line import change. Turn on [`strict: true`](#strict-mode) if you do: it
+fails the constructs whose answer is known to differ, so a passing test means
+more.
 
 ## Requirements
 
@@ -701,6 +703,40 @@ db.collection('Users')  // a different collection from...
 db.collection('users')  // ...this one
 ```
 
+### A `MongoClient`-shaped entry point
+
+For the test-double case, swapping one import is the whole change:
+
+```javascript
+import { MongoClient } from 'sqlite-document-db'   // was: from 'mongodb'
+
+const client = await MongoClient.connect(process.env.MONGO_URL)
+const users = client.db('app').collection('users')
+await users.insertOne({ name: 'Ada' })
+await client.close()
+```
+
+A `mongodb://` connection string is **accepted** and opens an in-memory
+database — a suite's URL usually comes from configuration, and refusing it would
+mean editing the very line the shim exists to leave alone. A file path or
+`:memory:` works too. The database named in the URI path is the default for
+`client.db()`, as it is for the driver, otherwise `test`.
+
+- **In memory, each `db(name)` is its own database**, isolated as MongoDB's are.
+  **A file is one database** — a SQLite file *is* a database, not a server — so
+  asking a file-backed client for a second name is an error rather than a
+  silent merge of two names into one set of collections.
+- **Connection options are ignored** (`maxPoolSize`, `tls`, `retryWrites`, …).
+  They describe a network client that is not here, and unlike an unimplemented
+  operator they cannot make an answer wrong. `strict`, `busyTimeoutMs` and
+  `debug` are read from the same object.
+- **`startSession()`, `withSession()` and `watch()` throw**, naming what to use
+  instead — `db.withTransaction(work)` for the first two, and a server for the
+  third.
+
+The tests for this run the *same* code through both this shim and the real
+driver, which is the only way a drop-in claim can be more than a claim.
+
 ### Raw SQL
 
 Your documents are in SQLite, so you should be able to use SQLite. `db.sql` is
@@ -846,8 +882,9 @@ Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
 `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
 `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()` `createIndex()`
 `dropIndex()` `indexes()` `listIndexes()` `drop()`; on `Db`,
-`withTransaction()` `listCollections()` `dropDatabase()`, and
-[`sql`](#raw-sql) / `table()` for SQL this library does not compile.
+`withTransaction()` `listCollections()` `createCollection()` `dropDatabase()`
+`databaseName`, and [`sql`](#raw-sql) / `table()` for SQL this library does not
+compile; plus a [`MongoClient` shim](#a-mongoclient-shaped-entry-point).
 
 Result objects match the official driver's shapes (`acknowledged`,
 `matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes

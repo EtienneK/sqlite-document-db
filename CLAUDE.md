@@ -48,7 +48,15 @@ was erased at runtime and never broke anything — it just made the graph
 circular and the layout hard to follow. **If you need a type in two modules, it
 belongs in types.ts.**
 
-- [src/index.ts](src/index.ts) — the public entry point: `Db`, and every export.
+- [src/index.ts](src/index.ts) — the public entry point. Re-exports ONLY, no
+  implementation, which is what makes "nothing imports index.ts" true by
+  construction rather than by care.
+- [src/db.ts](src/db.ts) — `Db`: the connection, the collection cache,
+  `withTransaction`, `db.sql`. Split out of index.ts when the MongoClient shim
+  needed the class and importing it from the entry point would have made the
+  graph circular.
+- [src/mongo-client.ts](src/mongo-client.ts) — the `MongoClient`-shaped shim
+  (see below).
 - [src/collection.ts](src/collection.ts) — `Collection`: CRUD, queries, indexes,
   `aggregate()`. Where compiled SQL gets run.
 - [src/types.ts](src/types.ts) — the shared public types (`Document`, result
@@ -426,6 +434,34 @@ Opening a collection for the FIRST time inside a transaction runs its
 cached `Collection` points at nothing ("no such table" on the next call).
 `withTransaction` therefore CLEARS the collection cache on rollback. The same
 hazard is why `drop()` and `dropDatabase()` evict the cache.
+
+### The MongoClient shim
+
+`MongoClient` (src/mongo-client.ts) exists for ONE use case: a test suite
+swapping `from 'mongodb'` for `from 'sqlite-document-db'` and changing nothing
+else. Three decisions carry it:
+
+**`db()` is SYNCHRONOUS, like the driver's**, which is what `Db.openSync`
+exists for. That is a deliberate synchronous assumption — the driver-seam rule
+says not to add them, and this one is added knowingly, documented on the method,
+and will be a compile-time change when an async engine lands. Do NOT try to fake
+it by unwrapping a promise: `.then()` on a resolved promise runs in a microtask,
+so the value is not there yet.
+
+**A `mongodb://` URI opens an in-memory database**, and connection options
+(`maxPoolSize`, `tls`, …) are IGNORED. Both are leniencies the rest of the
+library would not grant, and both are justified the same way: they describe a
+network client that is not here, they cannot make an answer wrong, and refusing
+them would mean editing the very line the shim exists to leave alone. An
+unimplemented OPERATOR is a different thing and still throws.
+
+**A file-backed client has ONE database.** A second `db(name)` on a file is an
+error, not a second view of the same collections — that silent merge is exactly
+what `tableNameFor` prevents one level down.
+
+[test/mongo-client.spec.ts](test/mongo-client.spec.ts) runs the same test bodies
+through the shim AND the real driver, holding both at one structural interface
+with no cast — so a drift in shape fails to compile rather than to run.
 
 ### The raw SQL escape hatch
 
