@@ -731,8 +731,12 @@ mean editing the very line the shim exists to leave alone. A file path or
   operator they cannot make an answer wrong. `strict`, `busyTimeoutMs` and
   `debug` are read from the same object.
 - **`startSession()`, `withSession()` and `watch()` throw**, naming what to use
-  instead — `db.withTransaction(work)` for the first two, and a server for the
-  third.
+  instead. The two are not the same kind of gap: **sessions are planned** (the
+  substantive part of one is a transaction, and
+  [`db.withTransaction(work)`](#transactions) already is that), while **change
+  streams are decided against** — they need an oplog, and the local
+  approximations are connection-local, unresumable and unverifiable. See
+  BACKLOG.md for both.
 
 The tests for this run the *same* code through both this shim and the real
 driver, which is the only way a drop-in claim can be more than a claim.
@@ -994,7 +998,11 @@ how each piece would be implemented. The headlines:
 - Change streams, replication, sharding, `$where`, server-side JavaScript,
   GridFS, the wire protocol. A process that needs those needs a server.
   (Multi-document atomicity within one connection *is* supported — see
-  [Transactions](#transactions).)
+  [Transactions](#transactions).) Change streams were investigated far enough to
+  be worth a decision record rather than a line here: `node:sqlite` exposes no
+  update hook, and SQLite's session extension records *nothing* for these tables
+  and is connection-local regardless — so it could see neither another process's
+  writes nor its own resume point. BACKLOG.md item 26 has the measurements.
 
 ## Thanks
 

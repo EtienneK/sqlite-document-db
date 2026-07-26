@@ -181,11 +181,13 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 2 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 3 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 4 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 5 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [`ClientSession` for the shim](#25-clientsession-for-the-shim) | S-M | The piece the `MongoClient` shim is missing: `session.withTransaction()` is how a lot of MongoDB transaction code is written, and rewriting it is the one thing the shim exists to avoid. The divergence is enumerable, so `strict` can enforce it. |
+| 2 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 3 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 4 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 5 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 6 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26.** No update hook in `node:sqlite`; the session extension records NOTHING for these tables (measured, 0 bytes - no primary key), and is connection-local anyway. A local change-notification API under another name is the honest version. |
 | — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
@@ -216,8 +218,13 @@ forward:
   JavaScript matcher.
 
 **Not planned, and worth saying so:** multi-document atomicity beyond a single
-connection, change streams, replication, sharding, `$where`, server-side
-JavaScript, GridFS, the wire protocol. A process that needs those needs a server.
+connection, replication, sharding, `$where`, server-side JavaScript, GridFS, the
+wire protocol. A process that needs those needs a server.
+[Change streams](#26-change-streams-decided-against-2026-07-26) and
+[`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) are in the
+same category but were investigated far enough to be worth writing down, so each
+has a decision record rather than a line here. `startSession()` is NOT in this
+category - see [item 25](#25-clientsession-for-the-shim).
 
 ---
 
@@ -253,6 +260,8 @@ priority table above.
 | 22 | ~~[`MongoClient` shim](#22-a-mongoclient-shaped-shim)~~ | M | **DONE 2026-07-26** — tested through the real driver AND the shim, at one type |
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
+| 25 | [`ClientSession` for the shim](#25-clientsession-for-the-shim) | S-M | Open — the shim's missing piece; blocked on nothing |
+| 26 | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26**, with the measurement |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
 format); items 5b, 15, 16 and 18 depend on
@@ -1883,3 +1892,118 @@ older branch to reach the newer product deserves a look before starting.
 async and the synchronous internals are a documented feature. Async is the PRICE
 of remote, not a benefit - the reason to want this is Turso/edge/embedded
 replicas.
+
+---
+
+## 25. `ClientSession`, for the shim
+
+**Size: S-M.** The [`MongoClient` shim](#22-a-mongoclient-shaped-shim) landed
+with `startSession()` throwing, which is the honest status quo but leaves a real
+gap: a great deal of MongoDB transaction code is written as
+
+```javascript
+const session = client.startSession()
+await session.withTransaction(async () => {
+  await accounts.updateOne({ _id: from }, { $inc: { balance: -100 } }, { session })
+  await accounts.updateOne({ _id: to }, { $inc: { balance: 100 } }, { session })
+})
+```
+
+and that shape currently has to be rewritten, which is the one thing the shim
+exists to avoid.
+
+### What is actually in the way
+
+**Not the API shape** - `session.withTransaction(fn)` maps onto
+`db.withTransaction(fn)` almost exactly, and causal consistency (the other half
+of a session) is trivially satisfied by one local file with no replication lag.
+
+**A session is a ROUTING TOKEN, and that is the problem.**
+`insertOne(doc, { session })` means "put this in the transaction"; OMITTING it
+means "run this outside the transaction, right now, concurrently". SQLite's
+`BEGIN` is connection-wide, so there is no "outside" on the same connection -
+and a second connection cannot supply one:
+
+- in memory, a second connection is a different DATABASE, not a second view of
+  the same one;
+- on a file, the outside write would block on the transaction's write lock and
+  **deadlock in a single-threaded process** - the transaction cannot commit,
+  because the code that would commit it is the code that is blocked.
+
+So the shape is supportable and the semantics are, in exactly one case: an
+operation *without* the session, inside a transaction.
+
+### Why that case is acceptable
+
+Forgetting to pass `{ session }` inside a transaction is a well-known BUG in
+MongoDB code - the operation silently runs outside the transaction and is not
+rolled back. Code that is correct against a real server therefore passes the
+session to every operation, and for that code this library behaves identically.
+The divergence only bites code that *deliberately* writes outside a transaction
+from inside one, which is rare and already a smell.
+
+That makes it an ENUMERABLE divergence, which is this project's bar (item 18).
+
+### The design
+
+- `client.startSession()` returns a session; `session.withTransaction(fn)`
+  delegates to `db.withTransaction(fn)`. `startTransaction()`/
+  `commitTransaction()`/`abortTransaction()` can follow the same route.
+- `{ session }` is accepted on the operation methods and **required to be the
+  active one** - a stale or foreign session throws rather than quietly doing
+  something else.
+- "an operation without a session inside a transaction still participates" is
+  documented, and `strict: true` turns it into an error.
+
+Most of the size is threading one option through ~20 method signatures; the
+transaction machinery already exists.
+
+---
+
+## 26. Change streams: DECIDED AGAINST 2026-07-26
+
+`watch()` throws, and should keep throwing. This is a decision, not a gap.
+
+### What was measured, not assumed
+
+`node:sqlite` exposes **no update hook** (`DatabaseSync` has `aggregate`,
+`applyChangeset`, `close`, `createSession`, `exec`, `function`, `prepare`,
+`serialize`, `setAuthorizer` and friends - no `updateHook`/`preupdate`).
+
+It DOES expose SQLite's session extension, which looked promising until it was
+pointed at this library's actual table shape:
+
+```
+collection table as it is today    changeset bytes: 0
+with an INTEGER PRIMARY KEY        changeset bytes: 26
+```
+
+The session extension keys changes by PRIMARY KEY, and a collection table is
+`(data JSON)` with none - the `_id` uniqueness comes from an expression index,
+not a key. It records nothing. Supporting it starts with a storage-schema
+migration of every existing database.
+
+### And that is the cheapest of the problems
+
+- **It is connection-LOCAL.** Neither the session extension nor an update hook
+  sees another process writing the same file, which is most of the point of
+  `watch()`.
+- **It is a pull-a-changeset batch, not a stream.** Resume tokens need a durable
+  ordered log - a changelog table plus triggers - costing write throughput on
+  EVERY write, to serve a feature most callers never use.
+- **`updateDescription` is genuinely hard.** Updates compile to ONE SQL
+  expression (that is the design, see item 4), so nothing knows which paths
+  changed without diffing the document before and after.
+- **None of it could be oracle-verified.** Ordering across concurrent writers
+  and resume-after-disconnect have no local equivalent to check against. That is
+  the same reasoning that decided [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why),
+  and the same answer follows.
+
+### What to build instead, if anyone asks
+
+A local change-NOTIFICATION API under a different name, promising nothing about
+MongoDB parity: "tell me when this collection changed", built on triggers.
+Local-first applications genuinely want that, and it can be honest about being
+single-process and non-resumable because it is not pretending to be a
+cluster-wide oplog. Same resolution as `$text` -> a caller-owned FTS5 table via
+`db.sql`.
