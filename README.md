@@ -387,8 +387,10 @@ them all. Neither is atomic — that matches MongoDB, and
 
 ### Aggregate
 
-A narrow pipeline: `$match`, `$sort`, `$limit`, `$skip`, `$count`, `$group`,
-`$project`, `$addFields`/`$set`, `$unwind` and `$lookup`.
+A pipeline covering the common shapes: `$match`, `$sort`, `$limit`, `$skip`,
+`$count`, `$group`, `$project`, `$addFields`/`$set`, `$unwind` and `$lookup`,
+with the expression operators listed under
+[What is supported](#what-is-supported).
 
 ```javascript
 const revenue = await db.collection('orders').aggregate([
@@ -415,10 +417,31 @@ how many input documents there are. Only the `localField`/`foreignField` form
 is implemented; the `let`+`pipeline` form is rejected by name.
 
 Accumulators: `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`, `$push`,
-`$addToSet`, `$count`. Expressions are field paths (`'$item'`), literals and
-`{ $literal: … }` — the arithmetic and conditional operators (`$add`, `$cond`,
-`$concat`, …) are not implemented, and an unrecognised one is an error rather
-than a silent null.
+`$addToSet`, `$count`.
+
+Expressions are field paths (`'$item'`), literals, `$$ROOT`/`$$REMOVE`, and the
+[operator families listed below](#what-is-supported) — arithmetic, comparison,
+boolean, conditional, string, array, date and type conversion:
+
+```javascript
+await db.collection('orders').aggregate([
+  {
+    $addFields: {
+      total: { $multiply: ['$qty', '$price'] },
+      size: { $cond: [{ $gte: ['$qty', 100] }, 'bulk', 'retail'] },
+      month: { $dateToString: { date: '$placedAt', format: '%Y-%m' } },
+      cheapest: { $min: '$quotes' }
+    }
+  },
+  { $match: { size: 'bulk' } }
+]).toArray()
+```
+
+An unrecognised operator is an error rather than a silent null. Two rules are
+worth knowing, and both are copied from the server rather than invented: a
+**missing** value gives null (`{ $add: ['$qty', '$absent'] }` is null) while a
+**wrong type** throws (`{ $add: ['$name', 1] }`), and a computed field that
+evaluates to missing is omitted from the output rather than set to null.
 
 **Where the work happens.** A leading run of `$match`/`$sort`/`$skip`/`$limit`
 is compiled into a single SELECT — the same SQL `find()` emits, so it uses the
@@ -676,6 +699,25 @@ Accumulators: `$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
 Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
 `$project` `$addFields`/`$set` `$unwind` `$lookup`.
 
+Expression operators, for `$project`, `$addFields`, `$group._id` and
+accumulator arguments:
+
+| Family | Operators |
+| --- | --- |
+| Arithmetic | `$add` `$subtract` `$multiply` `$divide` `$mod` `$abs` `$ceil` `$floor` `$round` `$trunc` `$pow` `$sqrt` |
+| Comparison | `$cmp` `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` |
+| Boolean | `$and` `$or` `$not` |
+| Conditional | `$cond` `$ifNull` `$switch` |
+| String | `$concat` `$toLower` `$toUpper` `$split` `$strLenCP` `$substrCP` `$indexOfCP` `$trim` `$ltrim` `$rtrim` `$replaceOne` `$replaceAll` `$strcasecmp` |
+| Array | `$size` `$isArray` `$arrayElemAt` `$first` `$last` `$slice` `$concatArrays` `$in` `$reverseArray` `$range` `$map` `$filter` `$reduce` `$sum` `$avg` `$min` `$max` |
+| Date | `$year` `$month` `$dayOfMonth` `$hour` `$minute` `$second` `$millisecond` `$dayOfWeek` `$dayOfYear` `$dateToString` |
+| Type | `$type` `$isNumber` `$toString` `$toBool` `$toInt` `$toDouble` `$toDate` |
+| Other | `$literal` `$let`, and the variables `$$ROOT` `$$CURRENT` `$$REMOVE` |
+
+Dates are handled in **UTC**: a `timezone` option throws rather than being
+ignored, because answering a timezone question in UTC is a wrong answer that
+looks right.
+
 Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
 `distinct()` `aggregate()` `insertOne()` `insertMany()` `updateOne()`
 `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
@@ -778,9 +820,11 @@ how each piece would be implemented. The headlines:
 
 - Stages: `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`,
   `$graphLookup`; and `$lookup`'s `let`+`pipeline` form
-- Expression operators: the arithmetic, string, date, array and conditional
-  families (`$add`, `$concat`, `$cond`, `$dateToString`, `$size`, …). Only field
-  paths, literals and `$literal` are supported
+- Expression operators outside the table above: the set family
+  (`$setUnion`, …), trigonometry, `$dateFromString` and the rest of the date
+  arithmetic (`$dateAdd`, `$dateDiff`, `$dateTrunc`), and timezone support on
+  the date operators. `$function` and `$accumulator` will **not** be supported,
+  for the same reason as `$where`
 - `$group` accumulators beyond the nine listed above
 
 **Not planned**

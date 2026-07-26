@@ -181,16 +181,15 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
-| 2 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 3 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 4 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 5 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 1-2 first, or the promise is embarrassing. |
-| 6 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 7 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 1 first, since its point is running an expression per input document. |
-| 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 9 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 10 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 2 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 3 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 4 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants item 1 first, or the promise is embarrassing. |
+| 5 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 6 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 7 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 8 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 9 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
 Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
@@ -248,7 +247,7 @@ priority table above.
 | 13 | ~~[Tutorial coverage](#13-close-the-tutorial-coverage-gaps)~~ | S | **DONE** — the last gap (Bulk Write) closed 2026-07-26 with `bulkWrite()` |
 | 14 | ~~[CI](#14-continuous-integration)~~ | S | **DONE 2026-07-25** — GitHub Actions, 6-way Node/OS matrix, plus a Deno job |
 | 15 | ~~[Remaining API surface](#15-remaining-collection--db-api)~~ | M | **DONE 2026-07-26** — `distinct`, `drop`, `bulkWrite`, `estimatedDocumentCount`, `listCollections`, `dropDatabase`, unordered `insertMany`, count windows |
-| 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common shapes + `$lookup` DONE 2026-07-26** — expression operators and the exotic stages still open |
+| 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common shapes, `$lookup` and the expression operators DONE 2026-07-26** — the exotic stages still open |
 | 17 | [Smaller items](#17-smaller-items-and-nice-to-haves) | S each | Benchmarks, `_id` types, depth limits, concurrency docs **DONE**; statement cache and TypeDoc open |
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
 | 19 | ~~[Unicode round-trips](#19-unicode-and-special-character-round-trips)~~ | S | **DONE 2026-07-26** — [test/unicode.spec.ts](test/unicode.spec.ts); found and fixed a real string-ordering bug |
@@ -1141,11 +1140,40 @@ matcher would be a second set of semantics to keep in step with the first, and
 every quirk pinned down in the specs (implicit array matching, the
 dotted-array-path rule, Date comparison through `.$date`) would eventually drift.
 
-**Still open:** `$lookup` (a join, and the obvious next one), `$facet`,
-`$bucket`, `$replaceRoot`, `$out`/`$merge`, `$sample`, `$graphLookup`; and the
-expression operator families — only field paths, literals and `$literal` are
-supported today, so `$add`/`$concat`/`$cond`/`$dateToString` and friends are
-all absent. Known divergence: a field path does NOT map over an array the way
+**The expression operators landed 2026-07-26**, in
+[src/expression.ts](src/expression.ts) rather than in aggregate.ts — it is a
+language with its own rules, and `$expr` needs the same vocabulary from the
+query side. Arithmetic, comparison, boolean, conditional, string, array, date
+and type-conversion families, plus `$let`, `$map`/`$filter`/`$reduce` and the
+variables `$$ROOT`/`$$CURRENT`/`$$REMOVE`; the full list is in the README.
+Dual-engine in
+[test/operators/expression-operators.spec.ts](test/operators/expression-operators.spec.ts),
+and the oracle overturned four things that had been implemented from reasoning:
+
+- **`$round` breaks ties to EVEN**, not away from zero. `$round: 2.5` is 2 and
+  `$round: 3.5` is 4 — `Math.round` gets the first one wrong, and only on exact
+  halves, so it would have shipped.
+- **A missing value is NOT null to the comparison operators.**
+  `{ $eq: ['$absent', null] }` is **false**; missing ranks below null. But
+  `$sort` and `$group._id` DO treat missing as null, so this could not be folded
+  into `compareBson` and lives as a separate `compareValues`.
+- **`$toInt` truncates a number but not a string.** `$toInt: 2.5` is 2;
+  `$toInt: '2.5'` is an error, because the string parse has to consume the whole
+  string.
+- **`$toLower`/`$toUpper` of a missing field is `''`,** not null — the one
+  string operator family that does not propagate.
+
+The general rule underneath: **a wrong TYPE throws, a missing VALUE does not.**
+`{ $add: ['$a', 1] }` is null when `a` is absent and an error when `a` is a
+string. `$sum`/`$avg`/`$min`/`$max` now exist twice on purpose — accumulators in
+`$group`, array operators everywhere else — which is MongoDB's design.
+
+**Still open:** `$facet`, `$bucket`, `$replaceRoot`, `$out`/`$merge`,
+`$sample`, `$graphLookup`; `$lookup`'s `let`+`pipeline` form; the set and
+trigonometry expression families, `$dateFromString`, the date-arithmetic
+operators, and timezone support (a `timezone` option throws today, because
+answering it in UTC would be a wrong answer that looks right).
+Known divergence: a field path does NOT map over an array the way
 MongoDB's does (`'$instock.qty'` reads as missing rather than yielding an
 array); `$unwind` first. `strict: true` rejects that case rather than answering
 it differently.

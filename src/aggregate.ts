@@ -21,6 +21,7 @@
 
 import { compareBson, equalsBson } from './bson-order.js'
 import { encodeValue } from './ejson.js'
+import { evaluateExpression, pathValue } from './expression.js'
 import type { Document, SortSpecification } from './types.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 
@@ -138,67 +139,6 @@ function assertCount (stage: string, value: unknown): number {
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
-
-/**
- * Reads a dotted path out of a document.
- *
- * Known divergence: MongoDB MAPS a path over an array of embedded documents,
- * so `'$instock.qty'` yields an array of quantities; here it yields undefined
- * and the path has to be reached through `$unwind` first. The collection-level
- * sort compiled to SQL does not map either, so at least the two agree - and
- * under `strict` the case raises instead of quietly reading as missing.
- */
-function pathValue (doc: Document, path: string, strict = false): unknown {
-  let node: any = doc
-  for (const segment of path.split('.')) {
-    if (node === null || node === undefined || typeof node !== 'object' || node instanceof Date) return undefined
-    if (strict && Array.isArray(node)) {
-      throw Error(
-        `strict: the field path '$${path}' runs through an array, which MongoDB would map over ` +
-        'and this library reads as missing - use $unwind first'
-      )
-    }
-    node = node[segment]
-  }
-  return node
-}
-
-/**
- * Evaluates an aggregation expression against one document.
- *
- * The expression language here is deliberately small: a `'$field'` path
- * reference, a literal, `{ $literal: <value> }`, and documents/arrays of
- * those. The arithmetic, string and conditional operators (`$add`, `$concat`,
- * `$cond`, ...) are NOT implemented, and an unknown `$`-key is an error rather
- * than something quietly treated as a field name - the same stance the query
- * compiler takes on unknown operators.
- */
-export function evaluateExpression (expression: unknown, doc: Document, strict = false): unknown {
-  if (typeof expression === 'string') {
-    if (!expression.startsWith('$')) return expression
-    if (expression.startsWith('$$')) {
-      throw Error(`aggregation variables are not supported: ${expression}`)
-    }
-    return pathValue(doc, expression.slice(1), strict)
-  }
-
-  if (expression === null || typeof expression !== 'object' || expression instanceof Date) return expression
-  if (Array.isArray(expression)) return expression.map(element => evaluateExpression(element, doc, strict))
-
-  const entries = Object.entries(expression as Document)
-  const operator = entries.find(([key]) => key.startsWith('$'))
-  if (operator !== undefined) {
-    if (operator[0] === '$literal' && entries.length === 1) return operator[1]
-    throw Error(`unsupported aggregation expression operator: ${operator[0]} (only field paths, literals and $literal are supported)`)
-  }
-
-  const result: Document = {}
-  for (const [key, value] of entries) {
-    const evaluated = evaluateExpression(value, doc, strict)
-    if (evaluated !== undefined) result[key] = evaluated
-  }
-  return result
-}
 
 /**
  * Returns a copy of `doc` with `value` written at a dotted path.

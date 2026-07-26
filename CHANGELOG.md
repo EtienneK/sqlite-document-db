@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The aggregation expression operators.** Arithmetic (`$add`, `$multiply`,
+  `$round`, …), comparison, boolean, conditional (`$cond`, `$ifNull`,
+  `$switch`), string (`$concat`, `$toUpper`, `$split`, `$trim`, `$replaceAll`,
+  …), array (`$size`, `$slice`, `$map`, `$filter`, `$reduce`, …), date
+  (`$year`, `$dateToString`, …) and type conversion (`$toString`, `$toInt`,
+  `$toDate`, `$type`), plus `$let` and the variables `$$ROOT`, `$$CURRENT` and
+  `$$REMOVE`. Previously an expression could only be a field path, a literal or
+  `$literal`, which was the pipeline's ceiling. Two rules are copied from the
+  server rather than invented: a **missing** value gives null while a **wrong
+  type** throws, and `$round` breaks ties to the even neighbour. Dates are
+  handled in UTC — a `timezone` option throws rather than being ignored.
 - **A raw SQL escape hatch.** `db.sql.all`, `db.sql.get` and `db.sql.run` are
   tagged templates on the same connection, for the SQL this library does not
   compile — a recursive CTE, a window function, a join, a `PRAGMA`. Every `${}`

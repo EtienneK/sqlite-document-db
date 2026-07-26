@@ -59,6 +59,10 @@ belongs in types.ts.**
   `$push`, `$pull`, …) into ONE SQL expression for the new `data` value.
 - [src/aggregate.ts](src/aggregate.ts) — the aggregation pipeline, and the
   decision about which stages run in SQL and which in JS.
+- [src/expression.ts](src/expression.ts) — the aggregation EXPRESSION language
+  (`$add`, `$cond`, `$dateToString`, `$map`, …). Split out from aggregate.ts
+  because it is a language with its own rules, and because `$expr` needs the
+  same vocabulary from the query side.
 - [src/bson-order.ts](src/bson-order.ts) — MongoDB's BSON comparison order in JS;
   the twin of `bsonRankSql`/`bsonValueSql` in query.ts, which it must agree with.
   **Strings compare by code POINT there, not with JavaScript's `<`.** SQLite's
@@ -257,6 +261,40 @@ holding the last one.
 **Non-obvious detail — the strict `$sort` check runs before sorting.**
 `Array.prototype.sort` never calls the comparator for a one-element list, so a
 check inside the comparator missed a `$group` that produced a single row.
+
+### The expression language (src/expression.ts)
+
+`$add`, `$cond`, `$dateToString`, `$map` and the rest. Four rules, each settled
+by the oracle rather than by reasoning — see
+[test/operators/expression-operators.spec.ts](test/operators/expression-operators.spec.ts):
+
+**A wrong TYPE throws; a missing VALUE does not.** `{ $add: ['$a', 1] }` over a
+document without `a` is `null`; over `{ a: 'x' }` it throws. A schema-less store
+is full of absent fields and they must not blow up a pipeline.
+
+**Missing and null are different values.** A missing field evaluates to
+`undefined`, and a computed field that evaluates to `undefined` is OMITTED from
+the output rather than set to null — which is what makes `$$REMOVE` and
+`$arrayElemAt` past the end behave like the server.
+
+**Non-obvious detail — the comparison operators do NOT use `compareBson`.**
+`compareValues` ranks a missing value BELOW null, so `{ $eq: ['$absent', null] }`
+is **false**. `$sort` and `$group._id` DO treat missing as null, which is why the
+two orderings cannot be merged. Verified against the server; it surprises
+everyone.
+
+**Non-obvious detail — `$round` breaks ties to EVEN.** `$round: 2.5` is 2 and
+`$round: 3.5` is 4. `Math.round` would answer 3 and 4, and the difference only
+shows on exact halves — so it is the kind of thing that ships.
+
+**`$sum`/`$avg`/`$min`/`$max` exist twice**: as accumulators in `$group`
+(src/aggregate.ts) and as array operators everywhere else (here). That is
+MongoDB's design, not a duplication to clean up — `$group` never reaches the
+expression versions, because `accumulatorFor` intercepts first.
+
+Dates are UTC-only and a `timezone` option is REJECTED rather than ignored.
+`$function`/`$accumulator` are never implemented, for the same reason as
+`$where`.
 
 ### strict mode
 

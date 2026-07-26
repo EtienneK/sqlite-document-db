@@ -56,6 +56,51 @@ await show('complete orders', [{ $match: { status: 'complete' } }, { $count: 'n'
 await show('cancelled orders (empty input emits nothing)', [{ $match: { status: 'cancelled' } }, { $count: 'n' }])
 
 // ---------------------------------------------------------------------------
+// Expression operators: arithmetic, conditionals, strings, arrays and dates.
+await show('computed fields', [
+  { $sort: { total: -1 } },
+  {
+    $addFields: {
+      withVat: { $round: [{ $multiply: ['$total', 1.15] }, 2] },
+      size: { $cond: [{ $gte: ['$total', 30] }, 'large', 'small' ] },
+      skus: { $map: { input: '$items', in: '$$this.sku' } },
+      units: { $sum: { $map: { input: '$items', in: '$$this.qty' } } },
+      who: { $toUpper: '$cust' }
+    }
+  },
+  { $project: { _id: 0, cust: 0, items: 0, status: 0 } }
+])
+
+// A missing field is null, not an error - but a wrong TYPE is an error. That
+// asymmetry is MongoDB's, and it is the right one for a schema-less store.
+await show('missing vs wrong type', [
+  { $limit: 1 },
+  { $project: { _id: 0, missing: { $add: ['$total', '$noSuchField'] } } }
+])
+
+// $switch, $ifNull and $dateToString.
+await show('labelled and dated', [
+  { $addFields: { placedAt: new Date('2024-05-17T08:30:00Z') } },
+  {
+    $project: {
+      _id: 0,
+      band: {
+        $switch: {
+          branches: [
+            { case: { $gte: ['$total', 45] }, then: 'top' },
+            { case: { $gte: ['$total', 30] }, then: 'middle' }
+          ],
+          default: 'bottom'
+        }
+      },
+      note: { $ifNull: ['$note', 'none'] },
+      month: { $dateToString: { date: '$placedAt', format: '%Y-%m' } }
+    }
+  },
+  { $sort: { band: 1 } }
+])
+
+// ---------------------------------------------------------------------------
 // Where the work happens. A LEADING $match/$sort/$skip/$limit compiles into one
 // SELECT - the same SQL find() emits, so it uses the same indexes. Everything
 // after that runs in JavaScript. explain() tells you where the line fell.

@@ -19,7 +19,12 @@
     // public API, so leading underscores are load-bearing here.
     "no-underscore-dangle": "off",
     // Cursors walk rows one at a time by design; the awaits cannot be batched.
-    "no-await-in-loop": "off"
+    "no-await-in-loop": "off",
+    // `then` is a field name in MongoDB's own syntax - { $cond: { if, then,
+    // else } } and each branch of $switch - so it appears in expression
+    // documents this library has to accept and its specs have to write. These
+    // are plain data, never awaited.
+    "no-thenable": "off"
   },
   "overrides": [
     {
