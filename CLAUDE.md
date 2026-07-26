@@ -1,8 +1,11 @@
 # sqlite-document-db
 
 A MongoDB-style document database implemented on top of SQLite's JSON functions.
-Zero runtime dependencies; ESM only; requires Node >= 22.13 for `node:sqlite`
-plus `DatabaseSync.prototype.function` (which backs `$regex`).
+Zero runtime dependencies; ESM only; requires Node >= 24 — the first line
+where `node:sqlite` is stable. (Node 22 had the module and was once the floor;
+its `iterate()` could GC a live cursor's statement out from under it, and a
+`db.function()` exception inside an UPDATE was swallowed into NULL. Both are
+fixed in 24, and both shaped designs recorded below.)
 
 Planned work is in [BACKLOG.md](BACKLOG.md) — check it before starting a feature, it
 records prior investigation (query plans, feasibility, sequencing) for most items.
@@ -22,7 +25,7 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 | `npm run stress` | The stress suite (~25s): every feature over deliberately hostile documents. Asserts ceilings, prints a report |
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck,
-test:types, build and test on {ubuntu, windows} × Node {22.13.0, 24, 26}.
+test:types, build and test on {ubuntu, windows} × Node {24, 26}.
 A separate job runs [examples/](examples/) under **Deno**, which is the only
 thing in the repo that exercises a non-Node runtime — the test suite is
 vitest-bound. Deno implements `node:sqlite` including the custom-function
@@ -248,14 +251,14 @@ half-to-even rounding) and would drift from the first. Consequences: `$expr`
 cannot use an index, and it needs a driver with `supportsFunctions`.
 
 **Non-obvious detail — an evaluation error inside `$expr` is caught and means
-"no match".** MongoDB fails the whole query instead. This is not a preference:
-an exception thrown from a `db.function()` callback is SWALLOWED on the Node
-22.13 floor and propagates on Node 26 (the same trap the update guards hit), so
-letting it out would make one query behave two ways on two supported runtimes.
-What CAN be checked everywhere is the STRUCTURE, so
+"no match".** MongoDB fails the whole query instead. This began as a platform
+necessity (Node 22, once the floor, swallowed `db.function()` exceptions — the
+same trap the update guards hit) and is KEPT as a documented divergence: one
+badly-shaped document should not veto a query over a schema-less store, and a
+future driver without user-defined functions (DR-3) could not surface the
+error either. What CAN be checked everywhere is the STRUCTURE, so
 `assertKnownExpressionOperators` validates operator names at compile time —
-that is what makes the common typo an error. Do not "improve" this by throwing
-from the callback.
+that is what makes the common typo an error.
 
 **Non-obvious detail — a `$bits*` mask is bound as a decimal STRING** and
 `CAST(… AS INTEGER)` on the way in. Bit 62 is already past
@@ -294,11 +297,12 @@ non-numeric targets (and `$push` non-array ones) with a SELECT that runs *before
 the UPDATE (`Collection.assertUpdateApplies`, over the `UpdateGuard` list
 src/update.ts builds), not with a guard inside the UPDATE itself.
 The obvious alternative — a `CASE` calling a registered SQL function that
-throws — is **not portable**: on Node 22.13 (the `engines` floor) an exception
-thrown inside a `db.function()` callback is swallowed and the call yields NULL,
-so `json_set` wrote null over the value, causing the exact data loss the guard
-existed to prevent. Node 26 propagates it. Don't reintroduce that pattern, and
-don't assume a JS callback can fail a statement.
+throws — is **not portable**: a driver may have no user-defined functions at
+all (DR-3), and on Node 22 (once the floor) the exception was swallowed and
+the call yielded NULL, so `json_set` wrote null over the value, causing the
+exact data loss the guard existed to prevent. Checking first also leaves every
+row untouched on refusal. Don't reintroduce that pattern, and don't assume a
+JS callback can fail a statement on every engine.
 
 ### Update operators (src/update.ts)
 

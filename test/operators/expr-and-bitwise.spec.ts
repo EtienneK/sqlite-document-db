@@ -197,13 +197,14 @@ describe('$expr and the bitwise operators', () => {
   }
 
   /**
-   * The one place `$expr` does not match the server, and it is a consequence of
-   * the platform rather than a choice: `$expr` compiles to a registered SQL
-   * function, and an exception thrown inside a `db.function()` callback is
-   * SWALLOWED on the Node 22.13 floor this package supports while it propagates
-   * on Node 26 (the same trap that shaped the update guards - see CLAUDE.md).
-   * Letting it out would make one query behave two ways on two supported
-   * runtimes, so an evaluation error is caught and the document does not match.
+   * The one place `$expr` does not match the server: an evaluation error
+   * against one document is caught and means "no match", where MongoDB fails
+   * the whole query. It began as a platform necessity - Node 22, a floor this
+   * package once had, swallowed exceptions thrown from `db.function()`
+   * callbacks (the same trap that shaped the update guards - see CLAUDE.md) -
+   * and is KEPT as a choice: one bad document does not veto a query over a
+   * schema-less store, and a future driver without user-defined functions
+   * (DR-3) could not surface the error either.
    *
    * MongoDB fails the whole query instead, so there is nothing to compare
    * against here and this half runs against this library alone.

@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # The full CI matrix - {ubuntu, windows} x Node {22.13.0, 24, 26} - not a
+  # The full CI matrix - {ubuntu, windows} x Node {24, 26} - not a
   # copy of it. A release is exactly when you want every job to have run.
   verify:
     uses: ./.github/workflows/ci.yml

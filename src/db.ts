@@ -151,7 +151,6 @@ export class Db {
     // ever sees strings - the compiled SQL type-guards with json_type - but
     // the typeof check keeps it total. Compiled patterns are cached because
     // SQLite calls the function once per candidate row.
-    // Requires Node >= 22.13 (DatabaseSync.prototype.function).
     // Engines without user-defined functions (libSQL, Turso - see DR-3) will
     // need $regex to fall back to filtering in JavaScript. Guarding the
     // registration is the first half of that; the compiler side is item 24.
@@ -188,13 +187,16 @@ export class Db {
         try {
           return isTruthy(evaluateExpression(parsed, parseDocument(document), dbOptions.strict)) ? 1 : 0
         } catch {
-          // A TYPE error against ONE document is not a match, and is not fatal.
-          // It also cannot be surfaced: an exception thrown from a
-          // db.function() callback is SWALLOWED on the Node 22.13 floor and
-          // propagates on Node 26, so letting it out would make the same query
-          // behave differently on two supported runtimes. Structural mistakes
-          // (an unknown operator, wrong arity) are caught at compile time
-          // instead - see assertKnownExpressionOperators.
+          // A TYPE error against ONE document is not a match, and is not
+          // fatal. MongoDB fails the whole query instead; this is a KNOWN,
+          // documented divergence. It began as a necessity - Node 22 (a floor
+          // this package once had) swallowed exceptions thrown from a
+          // db.function() callback, so the error could not surface reliably -
+          // and is kept as a choice: a schema-less store is full of shapes one
+          // bad document should not veto, and a future driver without
+          // user-defined functions could not surface it either. Structural
+          // mistakes (an unknown operator, wrong arity) are caught at compile
+          // time instead - see assertKnownExpressionOperators.
           return 0
         }
       })
@@ -530,8 +532,8 @@ export class Db {
    * callback to sit inside.
    */
   private enterTransaction (): TransactionFrame {
-    // Depth is tracked here rather than read from DatabaseSync.isTransaction,
-    // which is not available on the Node 22.13 floor this package declares.
+    // Depth is tracked here rather than read from the engine: the Driver seam
+    // has no isTransaction, and the depth also NAMES the savepoints below.
     const depth = this.transactionDepth
     // The name is generated, never caller-supplied - it is interpolated.
     const frame: TransactionFrame = { savepoint: depth === 0 ? null : `sdb_savepoint_${depth}`, closed: false }

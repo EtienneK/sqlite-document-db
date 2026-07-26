@@ -521,10 +521,12 @@ export class Collection<TSchema extends Document = Document> {
    *
    * This is a separate SELECT rather than a guard inside the UPDATE on purpose.
    * The obvious alternative, a CASE that calls a registered SQL function to
-   * raise, is not portable: on Node 22.13 (the `engines` floor) an exception
-   * thrown inside a `db.function()` callback is SWALLOWED and the call yields
-   * NULL, so `json_set` wrote null over the value - the exact data loss the
-   * guard existed to prevent. Caught by CI's oldest-Node job.
+   * raise, is not portable: a driver may have no user-defined functions at all
+   * (DR-3), and on Node 22 (a floor this package once had) the exception was
+   * SWALLOWED and the call yielded NULL, so `json_set` wrote null over the
+   * value - the exact data loss the guard existed to prevent, caught by CI's
+   * oldest-Node job at the time. Checking first also leaves EVERY row
+   * untouched on refusal, where an in-statement guard aborts mid-write.
    */
   /**
    * Under `strict`, rejects a sort whose key holds an ARRAY in any document.

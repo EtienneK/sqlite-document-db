@@ -7,8 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Node.js 24 or newer is required** (was 22.13). Node 22's `node:sqlite`
+  could garbage-collect a live cursor's statement out from under it
+  ("statement has been finalized" mid-iteration, surfaced by the new
+  prepared-statement cache and reproduced deterministically under
+  `--expose-gc`), and swallowed exceptions thrown from custom SQL functions
+  inside an UPDATE into NULL. Both are fixed in Node 24, the first line where
+  `node:sqlite` is stable.
+
 ### Added
 
+- **Aggregation-pipeline updates.** `updateOne`, `updateMany`,
+  `findOneAndUpdate` and `bulkWrite` accept `[{ $set: … }, { $unset: … }]`
+  (MongoDB 4.2+), with the stages `$set`/`$addFields`, `$unset` and `$project`
+  and the whole expression language on the right-hand side. Oracle-verified
+  rules that nobody would guess: an expression evaluating to missing REMOVES
+  the field; a pipeline that removes `_id` gets it silently restored (altering
+  it is still an error) with the row still counting as modified; an upsert
+  seeds from the filter's equalities and runs the pipeline over the seed. The
+  change event's `updateDescription` is a granular DIFF of the two images —
+  what the server derives for a pipeline write — with `truncatedArrays`
+  populated for shortened arrays; the one divergence (MongoDB's oplog size
+  heuristic can flip the event's type to `replace`) is documented and refused
+  under `strict` while a stream is open.
+- **`$lookup`'s `let` + `pipeline` form** — the correlated subquery. Per input
+  document the `let` variables are evaluated and substituted, and the
+  sub-pipeline runs as an ordinary aggregation on the foreign collection, so a
+  `$match` head is index-eligible there and nested `$lookup`s work. Identical
+  executions are deduplicated: an uncorrelated pipeline costs one query
+  however many input documents. Combining `localField`/`foreignField` *with* a
+  pipeline (MongoDB 4.4+) is refused by name.
+- **A prepared-statement cache** at the driver seam, transparent to every call
+  site and every engine. Measured on a file-backed database: `findOne` by id
+  3.4× faster, `updateOne` inside a transaction 4.3×, indexed `find` 2.1×. A
+  statement a live cursor is streaming from is never shared — a concurrent
+  identical query gets its own transient statement.
 - **Change streams.** `watch()` on a collection, a database and the
   `MongoClient` shim, returning an async iterable of the change events a server
   emits — `insert`, `update`, `replace`, `delete`, `drop`, `rename`,

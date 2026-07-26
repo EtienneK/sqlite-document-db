@@ -957,12 +957,14 @@ Notes for posterity:
   mid-pipeline `$match` going back through SQLite. It costs index eligibility
   (`$expr` is a scan; narrow it with an indexed criterion in the same filter)
   and it needs `supportsFunctions`, which item 24 already owes `$regex`.
-- **One divergence, and it is the platform's.** An expression that RAISES on a
-  document (`$multiply` over a string) makes that document not match, where a
-  real server fails the whole query. An exception thrown from a `db.function()`
-  callback is swallowed on the Node 22.13 floor and propagates on Node 26, so
-  raising would make one query behave two ways on two supported runtimes.
-  Structural mistakes are caught instead, at compile time, by
+- **One divergence, born of the platform and kept by choice.** An expression
+  that RAISES on a document (`$multiply` over a string) makes that document not
+  match, where a real server fails the whole query. Node 22 (once the floor)
+  swallowed `db.function()` exceptions, so raising was not portable then; with
+  the floor at 24 every supported Node propagates, and the catch is KEPT — one
+  badly-shaped document should not veto a query over a schema-less store, and a
+  driver without user-defined functions (DR-3) could not surface the error
+  anyway. Structural mistakes are caught instead, at compile time, by
   `assertKnownExpressionOperators` — so the common typo is an error everywhere.
 - **`$bits*` masks bind as a decimal STRING** and are `CAST` to INTEGER,
   because bit 62 is already past `Number.MAX_SAFE_INTEGER`. They follow the
@@ -1232,14 +1234,17 @@ Two small cleanups while in there:
 **Size: S — DONE 2026-07-25.** [.github/workflows/ci.yml](.github/workflows/ci.yml)
 runs lint, typecheck, build and test on push, PR and manual dispatch.
 
-The matrix is **{ubuntu, windows} × Node {22.13.0, 24, 26}**. The node axis is the
-load-bearing one, and 22.13.0 is there on purpose: it is the floor `engines`
-declares, so CI is what actually verifies that claim. The newer entries are not
-redundant either — `node:sqlite` bundles its own SQLite, and its query planner
-decides whether this library's expression indexes get used, which is precisely
-what [test/query-plan.spec.ts](test/query-plan.spec.ts) asserts. (That test was
-found failing on Node 26 during the 2026-07-25 review; a single-version CI would
-not have caught it.)
+The matrix is **{ubuntu, windows} × Node {24, 26}** (raised from a 22.13.0
+floor on 2026-07-26 — see the note under [item 17](#17-smaller-items-and-nice-to-haves)).
+The node axis is the load-bearing one: 24 is the floor `engines` declares, so
+CI is what actually verifies that claim, and the entries are not redundant —
+`node:sqlite` bundles its own SQLite, and its query planner decides whether
+this library's expression indexes get used, which is precisely what
+[test/query-plan.spec.ts](test/query-plan.spec.ts) asserts. (That test was
+found failing on Node 26 during the 2026-07-25 review; a single-version CI
+would not have caught it. The old floor entry earned its keep the same way: it
+caught the swallowed `db.function()` exception, and finally the GC bug that
+retired it.)
 
 The mongod binary is cached via `MONGOMS_DOWNLOAD_DIR` pointed inside the
 workspace. Verified against the resolver rather than assumed: `DOWNLOAD_DIR` is
@@ -1447,6 +1452,25 @@ it differently.
   (2.1x), `countDocuments` 4.1k -> 4.9k (1.2x - scan-dominated, as expected).
   Pinned in [test/statement-cache.spec.ts](test/statement-cache.spec.ts)
   against a COUNTING driver, because caching is invisible from behaviour alone.
+
+  **The cache retired Node 22 (floor raised to >= 24, 2026-07-26).** CI's
+  22.13.0 jobs failed intermittently on both OSes with "statement has been
+  finalized" (`ERR_INVALID_STATE`) inside a LIVE cursor. Measured to the
+  mechanism rather than guessed: on Node 22.13.0, a `StatementSync` reachable
+  only through its iterator is garbage-collected and the underlying statement
+  finalized MID-ITERATION (reproduced deterministically with `--expose-gc`;
+  Node 24.18 and 26.5 keep it rooted). Not a race - `node:sqlite` is
+  synchronous - and not this library's bug: the cache's TRANSIENT statements
+  merely made the GC-vulnerable shape (iterator as sole owner) reliable, where
+  the pre-cache code produced it rarely. The same probe session confirmed the
+  OTHER Node 22 hazard on record: a `db.function()` exception inside an UPDATE
+  is swallowed into NULL on 22.13 (the data-loss trap that shaped the update
+  guards) and propagates on 24/26. Holding a strong reference in the wrapper
+  could have papered over the GC bug, but a runtime that frees a statement
+  under a live cursor is not a floor worth engineering around - the guards'
+  and `$expr`'s designs it forced are KEPT (they have portability reasons of
+  their own, recorded where they live), and the swallowed-exception constraint
+  is gone from every supported Node.
 - **API documentation.** TypeDoc from the source, published to GitHub Pages.
 - ~~**Remove `backup/`.**~~ **DONE** — the directory is gone; the last stale
   references to it (in `.oxlintrc.json` and `CLAUDE.md`) were removed 2026-07-25.
@@ -2045,10 +2069,9 @@ in two files.
   user-defined-function support - so it offers nothing this library does not
   already have, while costing a native dependency and a build step. It is
   healthy and widely used; it is simply redundant here. Its one possible benefit
-  was a lower Node floor (`engines` says `>=22.13` only because that is when
-  `DatabaseSync.prototype.function`, which `$regex` needs, landed), and that
-  expired when Node 20 reached end of life in April 2026. The floor now excludes
-  only unsupported Node versions.
+  was a lower Node floor, which expired when Node 20 reached end of life in
+  April 2026 - and again when this package's own floor moved to 24 (see item
+  17's statement-cache note for why Node 22's `node:sqlite` was retired).
 
 **So the async-driver landscape really is thin**, which is what makes item 24
 worth considering at all: `node:sqlite` and `better-sqlite3` are synchronous,
@@ -3085,10 +3108,10 @@ carry them too.
 (named *and* positional), and `typeof(x)` reports `blob`.
 
 **Unverified on the `engines` floor.** These numbers are Node 26.5.0 only, which
-was the sole runtime to hand. Blob binding almost certainly works on 22.13 — it
+was the sole runtime to hand. Blob binding almost certainly works on 24 — it
 is a direct `sqlite3_bind_blob` — but `MAX_DOCUMENT_DEPTH` is the standing
-reminder that the floor decides and that CI's Windows/22.13 job is the one that
-finds out. Confirm there before step 1 ships.
+reminder that the floor decides and that CI's Windows/oldest-Node job is the
+one that finds out. Confirm there before step 1 ships.
 
 Over a 64MB blob in one row:
 

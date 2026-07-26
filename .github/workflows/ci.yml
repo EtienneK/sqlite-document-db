@@ -26,14 +26,18 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        # 22.13.0 is the floor declared in package.json's engines field - it is
-        # the first release with DatabaseSync.prototype.function ($regex) and
-        # StatementSync.prototype.iterate (the cursor). The newer entries are
-        # not redundant: node:sqlite bundles its own SQLite, and its query
-        # planner decides whether the expression indexes this library creates
-        # are actually used. test/query-plan.spec.ts is the guard, and it needs
-        # to run on every SQLite version users might have.
-        node: ['22.13.0', '24', '26']
+        # 24 is the floor declared in package.json's engines field. Node 22
+        # had node:sqlite (from 22.13) and was supported for a while, but its
+        # iterate() does not keep the statement alive across GC - a live
+        # cursor's statement could be finalized out from under it (measured;
+        # the statement cache made the exposure reliable) - and an exception
+        # thrown from a db.function() callback inside an UPDATE was swallowed
+        # into NULL. Both are fixed lines >= 24. The two entries are not
+        # redundant: node:sqlite bundles its own SQLite, and its query planner
+        # decides whether the expression indexes this library creates are
+        # actually used. test/query-plan.spec.ts is the guard, and it needs to
+        # run on every SQLite version users might have.
+        node: ['24', '26']
 
     steps:
       - uses: actions/checkout@v4

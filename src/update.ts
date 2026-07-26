@@ -18,9 +18,12 @@
  *    another's output. `$inc` has always worked this way.
  * 2. **Anything that can fail is checked BEFORE the UPDATE runs**, as a guard
  *    (see `UpdateGuard`) the caller evaluates in a separate SELECT. A guard
- *    inside the statement is not portable: on Node 22.13 an exception thrown
- *    from a `db.function()` callback is swallowed and the call yields NULL, so
- *    `json_set` wrote null over the value it was meant to protect.
+ *    inside the statement - a CASE calling a registered SQL function that
+ *    throws - is not portable: a driver may have no user-defined functions at
+ *    all (DR-3), and on Node 22 (a floor this package once had) the exception
+ *    was SWALLOWED into NULL, so `json_set` wrote null over the value the
+ *    guard existed to protect. Checking first also means a refusal leaves
+ *    every row untouched, not just the offending one.
  */
 
 import { compareBson, equalsBson } from './bson-order.js'

@@ -69,9 +69,11 @@ more.
 
 ## Requirements
 
-Node.js **22.13 or newer** (`node:sqlite` appeared in 22.5 and only became
-stable in Node 24; the custom SQL function behind `$regex` needs
-`DatabaseSync.prototype.function`, added in 22.13). Deno works too — the
+Node.js **24 or newer** — the first line where `node:sqlite` is stable. Node
+22 had the module (from 22.13) but two of its bugs bit in practice: a live
+cursor's statement could be garbage-collected out from under it, and an
+exception thrown from a custom SQL function inside an UPDATE was silently
+swallowed into NULL. Both are fixed in 24. Deno works too — the
 [examples](examples/) run under both in CI.
 
 > Upgrading from 1.x is a breaking change: see [CHANGELOG.md](CHANGELOG.md).
@@ -473,10 +475,10 @@ Three things to know:
   fails rather than matching nothing.
 - **A document the expression cannot evaluate does not match**, where a real
   server fails the whole query. `{ $expr: { $gt: [{ $multiply: ['$qty', 2] }, 5] } }`
-  over a document whose `qty` is a string skips that document here. The
-  difference is not a choice: `$expr` runs as a registered SQL function, and an
-  exception thrown inside one is swallowed on Node 22.13 and propagates on Node
-  26, so raising would make one query behave two ways on two supported runtimes.
+  over a document whose `qty` is a string skips that document here. A
+  deliberate divergence: one badly-shaped document should not veto a query over
+  a schema-less store — and a future engine without custom SQL functions could
+  not surface the error anyway.
 
 ### Match on bits
 

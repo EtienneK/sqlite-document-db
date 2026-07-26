@@ -1072,12 +1072,11 @@ export const EXPRESSION_OPERATORS = ['$literal', ...Object.keys(OPERATORS)].toSo
  * Rejects an unknown `$`-operator anywhere in an expression, WITHOUT evaluating
  * it.
  *
- * `$expr` compiles to a SQL function that runs per row (see src/query.ts), and
- * an error thrown inside a `db.function()` callback is swallowed on the Node
- * 22.13 floor this package supports - so a typo like `{ $gtt: [...] }` would
- * quietly match nothing on one supported Node and throw on another. Checking
+ * `$expr` compiles to a SQL function that runs per row (see src/query.ts) and
+ * deliberately treats an evaluation error as "no match" - so a typo like
+ * `{ $gtt: [...] }` would quietly match nothing rather than erroring. Checking
  * the structure once, at compile time, is what makes the common mistake an
- * error everywhere.
+ * error, everywhere the expression could run.
  *
  * It is a structural check only. Evaluating a sample document instead would
  * raise on expressions that are perfectly valid ({ $switch } with no default
