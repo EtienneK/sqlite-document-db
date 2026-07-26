@@ -1,4 +1,6 @@
-import { bench, describe } from 'vitest'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { afterAll, bench, describe } from 'vitest'
 
 import { Db } from '../src/index.js'
 
@@ -145,7 +147,7 @@ const writes = writeDb.collection('items')
 await writes.insertOne({ _id: 'w1', item: 'target', qty: 0 } as any)
 const writeRng = makeRng(7)
 
-describe('writes', () => {
+describe('writes, :memory:', () => {
   bench('insertOne', async () => {
     await writes.insertOne(makeDoc(1, writeRng) as any)
   })
@@ -158,4 +160,57 @@ describe('writes', () => {
   bench('findOne by _id', async () => {
     await writes.findOne({ _id: 'w1' })
   })
+})
+
+/**
+ * The same writes against a REAL FILE (BACKLOG item 17).
+ *
+ * Everything above this point runs on `:memory:`, where a commit costs nothing
+ * because there is no fsync - and that blind spot is why `insertMany` spent a
+ * release doing one implicit transaction, and therefore one fsync, per
+ * document. In memory it clocked 243,000 inserts/s; on a file it managed 155/s.
+ * A benchmark suite that never touches a disk cannot see an I/O regression at
+ * all, so this group exists to keep that number in front of anyone reading the
+ * output.
+ *
+ * It reports rather than asserts - shared CI runners are far too noisy to fail
+ * a build on a timing. The actual regression guard is
+ * test/write-batching.spec.ts, which COUNTS the transactions instead.
+ */
+// Deliberately NOT os.tmpdir(): /tmp is a tmpfs on many Linux systems, which
+// has no fsync cost at all - a "file-backed" benchmark there measures exactly
+// what the :memory: one already does, and would report a clean bill of health
+// for the very regression this group exists to expose. The working directory
+// is a real filesystem on both CI and a normal checkout.
+// Sweep anything a previous run left behind before making a new one: a killed
+// run cannot clean up after itself, and these would otherwise accumulate.
+for (const entry of readdirSync(process.cwd())) {
+  if (entry.startsWith('.bench-')) rmSync(join(process.cwd(), entry), { recursive: true, force: true })
+}
+const fileDir = mkdtempSync(join(process.cwd(), '.bench-'))
+const fileDb = await Db.fromUrl(join(fileDir, 'bench.db'))
+const fileWrites = fileDb.collection('items')
+await fileWrites.insertOne({ _id: 'w1', item: 'target', qty: 0 } as any)
+const fileRng = makeRng(7)
+
+describe('writes, file-backed (WAL, synchronous=FULL)', () => {
+  bench('insertOne', async () => {
+    await fileWrites.insertOne(makeDoc(1, fileRng) as any)
+  })
+  bench('insertMany, 100 docs', async () => {
+    await fileWrites.insertMany(Array.from({ length: 100 }, (_, i) => makeDoc(i, fileRng)) as any[])
+  })
+  bench('insertMany, 1000 docs', async () => {
+    await fileWrites.insertMany(Array.from({ length: 1000 }, (_, i) => makeDoc(i, fileRng)) as any[])
+  })
+  bench('updateOne by _id ($set + $inc)', async () => {
+    await fileWrites.updateOne({ _id: 'w1' }, { $set: { item: 'updated' }, $inc: { qty: 1 } })
+  })
+})
+
+// afterAll, not process.on('exit'): vitest runs benchmarks in a worker whose
+// exit handlers do not fire, which left a .bench-* directory behind every run.
+afterAll(async () => {
+  await fileDb.close()
+  rmSync(fileDir, { recursive: true, force: true })
 })

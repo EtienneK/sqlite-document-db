@@ -94,10 +94,15 @@ describe('EJSON storage encoding (DR-1)', () => {
   /**
    * The nesting limit, pinned at BOTH edges.
    *
-   * The upper edge is the one that matters: if MAX_DOCUMENT_DEPTH ever drifts
-   * above what SQLite accepts, the guard stops firing and users get "malformed
-   * JSON" again; if it drifts below, the library rejects documents it could
-   * perfectly well store. Only a test on each side catches both directions.
+   * Drift upwards and the guard stops firing: users get SQLite's bare
+   * "malformed JSON" back, or - as happened on Windows/Node 22.13 when this was
+   * set to 1000 - a `RangeError` from the encoder's own recursion, on a limit
+   * the implementation could not reach. Drift downwards and the library starts
+   * refusing documents it could store. Only a test on each side catches both.
+   *
+   * These stay single-engine: MongoDB's limit is TIGHTER (~180), so the
+   * at-the-limit document below is one a real server would refuse. That is the
+   * intended direction - see MAX_DOCUMENT_DEPTH.
    */
   describe('nesting depth', () => {
     // { deep: <root> } puts the chain's deepest object at 1 + 1 + levels.

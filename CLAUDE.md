@@ -424,13 +424,19 @@ Mongodb variant flaky for reasons that are nobody's bug.
   ordered insert is not.
   `BEGIN` is *attempted*, not guarded by a flag, so an enclosing transaction
   (a future `withTransaction`) simply keeps ownership.
-- **Document nesting is capped at `MAX_DOCUMENT_DEPTH` (1000)** in
-  [src/ejson.ts](src/ejson.ts), which mirrors SQLite's `SQLITE_MAX_JSON_DEPTH`.
-  Without the guard the only symptom is `json()` failing with a bare "malformed
-  JSON". The number is MEASURED, and [test/ejson.spec.ts](test/ejson.spec.ts)
-  pins both edges — one level under must store, one level over must throw — so
-  it cannot drift in either direction. There is no document SIZE limit, which
-  means a document a real MongoDB would refuse (>16MB) is accepted here.
+- **Document nesting is capped at `MAX_DOCUMENT_DEPTH` (200)** in
+  [src/ejson.ts](src/ejson.ts). Three limits bear on that number and the
+  comment there explains all three; the one that bites is that **`encode`
+  recurses once per level**, so the cap has to be reachable on every supported
+  platform. It was 1000 (mirroring SQLite) for exactly one day, and CI caught it
+  on **Windows / Node 22.13** with `RangeError: Maximum call stack size
+  exceeded` — Linux/Node 26 has a bigger stack and passed. If you raise this,
+  the Windows job is the one that decides. MongoDB is *stricter* (~180), and
+  being slightly above it is deliberate: more permissive means data still
+  round-trips, stricter would refuse documents a real server takes.
+  [test/ejson.spec.ts](test/ejson.spec.ts) pins both edges. There is no document
+  SIZE limit, which means a document a real MongoDB would refuse (>16MB) is
+  accepted here.
 - **Storage is EJSON-for-Dates, not plain JSON** ([src/ejson.ts](src/ejson.ts), per
   DR-1). Dates are stored as `{"$date": "<ISO>"}` and revived on read; every other
   non-JSON type is rejected at write time with the offending path — **including a

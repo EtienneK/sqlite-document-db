@@ -181,7 +181,7 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Transactions](#12-transactions) | M | **The last correctness gap**, and now the top of the list because everything cheaper is done. Everything below is surface area; this is the one thing a caller cannot work around, and `bulkWrite()` should wait for it so an ordered batch can actually be atomic. |
+| 1 | [Transactions](#12-transactions) | M | **The last correctness gap.** Everything below is surface area; this is the one thing a caller cannot work around, and `bulkWrite()` should wait for it so an ordered batch can actually be atomic. `insertMany` already opens its own transaction, so the integration point exists. |
 | 2 | [`$lookup`](#16-aggregation-pipeline) | M | The most conspicuous hole in the pipeline and the one people ask for first. It is a join, which SQLite is good at. |
 | 3 | [Rest of item 15](#15-remaining-collection--db-api) | M | `bulkWrite()` (after item 1), `estimatedDocumentCount()`, `listCollections()`, `dropDatabase()`, `insertMany({ ordered: false })`, `countDocuments` with `limit`/`skip`. `bulkWrite` also closes the last tutorial gap in item 13. |
 | 4 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString` and friends. Only field paths, literals and `$literal` exist today, which is the pipeline's real ceiling once `$lookup` lands. |
@@ -191,12 +191,30 @@ the closed items are listed after it for provenance.
 | 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until it is exhausted, so this is a lifetime problem rather than a lookup one. |
 | 9 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow, so not the S it sits among. |
 
-**Everything S and under is now done** (2026-07-25): item 13's tutorial gaps,
-`distinct()`, `drop()`, `_id` types, and the document depth limit. Three of
-those turned out to be **already complete and merely unstruck** — the "Project
-Fields to Return" spec, benchmarks in CI, and the concurrency documentation.
-Re-read an item's blockers before estimating it; this list drifted in the
-direction of looking like more work than it was.
+The S items cleared on 2026-07-25 — item 13's tutorial gaps, `distinct()`,
+`drop()`, `_id` types, the document depth limit — and three of those turned out
+to be **already complete and merely unstruck** ("Project Fields to Return",
+benchmarks in CI, the concurrency documentation). Re-read an item's blockers
+before estimating it; this list drifted in the direction of looking like more
+work than it was.
+
+**Write-regression coverage DONE 2026-07-26**, and it arrived the way the best
+backlog items do: from a bug. The `insertMany` fsync-per-document defect (212x)
+was invisible to a benchmark suite that only measures `:memory:`. Two things
+came out of it, and the split is the point:
+
+- [test/write-batching.spec.ts](test/write-batching.spec.ts) is the actual
+  **guard**. It COUNTS the transactions `insertMany` opens (via `debug` logging,
+  the same `capture()` trick the query-plan tests use) rather than timing them —
+  exact, machine-independent, and it fails the moment the batching is removed.
+  Verified by mutation: reintroducing the defect fails 3 of its 6 tests.
+- The `writes, file-backed` group in [bench/db.bench.ts](bench/db.bench.ts) is
+  the **visibility**. It reports, it does not assert, because shared runners are
+  too noisy to fail a build on a timing.
+
+A benchmark alone would not have caught this (CI runs `npm run bench` with no
+thresholds); a test alone would not have shown the cost. **When a bug escapes,
+ask what would have caught it** — and notice whether that thing asserts.
 
 **Not planned, and worth saying so:** multi-document atomicity beyond a single
 connection, change streams, replication, sharding, `$where`, server-side

@@ -574,7 +574,7 @@ than quoted from documentation:
 
 | | Limit |
 | --- | --- |
-| Nesting depth | **1000 levels**, counting the document itself as one. A `Date` costs a level (it is stored as `{"$date": …}`). Exceeding it is a clear error naming the path, not SQLite's bare "malformed JSON". |
+| Nesting depth | **200 levels**, counting the document itself as one. A `Date` costs a level (it is stored as `{"$date": …}`). Exceeding it is a clear error naming the path, not SQLite's bare "malformed JSON". MongoDB is stricter here — it refuses at ~180 — so a document this library accepts at the limit is one a real server would reject. |
 | Document size | No practical limit — SQLite's is ~1GB, and 40MB documents store and read back fine. **There is no 16MB cap**, so a document that a real MongoDB would reject may be stored here. |
 | Array length | No practical limit; 100k elements is fine. |
 

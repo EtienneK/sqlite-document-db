@@ -28,17 +28,28 @@ const DATE_KEY = '$date'
  * How deeply a stored document may nest, counting the document itself as
  * level 1 and each object or array below it as one more.
  *
- * This mirrors SQLite's `SQLITE_MAX_JSON_DEPTH`, which defaults to 1000: one
- * level deeper and `json()` rejects the document with the bare message
- * "malformed JSON", naming neither the limit nor the path. Checking it here
- * turns that into an error that says what happened and where.
+ * Three limits bear on this number, and 200 is chosen to sit under the two
+ * that are hard and over the one that is not ours to widen:
  *
- * The number is MEASURED against the boundary, not read off the SQLite docs -
- * a document whose deepest container sits at level 1000 round-trips, and one at
- * 1001 does not. A `Date` costs a level, because it is stored as the object
- * `{"$date": ...}`; test/ejson.spec.ts pins both edges.
+ * 1. **The JavaScript call stack.** `encode` below recurses once per level, so
+ *    the reachable depth depends on the engine's stack. This was originally set
+ *    to 1000 to mirror SQLite, which worked on Linux/Node 26 and blew the stack
+ *    on Windows/Node 22.13 with `RangeError: Maximum call stack size exceeded`
+ *    - a limit the implementation could not actually reach. Whatever the number
+ *    is, it has to be one every supported platform can encode.
+ * 2. **SQLite's `SQLITE_MAX_JSON_DEPTH`**, 1000 by default. Past it `json()`
+ *    fails with a bare "malformed JSON" naming neither the limit nor the path,
+ *    which is the error this check exists to replace.
+ * 3. **MongoDB's own nesting limit**, which is the tightest of the three:
+ *    measured at ~180 levels ("BSONObj exceeds maximum nested object depth"),
+ *    and documented as 100. Sitting slightly ABOVE it is deliberate - being
+ *    more permissive than the oracle means data still round-trips here, where
+ *    being stricter would reject documents a real server accepts.
+ *
+ * A `Date` costs a level, because it is stored as `{"$date": ...}`.
+ * test/ejson.spec.ts pins both edges, so this cannot drift in either direction.
  */
-export const MAX_DOCUMENT_DEPTH = 1000
+export const MAX_DOCUMENT_DEPTH = 200
 
 /** Serialize a document for storage. Throws on values JSON cannot hold. */
 export function stringify (doc: unknown): string {

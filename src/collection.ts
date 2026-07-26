@@ -902,10 +902,14 @@ export class Collection<TSchema extends Document = Document> {
     // withTransaction) may already have one open, and SQLite has no nested
     // transactions. Failing to open one simply means this batch does not own
     // it, and the enclosing transaction decides when the work becomes durable.
+    //
+    // Routed through this.exec, not this.db.exec, so the transaction shows up
+    // in `debug` output like every other statement - which is also what lets
+    // test/write-batching.spec.ts COUNT the commits instead of timing them.
     let owned = false
     if (docs.length > 1) {
       try {
-        this.db.exec('BEGIN')
+        this.exec('BEGIN')
         owned = true
       } catch {
         owned = false
@@ -917,12 +921,12 @@ export class Collection<TSchema extends Document = Document> {
       if (!owned) return
       owned = false
       try {
-        this.db.exec('COMMIT')
+        this.exec('COMMIT')
       } catch {
         // A constraint failure aborts the statement, not the transaction, so
         // COMMIT normally succeeds. If SQLite did abort it, the prefix is gone
         // either way and the only correct move is to leave no transaction open.
-        try { this.db.exec('ROLLBACK') } catch { /* already closed */ }
+        try { this.exec('ROLLBACK') } catch { /* already closed */ }
       }
     }
 

@@ -3,3 +3,6 @@ dist/
 
 # Ad-hoc performance investigations (see BACKLOG item 17).
 .perf/
+
+# Scratch directories created by the file-backed benchmarks.
+.bench-*/

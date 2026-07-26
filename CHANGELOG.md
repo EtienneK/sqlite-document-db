@@ -36,9 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contributes its elements) and returns values in BSON type order.
 - **`drop()`**, which removes the collection with its indexes and evicts the
   cached `Collection` so the name is usable again immediately.
-- **A clear error when a document nests too deeply.** SQLite caps JSON nesting
-  at 1000 levels and reports only "malformed JSON"; the storage encoder now
-  checks the limit itself and names the offending path.
+- **A clear error when a document nests too deeply.** Documents may nest 200
+  levels; past that the storage encoder throws an error naming the offending
+  path, rather than letting SQLite report a bare "malformed JSON". The cap sits
+  above MongoDB's own (~180) and below the JavaScript call stack the encoder
+  needs, which is what makes it reachable on every supported platform.
 - Types for all of the above: the array operators are restricted to array paths
   and their element type, `$mul` to numeric paths, and `aggregate<TResult>()`
   threads the result shape through.
