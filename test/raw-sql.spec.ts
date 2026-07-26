@@ -1,4 +1,4 @@
-import { Db, parseDocument, stringifyDocument } from '../src/index.js'
+import { Db, parseDocument, SqlFragment, stringifyDocument } from '../src/index.js'
 
 /**
  * BACKLOG item 20: the raw SQL escape hatch.
@@ -203,6 +203,15 @@ describe('db.sql - the raw SQL escape hatch', () => {
     it('validates the collection name it is given', () => {
       expect(() => db.table('with$dollar')).toThrow(/must not contain/)
       expect(() => db.table('')).toThrow(/non-empty/)
+    })
+
+    it('is the only source of a SqlFragment - direct construction is refused', () => {
+      // db.table() splices its result unescaped; everything else in a db.sql
+      // template is bound. Minting a fragment from arbitrary text would reopen
+      // the injection hole the binding closes, so the constructor refuses it
+      // while `instanceof` (for callers wanting the type) still works.
+      expect(db.table('places')).toBeInstanceOf(SqlFragment)
+      expect(() => new SqlFragment('"x"; DROP TABLE y')).toThrow(/not constructible directly/)
     })
 
     it('does not create the collection, and says so when it is missing', async () => {

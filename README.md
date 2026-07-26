@@ -435,6 +435,14 @@ db.collection('items').find({ qty: { $type: ['int', 'string'] } })
 `$regex` runs JavaScript `RegExp` inside SQLite (via a registered SQL function),
 so JS regex syntax applies. MongoDB's `x` (extended) option is not supported.
 
+> **Security note.** The pattern is compiled to a real `RegExp` and tested once
+> per candidate row. Because `node:sqlite` is synchronous, a catastrophic-
+> backtracking pattern (e.g. `(a+)+$`) over attacker-influenced data blocks the
+> event loop until it finishes — a denial-of-service risk inherent to running
+> regexes, which MongoDB shares. **Do not build `$regex` patterns from untrusted
+> input** without validating them first; the compiled-pattern cache is bounded,
+> so it will not grow without limit, but a single bad pattern is still enough.
+
 ### Compare two fields with `$expr`
 
 `$expr` puts an [aggregation expression](#aggregate) in a filter, which is the
@@ -722,6 +730,14 @@ try {
 
 `MongoServerError` is also exported, but branch on `code` — `instanceof` cannot
 match the official driver's class without depending on `mongodb`.
+
+Only a **duplicate key** (`11000`) surfaces as a typed `MongoServerError` with a
+`.code`. Every other rejection — an unknown operator, a bad `$inc` target, a
+malformed pipeline, an immutable-`_id` write — is a plain `Error` with a message
+but no `.code`, where the official driver would throw a typed
+`MongoServerError`/`MongoInvalidArgumentError`. So if you port code that branches
+on an error class or `.code` for anything other than `11000`, adjust it to match
+on the message (or `instanceof Error`) after swapping this library in.
 
 `insertMany` is **ordered**, like MongoDB's: it inserts serially, stops at the
 first failure, keeps everything written before it, and never attempts anything

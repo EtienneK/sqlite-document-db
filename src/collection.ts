@@ -19,7 +19,7 @@ import { compareBson } from './bson-order.js'
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
 import { attach, toMongoError, withPartialResult } from './errors.js'
-import type { Filter, UpdateFilter } from './filter-types.js'
+import type { AnyBulkWriteOperation, Filter, UpdateFilter } from './filter-types.js'
 import { objectIdHexString } from './object-id.js'
 import { compileProjection, type CompiledProjection, type ProjectionSpec } from './projection.js'
 import {
@@ -27,7 +27,7 @@ import {
   type CompileOptions, type SqlParams
 } from './query.js'
 import type {
-  AggregateOptions, AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions,
+  AggregateOptions, AggregationCursor, AnyFilter, BulkWriteOptions,
   BulkWriteResult, ChangeStreamNamespace, ChangeStreamOptions, CountOptions, CreateIndexOptions,
   Cursor, DbOptions, DeleteOptions, DeleteResult,
   DistinctOptions, Document, DropCollectionOptions, DropIndexOptions,
@@ -82,6 +82,27 @@ function assertSkip (count: number): void {
 function asJsonText (typeExpr: string, valueExpr: string): string {
   return `CASE ${typeExpr} WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' WHEN 'null' THEN 'null' ` +
     `ELSE json_quote(${valueExpr}) END`
+}
+
+/**
+ * The `SELECT data … ORDER BY … LIMIT/OFFSET` a leading find/aggregate stage
+ * runs. Shared by `find()`'s statement builder and the SQL that
+ * `AggregationCursor.explain()` reports, so the two cannot drift on the fiddly
+ * bits - MongoDB's `limit(0)` means "no limit" (SQLite's -1) and a negative
+ * limit its absolute value. `extraColumns` carries find()'s projection probes;
+ * aggregation has none.
+ */
+function leadingSelectSql (
+  from: string, extraColumns: string, whereSql: string, orderBy: string,
+  limit: number | null | undefined, skip: number | null | undefined
+): string {
+  let sql = `SELECT data${extraColumns} FROM ${from} WHERE (${whereSql}) ORDER BY ${orderBy}`
+  if (limit != null || skip != null) {
+    const bounded = limit == null || limit === 0 ? -1 : Math.trunc(Math.abs(limit))
+    sql += ` LIMIT ${bounded}`
+    if (skip != null && skip !== 0) sql += ` OFFSET ${Math.trunc(skip)}`
+  }
+  return sql
 }
 
 /**
@@ -590,15 +611,7 @@ export class Collection<TSchema extends Document = Document> {
         `, ${firstMatchingElementSql('data', probe.path, probe.criterion, bindings)} AS ${PROBE_COLUMN}${index}`
       ).join('')
       const from = hinted !== undefined && !filter.usesRowidUnion ? hinted : this.table
-      let sql = `SELECT data${probes} FROM ${from} WHERE (${filter.sql}) ORDER BY ${orderBy}`
-
-      if (limitCount != null || skipCount != null) {
-        // MongoDB: limit(0) means no limit (SQLite spells that -1), and a
-        // negative limit behaves like its absolute value.
-        const limit = limitCount == null || limitCount === 0 ? -1 : Math.trunc(Math.abs(limitCount))
-        sql += ` LIMIT ${limit}`
-        if (skipCount != null && skipCount !== 0) sql += ` OFFSET ${Math.trunc(skipCount)}`
-      }
+      const sql = leadingSelectSql(from, probes, filter.sql, orderBy, limitCount, skipCount)
       return { sql, params: filter.params }
     }
 
@@ -953,12 +966,9 @@ export class Collection<TSchema extends Document = Document> {
   private findSql (filter: AnyFilter, sort?: SortSpecification, skip?: number, limit?: number): string {
     const normalizedSort = typeof sort === 'string' ? { [sort]: 1 } : sort
     const orderBy = normalizedSort == null ? 'rowid' : `${toSortSql('data', normalizedSort)}, rowid`
-    let sql = `SELECT data FROM ${this.table} WHERE (${toSql('data', filter, this.compileOptions).sql}) ORDER BY ${orderBy}`
-    if (limit != null || skip != null) {
-      sql += ` LIMIT ${limit == null || limit === 0 ? -1 : Math.trunc(Math.abs(limit))}`
-      if (skip != null && skip !== 0) sql += ` OFFSET ${Math.trunc(skip)}`
-    }
-    return sql
+    // The same builder find() runs through, so explain() cannot misreport the
+    // statement shape - only the probes/hint find() adds are absent here.
+    return leadingSelectSql(this.table, '', toSql('data', filter, this.compileOptions).sql, orderBy, limit, skip)
   }
 
   async findOne (filter: string | Filter<TSchema> = {}, options: FindOptions = {}): Promise<WithId<TSchema> | null> {

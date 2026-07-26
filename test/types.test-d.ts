@@ -223,6 +223,41 @@ describe('UpdateFilter<TSchema>', () => {
   })
 })
 
+describe('AnyBulkWriteOperation<TSchema>', () => {
+  const full = { item: 'p', qty: 1, status: 'A' as const, size: { h: 1, w: 1, uom: 'cm' }, tags: ['a'], instock: [{ warehouse: 'w', qty: 1 }] }
+
+  it('type-checks each operation like the standalone methods', async () => {
+    await col.bulkWrite([
+      { insertOne: { document: { _id: 'x', ...full } } },
+      { updateOne: { filter: { qty: { $lt: 5 } }, update: { $set: { status: 'D' } } } },
+      { updateMany: { filter: { status: 'A' }, update: { $inc: { qty: 1 } } } },
+      { replaceOne: { filter: { _id: 'x' }, replacement: full } },
+      { deleteOne: { filter: { _id: 'x' } } },
+      { deleteMany: { filter: { status: 'D' } } }
+    ])
+  })
+
+  it('rejects a misspelled field in a bulk filter', async () => {
+    // @ts-expect-error - 'qtyy' is not a field of Item
+    await col.bulkWrite([{ deleteOne: { filter: { qtyy: 1 } } }])
+  })
+
+  it('rejects a wrong-typed value in a bulk update', async () => {
+    // @ts-expect-error - qty is a number, not a string
+    await col.bulkWrite([{ updateOne: { filter: { _id: 'x' }, update: { $set: { qty: 'lots' } } } }])
+  })
+
+  it('rejects an unknown operator in a bulk update', async () => {
+    // @ts-expect-error - $set is a real operator, $sett is not
+    await col.bulkWrite([{ updateOne: { filter: { _id: 'x' }, update: { $sett: { qty: 1 } } } }])
+  })
+
+  it('rejects an _id in a bulk replacement', async () => {
+    // @ts-expect-error - a replacement cannot carry _id
+    await col.bulkWrite([{ replaceOne: { filter: { _id: 'x' }, replacement: { _id: 'y', ...full } } }])
+  })
+})
+
 describe('aggregate()', () => {
   it('returns a cursor of the requested shape', async () => {
     const totals = await col.aggregate<{ _id: string, total: number }>([

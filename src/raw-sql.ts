@@ -47,19 +47,34 @@ import { stringify as stringifyDocument } from './ejson.js'
  * A piece of SQL that is spliced into a template rather than bound to it.
  *
  * Only this library constructs these - `db.table()` is the only source - so a
- * caller cannot use one to smuggle in unescaped text without deliberately
- * reaching for the constructor.
+ * caller cannot use one to smuggle unescaped text into `db.sql` past its
+ * parameter binding. That "only this library" is enforced at RUNTIME, not left
+ * to convention: the constructor refuses any call that does not present the
+ * module-private `AUTHORIZED` token, which nothing outside this file can obtain
+ * (a `Symbol` is unique by identity, and this one is never exported). So
+ * `new SqlFragment(userInput)` throws, while `instanceof SqlFragment` - which
+ * never runs the constructor - keeps working for callers that want the type.
  */
+const AUTHORIZED = Symbol('SqlFragment.authorized')
+
 export class SqlFragment {
   readonly sql: string
 
-  constructor (sql: string) {
+  constructor (sql: string, token?: symbol) {
+    if (token !== AUTHORIZED) {
+      throw Error('SqlFragment is not constructible directly; use db.table(name) to splice a table name into db.sql')
+    }
     this.sql = sql
   }
 
   toString (): string {
     return this.sql
   }
+}
+
+/** The library-internal factory for `SqlFragment`. Never re-exported from index.ts. */
+export function sqlFragment (sql: string): SqlFragment {
+  return new SqlFragment(sql, AUTHORIZED)
 }
 
 /** What a value may be bound as. Mirrors what SQLite itself accepts. */

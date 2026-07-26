@@ -24,7 +24,7 @@
  *    opt-in, by passing a schema to `db.collection<User>('users')`.
  */
 
-import type { Document } from './types.js'
+import type { Document, WithoutId } from './types.js'
 
 /** True only for `any` - `any` matches both branches of a conditional. */
 type IsAny<T> = 0 extends 1 & T ? true : false
@@ -274,3 +274,19 @@ export type UpdateFilter<TSchema = Document> =
       $pull?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: PullOperand<ElementOf<TSchema, P>> }
       $pullAll?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: ReadonlyArray<ElementOf<TSchema, P>> }
     }
+
+/**
+ * One entry of a `bulkWrite` batch. Exactly one key, as MongoDB requires.
+ *
+ * Here rather than in types.ts so its filters and updates get the SAME schema
+ * types as the standalone `updateOne`/`replaceOne`/`deleteOne` - a misspelled
+ * field or wrong-typed value inside `bulkWrite` fails to compile just as it does
+ * outside it, instead of being waved through as a bare `Document`.
+ */
+export type AnyBulkWriteOperation<TSchema extends Document = Document> =
+  | { insertOne: { document: TSchema } }
+  | { updateOne: { filter: Filter<TSchema>, update: UpdateFilter<TSchema>, upsert?: boolean } }
+  | { updateMany: { filter: Filter<TSchema>, update: UpdateFilter<TSchema>, upsert?: boolean } }
+  | { replaceOne: { filter: Filter<TSchema>, replacement: WithoutId<TSchema>, upsert?: boolean } }
+  | { deleteOne: { filter: Filter<TSchema> } }
+  | { deleteMany: { filter: Filter<TSchema> } }

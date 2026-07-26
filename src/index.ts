@@ -33,11 +33,11 @@ export { DUPLICATE_KEY_ERROR, MongoServerError } from './errors.js'
 export type { PartialWriteResult } from './errors.js'
 export type { ProjectionSpec } from './projection.js'
 export type {
-  AddToSetOperand, ArrayPaths, BitOperation, BsonTypeAlias, Condition, Filter, FilterOperators,
-  InferIdType, Paths, PathValue, PositionalPaths, PullOperand, PushOperand, UpdateFilter
+  AddToSetOperand, AnyBulkWriteOperation, ArrayPaths, BitOperation, BsonTypeAlias, Condition, Filter,
+  FilterOperators, InferIdType, Paths, PathValue, PositionalPaths, PullOperand, PushOperand, UpdateFilter
 } from './filter-types.js'
 export type {
-  AggregateOptions, AggregationCursor, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult,
+  AggregateOptions, AggregationCursor, BulkWriteOptions, BulkWriteResult,
   ChangeStreamDocument, ChangeStreamNamespace, ChangeStreamOperationType, ChangeStreamOptions,
   CollectionInfo, CountOptions, CreateCollectionOptions, CreateIndexOptions, Cursor, DbOptions,
   DbStats, DbStatsOptions, DeleteOptions, DeleteResult, DistinctOptions, Document, DropCollectionOptions,

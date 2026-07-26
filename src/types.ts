@@ -353,14 +353,10 @@ export interface InsertManyOptions extends SessionOption {
   ordered?: boolean
 }
 
-/** One entry of a `bulkWrite` batch. Exactly one key, as MongoDB requires. */
-export type AnyBulkWriteOperation<TSchema extends Document = Document> =
-  | { insertOne: { document: TSchema } }
-  | { updateOne: { filter: Document, update: Document, upsert?: boolean } }
-  | { updateMany: { filter: Document, update: Document, upsert?: boolean } }
-  | { replaceOne: { filter: Document, replacement: Document, upsert?: boolean } }
-  | { deleteOne: { filter: Document } }
-  | { deleteMany: { filter: Document } }
+// `AnyBulkWriteOperation` lives in filter-types.ts, so its filters and updates
+// can be typed as `Filter<TSchema>`/`UpdateFilter<TSchema>` like the standalone
+// methods - types.ts is below filter-types.ts in the dependency graph and
+// cannot import them without closing a cycle.
 
 export interface BulkWriteOptions extends SessionOption {
   /** Ordered (the default) stops at the first failed operation. */
