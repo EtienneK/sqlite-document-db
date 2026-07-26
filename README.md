@@ -119,8 +119,8 @@ Console output of the above:
 
 Runnable examples live in [examples/](examples/) — CRUD, every query operator,
 arrays, indexes with a before/after timing, cursors, dates, upsert, error
-handling, TypeScript schemas, and a Deno one. They are executed by CI on Node
-and Deno, so they cannot rot:
+handling, TypeScript schemas, full-text search, bytes through `db.sql`, and a
+Deno one. They are executed by CI on Node and Deno, so they cannot rot:
 
 ```bash
 npm run examples

@@ -1,7 +1,7 @@
 # Examples
 
 Every file here is runnable and is executed by CI on {ubuntu, windows} ×
-Node {22.13, 24, 26} **and** under Deno — so if one of them is wrong, the build
+Node {24, 26} **and** under Deno — so if one of them is wrong, the build
 goes red rather than the documentation quietly rotting.
 
 ```bash
@@ -32,6 +32,8 @@ code the import is just `import Db from 'sqlite-document-db'`.
 | [15-raw-sql.mjs](15-raw-sql.mjs) | `db.sql` — window functions and CTEs, bound values, raw rows |
 | [16-mongo-client.mjs](16-mongo-client.mjs) | The `MongoClient` shim and `startSession()` — swapping one import for a test suite |
 | [17-change-streams.mjs](17-change-streams.mjs) | `watch()`, event pipelines, and the `invalidate` that marks the edge of what a stream can see |
+| [18-bytes-and-blobs.mjs](18-bytes-and-blobs.mjs) | Bytes through `db.sql`: a BLOB table beside your documents, one transaction |
+| [19-search.mjs](19-search.mjs) | Full-text search under its own name — `createSearchIndex`/`searchText`, the tokenizer yours |
 | [deno.ts](deno.ts) | The same quickstart, run by Deno |
 
 ## Deno

@@ -37,6 +37,15 @@ publishing. `npm version <x> && git push --follow-tags` is the whole release. Th
 looks: `node:sqlite` bundles its own SQLite, so the query planner — and therefore
 [test/query-plan.spec.ts](test/query-plan.spec.ts) — differs per Node version.
 
+**Definition of done for a user-facing feature** — all five, not the first
+three: the spec (dual-engine when an oracle exists), the README section, the
+BACKLOG/CLAUDE.md notes, a `CHANGELOG.md` entry under Unreleased, **and an
+example in [examples/](examples/)** (numbered `.mjs`, listed in its README
+table; CI runs them under Node and Deno). Examples are executable
+documentation and have caught real bugs — the dotted-array-path pair came from
+writing one. This rule used to live only in commit messages and was skipped
+four features in a row before being written down here.
+
 ## Architecture
 
 The tree is FLAT on purpose: one file per concern, no single-file directories.

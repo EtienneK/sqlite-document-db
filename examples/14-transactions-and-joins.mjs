@@ -105,6 +105,27 @@ const value = await orders.aggregate([
 ]).toArray()
 console.log('\njoined then grouped', value)
 
+// The let+pipeline form is the correlated join: per order, its variables are
+// substituted and the sub-pipeline runs as an ordinary aggregation on the
+// foreign collection - so a $match head is index-eligible there, and $expr
+// is how the sub-pipeline reads the variables.
+const shippable = await orders.aggregate([
+  { $lookup: {
+    from: 'inventory', as: 'enough',
+    let: { name: '$item', needed: '$qty' },
+    pipeline: [
+      { $match: { $expr: { $and: [
+        { $eq: ['$sku', '$$name'] },
+        { $gte: ['$instock', '$$needed'] }
+      ] } } }
+    ]
+  } },
+  { $sort: { _id: 1 } }
+]).toArray()
+for (const order of shippable) {
+  console.log(`${order.item.padEnd(10)} x${order.qty} -> ${order.enough.length > 0 ? 'can ship' : 'cannot ship'}`)
+}
+
 // ---------------------------------------------------------------------------
 // Administration.
 console.log('\ncollections        ', (await db.listCollections().toArray()).map(c => c.name))

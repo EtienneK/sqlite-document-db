@@ -33,6 +33,14 @@ console.log('updateMany ->', await items.updateMany({ qty: { $lt: 50 } }, { $inc
 await items.replaceOne({ item: 'mat' }, { item: 'mat', qty: 1, note: 'replaced' })
 console.log('replaced   ->', await items.findOne({ item: 'mat' }))
 
+// An update can also be an aggregation PIPELINE (MongoDB 4.2+): the right-hand
+// side is the expression language, so a field can be computed from the
+// document it lands in - which no operator update can do.
+await items.updateMany({}, [
+  { $set: { level: { $cond: [{ $gte: ['$qty', 30] }, 'plenty', 'low'] } } }
+])
+console.log('pipeline   ->', await items.findOne({ item: 'journal' }))
+
 // ---- delete -------------------------------------------------------------
 console.log('deleteOne  ->', await items.deleteOne({ item: 'canvas' }))
 console.log('deleteMany ->', await items.deleteMany({ qty: { $gt: 1000 } }))

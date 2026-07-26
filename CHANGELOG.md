@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Full-text search, under this library's own name**: `createSearchIndex`,
+  `searchText`, `dropSearchIndex` and `listSearchIndexes`. An FTS5 table
+  shadows the collection and SQLite triggers keep it in step — including
+  through raw `db.sql` writes, which no library-side hook could see. The
+  tokenizer is the caller's, verbatim (`'porter'`, `'trigram'`,
+  `'unicode61 remove_diacritics 2'`, …); FTS5 query syntax passes through
+  (phrases, prefixes, boolean, per-field filters); hits are
+  `{ score, document }`, BM25 best-first. The index follows `rename()` and
+  drops with its collection and database. `$text` and `$search` stay refused —
+  the first cannot match MongoDB's stemmer, the second is Atlas-only, so
+  neither can be verified against a real server — and the `$text` error now
+  names this API as the alternative.
+- **`db.sql` binds and returns `Uint8Array`**, so the escape hatch reaches
+  SQLite's BLOB type — the one thing SQLite holds that a JSON document cannot.
+  Files in a `BLOB` table of your own live on the same connection and inside
+  `withTransaction`, next to the documents that reference them. `DriverParams`
+  now carries `Uint8Array`, obliging every driver to move bytes; other
+  `ArrayBuffer` views are refused by name with the wrap-it fix. Document
+  fields still reject binary at write time, until `$binary` lands
+  (BACKLOG item 35).
 - **Aggregation-pipeline updates.** `updateOne`, `updateMany`,
   `findOneAndUpdate` and `bulkWrite` accept `[{ $set: … }, { $unset: … }]`
   (MongoDB 4.2+), with the stages `$set`/`$addFields`, `$unset` and `$project`
