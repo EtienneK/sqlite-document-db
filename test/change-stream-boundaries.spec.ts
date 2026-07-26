@@ -277,6 +277,45 @@ describe('change stream boundaries', () => {
     })
   })
 
+  describe('a pipeline update, which the server sometimes reports as a replace', () => {
+    it("should answer 'update' with the full diff where the server's size heuristic says 'replace'", async () => {
+      const orders = db.collection('orders')
+      await orders.insertOne({ _id: 1, total: 10, tags: ['x'] })
+      const stream = orders.watch()
+      await stream.tryNext()
+
+      // Over a document this small, MongoDB's delta is not smaller than the
+      // document, so it logs a whole replacement and the event's type is
+      // 'replace' with a fullDocument and no updateDescription (measured; pad
+      // the document and the same write flips back to 'update'). This library
+      // has no oplog to economise, so it always answers 'update' - the diff is
+      // complete and correct, only the TYPE diverges, and strict refuses the
+      // combination (see test/strict.spec.ts).
+      await orders.updateOne({ _id: 1 }, [{ $set: { total: 11 } }, { $unset: 'tags' }])
+
+      const event = await stream.next()
+      expect(event.operationType).toStrictEqual('update')
+      expect(event.updateDescription).toStrictEqual({
+        updatedFields: { total: 11 }, removedFields: ['tags'], truncatedArrays: []
+      })
+      await stream.close()
+    })
+
+    it('should still cost one SELECT and ONE write-back statement, however many rows', async () => {
+      const logged = await statements(async debugDb => {
+        const orders = debugDb.collection('orders')
+        await orders.insertMany([{ _id: 1, n: 1 }, { _id: 2, n: 2 }, { _id: 3, n: 3 }])
+        await orders.updateMany({}, [{ $set: { n: { $add: ['$n', 1] } } }])
+      })
+
+      // The pipeline evaluates in JavaScript, but the write-back is batched
+      // through one bound JSON array (pipelineWritebackSql) - a shape
+      // assertion, because driver-seam rule 3 prices statements, not bytes.
+      expect(logged.filter(sql => sql.startsWith('UPDATE'))).toHaveLength(1)
+      expect(logged.filter(sql => sql.includes('COUNT(*)'))).toStrictEqual([])
+    })
+  })
+
   describe('what watch() refuses', () => {
     it('should refuse a resume token, because there is no oplog behind one', async () => {
       const orders = db.collection('orders')

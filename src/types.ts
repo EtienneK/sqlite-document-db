@@ -151,9 +151,10 @@ export interface UpdateDescription {
   /** The paths the update removed - `$unset`, and a `$rename`'s source. */
   removedFields: string[]
   /**
-   * Always empty. MongoDB reports arrays shortened in place here; every array
-   * this library's update operators rebuild comes back whole in
-   * `updatedFields`, so there is nothing to put in it.
+   * Arrays shortened in place, as `{ field, newSize }`. Empty for every
+   * OPERATOR update - each array those rebuild comes back whole in
+   * `updatedFields` (measured) - and populated only by a PIPELINE update,
+   * whose description is diffed from the two images as the server's is.
    */
   truncatedArrays: Document[]
 }

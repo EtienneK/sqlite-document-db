@@ -409,6 +409,70 @@ export function updateDescriptionFor (
 }
 
 /**
+ * An `update` event's `updateDescription` for a PIPELINE update, DIFFED from
+ * the two images (BACKLOG item 28).
+ *
+ * An operator update's description comes from its SPEC (`updateDescriptionFor`
+ * above), because that is what the server reports for one - `$set: { a: {...} }`
+ * names `a` whole, however little of it changed. A pipeline update has no spec
+ * of that shape: it rewrites the document, and the server derives its
+ * description by diffing the images - granularly, so the same `$set` written as
+ * a pipeline stage names only the sub-paths that actually differ. This is that
+ * diff. The rules, each pinned dual-engine in test/change-streams.spec.ts:
+ *
+ * - A field present only in the new document is updated; only in the old one,
+ *   removed; different scalars are updated whole.
+ * - Two DOCUMENTS recurse, naming dotted sub-paths.
+ * - Two ARRAYS compare per index: a changed element is `'arr.3'` (recursing
+ *   when both sides are documents), an appended one likewise, and a SHORTER
+ *   array is a `truncatedArrays` entry `{ field, newSize }` - the one place
+ *   that field is ever non-empty here.
+ */
+export function diffUpdateDescription (before: Document, after: Document): UpdateDescription {
+  const description: UpdateDescription = { updatedFields: {}, removedFields: [], truncatedArrays: [] }
+  diffDocuments('', before, after, description)
+  return description
+}
+
+function diffDocuments (prefix: string, before: Document, after: Document, out: UpdateDescription): void {
+  for (const key of Object.keys(before)) {
+    if (!Object.hasOwn(after, key)) out.removedFields.push(`${prefix}${key}`)
+  }
+  for (const key of Object.keys(after)) {
+    const path = `${prefix}${key}`
+    if (!Object.hasOwn(before, key)) {
+      out.updatedFields[path] = after[key]
+      continue
+    }
+    const left = before[key]
+    const right = after[key]
+    if (equalsBson(left, right)) continue
+    if (isPlainDocument(left) && isPlainDocument(right)) diffDocuments(`${path}.`, left, right, out)
+    else if (Array.isArray(left) && Array.isArray(right)) diffArrays(path, left, right, out)
+    else out.updatedFields[path] = right
+  }
+}
+
+function diffArrays (path: string, before: unknown[], after: unknown[], out: UpdateDescription): void {
+  if (after.length < before.length) out.truncatedArrays.push({ field: path, newSize: after.length })
+  for (let index = 0; index < after.length; index++) {
+    const left = before[index]
+    const right = after[index]
+    if (index < before.length && equalsBson(left, right)) continue
+    if (index < before.length && isPlainDocument(left) && isPlainDocument(right)) {
+      diffDocuments(`${path}.${index}.`, left, right, out)
+    } else {
+      out.updatedFields[`${path}.${index}`] = right
+    }
+  }
+}
+
+/** A document to recurse into - not an array, not a Date, not null. */
+function isPlainDocument (value: unknown): value is Document {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date)
+}
+
+/**
  * The indexes an array gained, when the new one is the old one plus a tail -
  * and null when it is anything else.
  *

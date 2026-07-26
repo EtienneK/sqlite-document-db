@@ -589,6 +589,38 @@ knowing:
 - The positional operators are **not** supported in `$push`, `$addToSet`,
   `$pop`, `$pull`, `$pullAll` or `$rename`, and say so.
 
+### Update with an aggregation pipeline
+
+An update can be a *pipeline of stages* instead of an operator document
+(MongoDB 4.2+), which is how one field is computed **from another**:
+
+```javascript
+await db.collection('orders').updateMany({ status: 'A' }, [
+  { $set: { total: { $multiply: ['$price', '$qty'] } } },
+  { $unset: 'draft' }
+])
+```
+
+The stages are `$set`/`$addFields`, `$unset` and `$project`, with the whole
+[expression language](#aggregate) available on the right-hand side. A stage
+that is *illegal* in an update (`$match`, `$group`, …) is refused with the
+server's own message; `$replaceRoot`/`$replaceWith` are legal there but not
+implemented here, and say so. The pipeline evaluates per document through the
+same code `aggregate()` runs — so the two cannot drift — and `updateMany`
+still writes every result back in one statement.
+
+Rules the oracle settled, each pinned against the server:
+
+- An expression that evaluates to **missing** (`'$nosuchfield'`, `$$REMOVE`)
+  *removes* the field, rather than leaving the old value alone.
+- `_id` cannot be **altered** — but a pipeline that *removes* it (`$unset`, or
+  a `$project` excluding it) gets it silently restored, with the row still
+  counting as modified.
+- An upsert seeds the new document from the filter's equality conditions and
+  runs the pipeline over that seed.
+- An **empty pipeline is refused**, exactly like an empty update document, and
+  `arrayFilters` cannot be combined with a pipeline.
+
 ### Bulk writes
 
 ```javascript
@@ -796,6 +828,8 @@ It rejects, rather than silently answering differently:
 | `.sort({ v: 1 })` where some `v` is an array | orders arrays as a group | MongoDB orders them by their smallest (asc) or largest (desc) element |
 | `'$instock.qty'` in a pipeline | reads as missing | MongoDB maps the path over the array — `$unwind` first |
 | an operation inside a transaction with no `{ session }` | takes part in the transaction | MongoDB runs it *outside*, and does not roll it back — [sessions](#sessions-and-the-one-thing-they-cannot-do) |
+| a positional update (`$`, `$[]`, `$[id]`) while a change stream is open | the event names the ARRAY | MongoDB names the element it hit (`'grades.1.score'`), which is unknowable before the statement runs |
+| a pipeline update while a change stream is open | emits `update` with the full diff | MongoDB reports `replace` instead when the delta is not smaller than the document — an oplog size heuristic this library does not reproduce |
 
 This is a boundary check, not a proof of equivalence: it catches the divergences
 that are known and detectable. It is off by default, and the intended use is a
@@ -914,6 +948,13 @@ whole.
 - **Inside a transaction, events are buffered and published on COMMIT.** A
   rollback discards them, exactly as a server does not publish uncommitted
   transaction data.
+- **A [pipeline update](#update-with-an-aggregation-pipeline)'s
+  `updateDescription` is a granular DIFF** of the two images — `{ 'ship.code': 2 }`
+  where the operator form names `ship` whole — with shortened arrays reported in
+  `truncatedArrays`, all matching the server. The one divergence: MongoDB flips
+  such an event's *type* to `replace` when its delta would not be smaller than
+  the document; this library always answers `update` with the full diff, and
+  `strict` refuses the combination.
 - **The pipeline is MongoDB's allow-list**, intersected with what this library
   implements: `$match`, `$project`, `$addFields`, `$set` and `$unset`. A
   blocking stage could never complete over a stream that does not end, which is
@@ -1070,7 +1111,9 @@ Update operators: `$set` `$unset` `$inc` `$mul` `$min` `$max` `$rename`
 `$setOnInsert` `$currentDate` `$bit` `$push` (with `$each`, `$slice`, `$sort`,
 `$position`) `$addToSet` (with `$each`) `$pop` `$pull` `$pullAll`, the positional
 operators `$` / `$[]` / `$[<identifier>]` (with `arrayFilters`), plus the
-`upsert` option on `updateOne`/`updateMany`/`replaceOne`.
+`upsert` option on `updateOne`/`updateMany`/`replaceOne`. An update can also be
+an [aggregation pipeline](#update-with-an-aggregation-pipeline) of `$set` /
+`$addFields` / `$unset` / `$project` stages.
 
 Accumulators: `$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
 `$count` `$stdDevPop` `$stdDevSamp` `$mergeObjects` `$firstN` `$lastN` `$maxN`

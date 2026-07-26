@@ -237,6 +237,93 @@ describe('change streams', () => {
 
           expect((await take(stream, 1))[0].fullDocument).toStrictEqual({ _id: 'a', total: 12, tags: ['x'] })
         })
+      })
+
+      describe('the events a PIPELINE update produces', () => {
+        // A pipeline update has no operator spec to read paths from, so its
+        // updateDescription is a DIFF of the two images - which is what the
+        // server derives too, and it is GRANULAR where the operator form is
+        // not: the same `$set` written as a stage names only what changed.
+        //
+        // One caveat runs through these tests: the server only logs that diff
+        // when it is SMALLER than the document - past that it logs a whole
+        // replacement and the event's type flips to 'replace'. The documents
+        // here are padded where needed to stay on the 'update' side of that
+        // heuristic, which this library does not reproduce (it always answers
+        // 'update'; see the boundaries spec, and strict refuses the case).
+
+        it('should report set and removed fields', async () => {
+          await orders().updateOne({ _id: 'a' }, { $set: { pad: 'p'.repeat(500) } })
+          const stream = await start(orders().watch())
+          await orders().updateOne({ _id: 'a' }, [{ $set: { total: 11 } }, { $unset: 'tags' }])
+
+          expect(await shapes(stream, 1)).toStrictEqual([{
+            operationType: 'update',
+            ns: { db: 'changes', coll: 'orders' },
+            documentKey: { _id: 'a' },
+            updateDescription: { updatedFields: { total: 11 }, removedFields: ['tags'] }
+          }])
+        })
+
+        it('should diff INTO a subdocument where the operator form names it whole', async () => {
+          await orders().updateOne({ _id: 'a' }, { $set: { ship: { city: 'Cape Town', code: 1 } } })
+          const stream = await start(orders().watch())
+          await orders().updateOne({ _id: 'a' }, [{ $set: { ship: { city: 'Cape Town', code: 2 } } }])
+
+          // The operator form reports { ship: {...} } here (pinned above);
+          // the pipeline form reports only the sub-path that changed.
+          expect((await take(stream, 1))[0].updateDescription.updatedFields)
+            .toStrictEqual({ 'ship.code': 2 })
+        })
+
+        it('should report an appended array element by its index', async () => {
+          const stream = await start(orders().watch())
+          await orders().updateOne({ _id: 'a' }, [{ $set: { tags: { $concatArrays: ['$tags', ['z']] } } }])
+
+          expect((await take(stream, 1))[0].updateDescription.updatedFields).toStrictEqual({ 'tags.1': 'z' })
+        })
+
+        it('should report a changed array element by its index', async () => {
+          await orders().updateOne({ _id: 'a' }, { $set: { tags: ['x', 'y', 'z'] } })
+          const stream = await start(orders().watch())
+          await orders().updateOne({ _id: 'a' }, [
+            { $set: { tags: { $concatArrays: [['x'], ['Y'], ['z']] } } }
+          ])
+
+          expect((await take(stream, 1))[0].updateDescription.updatedFields).toStrictEqual({ 'tags.1': 'Y' })
+        })
+
+        it('should report a shortened array in truncatedArrays', async () => {
+          await orders().updateOne({ _id: 'a' }, { $set: { tags: ['x', 'y', 'z'] } })
+          const stream = await start(orders().watch())
+          await orders().updateOne({ _id: 'a' }, [{ $set: { tags: { $slice: ['$tags', 2] } } }])
+
+          const description = (await take(stream, 1))[0].updateDescription
+          expect(description.updatedFields).toStrictEqual({})
+          expect(description.removedFields).toStrictEqual([])
+          expect(description.truncatedArrays).toStrictEqual([{ field: 'tags', newSize: 2 }])
+        })
+
+        it('should diff into a document inside an array', async () => {
+          await orders().updateOne({ _id: 'a' }, { $set: { items: [{ sku: 's1', qty: 1 }, { sku: 's2', qty: 2 }] } })
+          const stream = await start(orders().watch())
+          await orders().updateOne({ _id: 'a' }, [
+            { $set: { items: [{ sku: 's1', qty: 1 }, { sku: 's2', qty: 9 }] } }
+          ])
+
+          expect((await take(stream, 1))[0].updateDescription.updatedFields)
+            .toStrictEqual({ 'items.1.qty': 9 })
+        })
+
+        it('should report one event per document from a pipeline updateMany', async () => {
+          const stream = await start(orders().watch())
+          await orders().updateMany({}, [{ $set: { total: { $add: ['$total', 1] } } }])
+
+          const events = await take(stream, 2)
+          expect(keys(events)).toStrictEqual(['a', 'b'])
+          expect(events.map(event => event.updateDescription.updatedFields.total).toSorted())
+            .toStrictEqual([11, 21])
+        })
 
         it('should report a replacement with the new document', async () => {
           const stream = await start(orders().watch())

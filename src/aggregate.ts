@@ -100,6 +100,17 @@ export function splitPipeline (pipeline: Document[]): PipelineSplit {
 
 /** The single `{ $stage: value }` entry a pipeline stage must be. */
 function stageEntry (stage: unknown): [string, unknown] {
+  const [name, value] = singleStageEntry(stage)
+  if (!SUPPORTED_STAGES.includes(name)) {
+    throw Error(name.startsWith('$')
+      ? `unsupported aggregation stage: ${name} (supported: ${SUPPORTED_STAGES.join(', ')})`
+      : `a pipeline stage name must start with '$'; but got: ${name}`)
+  }
+  return [name, value]
+}
+
+/** The shape check alone - shared with the update-pipeline entry, whose allow-list differs. */
+function singleStageEntry (stage: unknown): [string, unknown] {
   if (stage === null || typeof stage !== 'object' || Array.isArray(stage)) {
     throw Error(`each pipeline stage must be a document; but got: ${stage === null ? 'null' : typeof stage}`)
   }
@@ -107,13 +118,7 @@ function stageEntry (stage: unknown): [string, unknown] {
   if (entries.length !== 1) {
     throw Error(`each pipeline stage must contain exactly one operator; but got ${entries.length}: ${JSON.stringify(Object.keys(stage))}`)
   }
-  const [name, value] = entries[0]!
-  if (!SUPPORTED_STAGES.includes(name)) {
-    throw Error(name.startsWith('$')
-      ? `unsupported aggregation stage: ${name} (supported: ${SUPPORTED_STAGES.join(', ')})`
-      : `a pipeline stage name must start with '$'; but got: ${name}`)
-  }
-  return [name, value]
+  return entries[0]!
 }
 
 function assertSortSpec (value: unknown): SortSpecification {
@@ -163,6 +168,31 @@ function setPathImmutable (doc: Document, field: string, value: unknown): Docume
     node = child
   }
   setField(node, segments[segments.length - 1]!, value)
+  return root
+}
+
+/**
+ * Returns a copy of `doc` with the field at a dotted path REMOVED - what
+ * `$addFields`/`$set` do when the expression evaluates to missing (`$$REMOVE`,
+ * or a path that resolves to nothing), which the server treats as removal
+ * rather than as "leave the old value alone" (measured; the old behaviour here
+ * kept it). Copy-on-write like setPathImmutable, and for the same reason.
+ */
+function deletePathImmutable (doc: Document, field: string): Document {
+  const segments = field.split('.')
+  const root: Document = { ...doc }
+  let node = root
+  for (const segment of segments.slice(0, -1)) {
+    const existing = ownField(node, segment)
+    // A missing or non-document parent means there is nothing to remove.
+    if (existing === null || typeof existing !== 'object' || Array.isArray(existing) || existing instanceof Date) {
+      return root
+    }
+    const child: Document = { ...(existing as Document) }
+    setField(node, segment, child)
+    node = child
+  }
+  delete node[segments[segments.length - 1]!]
   return root
 }
 
@@ -565,19 +595,8 @@ export function compileStages (
           yield * docs.toSorted((a, b) => compareBson(b.count, a.count))
         }
       }
-      case '$unset': {
-        // The alias of a `$project` exclusion, and compiled as one.
-        const fields = typeof value === 'string' ? [value] : value
-        if (!Array.isArray(fields) || fields.length === 0) {
-          throw Error('$unset requires a field name or a non-empty array of field names')
-        }
-        const spec: Document = {}
-        for (const unset of fields) {
-          if (typeof unset !== 'string' || unset === '') throw Error('$unset field names must be non-empty strings')
-          spec[unset] = 0
-        }
-        return compileProject('$project', spec, strict)
-      }
+      case '$unset':
+        return compileUnset(value, strict)
       case '$lookup':
         return compileLookup(value, readForeign, strict)
       case '$unwind':
@@ -588,6 +607,76 @@ export function compileStages (
         return compileProject(name, value, strict)
     }
   })
+}
+
+/** `$unset` - the alias of a `$project` exclusion, and compiled as one. */
+function compileUnset (value: unknown, strict: boolean): Stage {
+  const fields = typeof value === 'string' ? [value] : value
+  if (!Array.isArray(fields) || fields.length === 0) {
+    throw Error('$unset requires a field name or a non-empty array of field names')
+  }
+  const spec: Document = {}
+  for (const unset of fields) {
+    if (typeof unset !== 'string' || unset === '') throw Error('$unset field names must be non-empty strings')
+    spec[unset] = 0
+  }
+  return compileProject('$project', spec, strict)
+}
+
+/**
+ * The stages MongoDB allows in an UPDATE pipeline that this library implements.
+ * `$replaceRoot`/`$replaceWith` are the two it allows and this library does
+ * not; they are refused as unimplemented rather than as illegal.
+ */
+const UPDATE_PIPELINE_STAGES = ['$set', '$addFields', '$unset', '$project']
+const UPDATE_PIPELINE_UNIMPLEMENTED = new Set(['$replaceRoot', '$replaceWith'])
+
+/** One update-pipeline stage: the shape check, then MongoDB's own allow-list. */
+function updateStageEntry (stage: unknown): [string, unknown] {
+  const [name, value] = singleStageEntry(stage)
+  if (UPDATE_PIPELINE_STAGES.includes(name)) return [name, value]
+  if (UPDATE_PIPELINE_UNIMPLEMENTED.has(name)) {
+    throw Error(`unsupported update pipeline stage: ${name} (supported: ${UPDATE_PIPELINE_STAGES.join(', ')})`)
+  }
+  // The server's own message: a $match or $group in an update is ILLEGAL, not
+  // unimplemented, and the distinction matters to whoever reads the error.
+  throw Error(name.startsWith('$')
+    ? `${name} is not allowed to be used within an update`
+    : `a pipeline stage name must start with '$'; but got: ${name}`)
+}
+
+/**
+ * Compiles an aggregation-pipeline UPDATE - `updateOne(filter, [{ $set: ... }])` -
+ * into a function from one document to its replacement (BACKLOG item 28).
+ *
+ * The stages are the SAME compiled stages `aggregate()` runs (`compileProject`,
+ * `compileUnset`), fed a one-document stream per row, rather than a second
+ * evaluator - the `$expr` precedent: expression semantics exist ONCE, in
+ * JavaScript, and a SQL compilation of them would be a second implementation to
+ * keep in step. The consequence is the same as `$expr`'s too: the update runs
+ * per document in JS, so the caller reads the matched rows and writes the
+ * results back (see Collection, which keeps that to one statement each way).
+ *
+ * Every allowed stage maps one input document to exactly one output document,
+ * which is what makes "run the pipeline over a singleton" total: `$match` (the
+ * one allowed stage that could drop a document) is not legal in an update.
+ */
+export function compileUpdatePipeline (pipeline: Document[], strict = false): (doc: Document) => Promise<Document> {
+  // The server's rule, and its message: an EMPTY pipeline is refused exactly
+  // like an empty update document, not treated as a matching no-op (measured).
+  if (pipeline.length === 0) throw Error('update document must contain atomic operators (e.g. [{ $set: { ... } }])')
+  const stages = pipeline.map(stage => {
+    const [name, value] = updateStageEntry(stage)
+    return name === '$unset' ? compileUnset(value, strict) : compileProject(name, value, strict)
+  })
+
+  return async doc => {
+    let stream: AsyncIterable<Document> = (async function * () { yield doc })()
+    for (const stage of stages) stream = stage(stream)
+    let result: Document = doc
+    for await (const output of stream) result = output
+    return result
+  }
 }
 
 /**
@@ -796,14 +885,18 @@ function compileProject (stage: string, value: unknown, strict: boolean): Stage 
   if (Object.keys(spec).length === 0) throw Error(`${stage} requires at least one field`)
 
   if (stage !== '$project') {
-    // $addFields / $set only ever ADD - every value is an expression.
+    // $addFields / $set: every value is an expression. One that evaluates to
+    // missing REMOVES the field - that is what makes `$$REMOVE` (and a path
+    // that resolves to nothing) drop an existing value, per the server.
     const fields = Object.entries(spec)
     return async function * (input) {
       for await (const doc of input) {
         let result: Document = { ...doc }
         for (const [field, expression] of fields) {
           const evaluated = evaluateExpression(expression, doc, strict)
-          if (evaluated !== undefined) result = setPathImmutable(result, field, evaluated)
+          result = evaluated === undefined
+            ? deletePathImmutable(result, field)
+            : setPathImmutable(result, field, evaluated)
         }
         yield result
       }

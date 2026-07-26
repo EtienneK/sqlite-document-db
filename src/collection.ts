@@ -8,13 +8,13 @@
  */
 
 import { createHash } from 'node:crypto'
-import { compileStages, splitPipeline } from './aggregate.js'
+import { compileStages, compileUpdatePipeline, splitPipeline } from './aggregate.js'
 import {
-  ChangeHub, ChangeStream, changeEvent, updateDescriptionFor, type ChangeHubHost
+  ChangeHub, ChangeStream, changeEvent, diffUpdateDescription, updateDescriptionFor, type ChangeHubHost
 } from './change-stream.js'
 import { ClientSession } from './client-session.js'
 import type { Driver, DriverRow, DriverStatement } from './driver.js'
-import { compareBson } from './bson-order.js'
+import { compareBson, equalsBson } from './bson-order.js'
 // Documents round-trip through the EJSON layer, not plain JSON: Dates are
 // stored as {"$date": ...} and unstorable types are rejected (BACKLOG DR-1).
 import { parse as parseDocument, stringify as stringifyDocument } from './ejson.js'
@@ -39,8 +39,8 @@ import type {
   SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
 } from './types.js'
 import {
-  buildUpdateExpression, buildUpsertDocument, collectEqualities, updatedPaths, writesThroughPositional,
-  type UpdateCompileOptions, type UpdateExpression
+  buildUpdateExpression, buildUpsertDocument, collectEqualities, pipelineWritebackSql, updatedPaths,
+  writesThroughPositional, type UpdateCompileOptions, type UpdateExpression
 } from './update.js'
 
 /** The driver's UpdateResult shape for a write that did not upsert. */
@@ -1560,8 +1560,14 @@ export class Collection<TSchema extends Document = Document> {
     return updateResult(1, this.replaceRow(found.rowid, doc, id, this.changes.watching ? before : undefined))
   }
 
-  /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
-  async updateOne (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
+  /**
+   * Updates the first document matching `filter` - with update operators
+   * (`{ $set: ... }`), or with an aggregation PIPELINE (`[{ $set: ... }]`).
+   */
+  async updateOne (
+    filter: Filter<TSchema>, update: UpdateFilter<TSchema> | Document[], options: UpdateOptions = {}
+  ): Promise<UpdateResult> {
+    if (Array.isArray(update)) return await this.updateOneWithPipeline(filter, update, options)
     const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
     this.assertDescribableUpdate(update)
@@ -1575,8 +1581,11 @@ export class Collection<TSchema extends Document = Document> {
     return updateResult(1, this.updateRow(expr, found.rowid, this.watched(found.data, update)))
   }
 
-  /** Updates every document matching `filter` with $set/$unset/$inc operators. */
-  async updateMany (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
+  /** As `updateOne`, for every matching document. Also takes the pipeline form. */
+  async updateMany (
+    filter: Filter<TSchema>, update: UpdateFilter<TSchema> | Document[], options: UpdateOptions = {}
+  ): Promise<UpdateResult> {
+    if (Array.isArray(update)) return await this.updateManyWithPipeline(filter, update, options)
     const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
     this.assertDescribableUpdate(update)
@@ -1621,6 +1630,176 @@ export class Collection<TSchema extends Document = Document> {
     return this.changes.watching ? { before: parseDocument(before), update } : undefined
   }
 
+  // --- Pipeline updates (BACKLOG item 28) ---------------------------------
+  //
+  // `updateOne(filter, [{ $set: ... }])` and friends. The pipeline evaluates
+  // in JavaScript per document, through the SAME compiled stages aggregate()
+  // runs - the `$expr` precedent; see compileUpdatePipeline in src/aggregate.ts.
+  // The matched rows are therefore READ (which replaces countDocuments, and
+  // doubles as the pre-image read when something is watching) and the results
+  // written back in ONE statement (pipelineWritebackSql in src/update.ts), so
+  // updateMany stays two statements, exactly like the operator form.
+
+  /** Compiles a pipeline update, rejecting the option that cannot combine with one. */
+  private compiledPipeline (
+    pipeline: Document[], options: { arrayFilters?: Document[] }
+  ): (doc: Document) => Promise<Document> {
+    // The server's own rule: arrayFilters names elements for `$[<identifier>]`,
+    // which does not exist in a pipeline.
+    if (options.arrayFilters !== undefined) {
+      throw Error('arrayFilters may not be specified for pipeline-style updates')
+    }
+    // The pipeline twin of assertDescribableUpdate, for the same reason: an
+    // event this library cannot promise to shape the way a server would.
+    // MongoDB reports a pipeline write as 'update' with a granular diff ONLY
+    // when that delta is smaller than the document; past that it logs a whole
+    // replacement and the event is a 'replace' (measured - the same $set/$unset
+    // flips type with nothing but padding). This library always answers
+    // 'update' with the full diff, so under strict the combination is refused,
+    // before the write.
+    if (this.changes.watching && this.dbOptions.strict === true) {
+      throw Error(
+        'strict: this is a pipeline update while a change stream is open - whether MongoDB reports it as ' +
+        "an 'update' or a 'replace' event depends on an oplog size heuristic this library does not " +
+        "reproduce; it always answers 'update' with the full diff"
+      )
+    }
+    return compileUpdatePipeline(pipeline, this.dbOptions.strict === true)
+  }
+
+  /**
+   * One row's new document: the pipeline's output, canonicalised through the
+   * storage layer (so an event reports what a reader would find), with the
+   * `_id` immutability rule applied. Returns null for a no-op, which is what
+   * makes `modifiedCount` honest - compared as decoded values, not as text,
+   * because the stored rendering is SQLite's and this one is JavaScript's.
+   */
+  private async pipelineOutcome (
+    apply: (doc: Document) => Promise<Document>, before: Document
+  ): Promise<{ text: string, after: Document } | null> {
+    const result = await apply(before)
+    const keptId = Object.hasOwn(result, '_id')
+    if (keptId && !equalsBson(result._id, before._id)) {
+      throw Error(
+        "After applying the update, the (immutable) field '_id' was found to have been altered to " +
+        `_id: ${JSON.stringify(result._id)}`
+      )
+    }
+    // A pipeline that REMOVES _id ($unset, or a $project excluding it) gets it
+    // silently restored - the server does exactly that (measured), and still
+    // counts the row modified, because its no-op comparison sees the output
+    // BEFORE the restoration. Only altering _id is an error.
+    const text = stringifyDocument(keptId ? result : { _id: before._id, ...result })
+    const after = parseDocument(text)
+    if (keptId && equalsBson(before, after)) return null
+    return { text, after }
+  }
+
+  /** The document a pipeline upsert inserts: the filter's equalities, run through the pipeline. */
+  private async pipelineUpsertDocument (filter: AnyFilter, apply: (doc: Document) => Promise<Document>): Promise<Document> {
+    const seed: Document = {}
+    collectEqualities(filter as Record<string, any>, seed)
+    return await apply(seed)
+  }
+
+  private async updateOneWithPipeline (
+    filter: Filter<TSchema>, pipeline: Document[], options: UpdateOptions
+  ): Promise<UpdateResult> {
+    const session = this.enlist(options)
+    const apply = this.compiledPipeline(pipeline, options)
+    const found = this.findOneRow(filter)
+    if (found === null) {
+      if (options.upsert !== true) return updateResult(0, 0)
+      return (await this.insertUpserted(await this.pipelineUpsertDocument(filter, apply), session)).result
+    }
+    return updateResult(1, await this.applyPipelineToRow(apply, found.rowid, found.data))
+  }
+
+  /** Applies a compiled pipeline to one row already in hand. Returns the modified count. */
+  private async applyPipelineToRow (
+    apply: (doc: Document) => Promise<Document>, rowid: number, beforeText: string
+  ): Promise<number> {
+    const before = parseDocument(beforeText)
+    const outcome = await this.pipelineOutcome(apply, before)
+    if (outcome === null) return 0
+    this.run(`UPDATE ${this.table} SET data = json(:doc) WHERE rowid = :rowid`, { rowid, doc: outcome.text })
+    if (this.changes.watching) this.emitPipelineUpdate(before, outcome.after)
+    return 1
+  }
+
+  private async updateManyWithPipeline (
+    filter: Filter<TSchema>, pipeline: Document[], options: UpdateOptions
+  ): Promise<UpdateResult> {
+    const session = this.enlist(options)
+    const apply = this.compiledPipeline(pipeline, options)
+    const compiled = toSql('data', filter, this.compileOptions)
+    const rows = this.allRows(
+      `SELECT rowid, data FROM ${this.table} WHERE (${compiled.sql}) ORDER BY rowid`, compiled.params
+    )
+    if (rows.length === 0 && options.upsert === true) {
+      return (await this.insertUpserted(await this.pipelineUpsertDocument(filter, apply), session)).result
+    }
+
+    // Evaluated across every row BEFORE anything is written, so an evaluation
+    // error leaves the collection untouched - the same all-or-nothing choice
+    // assertUpdateApplies makes for the operator form (MongoDB applies until it
+    // hits the offending document; this is the safer divergence).
+    const writes: Array<{ rowid: number, entry: string, before: Document, after: Document }> = []
+    for (const row of rows) {
+      const before = parseDocument(row.data as string)
+      const outcome = await this.pipelineOutcome(apply, before)
+      if (outcome === null) continue
+      writes.push({
+        rowid: Number(row.rowid),
+        // The write-back entry, as REAL nested JSON - `text` is already a JSON
+        // document, so this concatenation builds valid JSON by construction.
+        entry: `{"r":${Number(row.rowid)},"d":${outcome.text}}`,
+        before,
+        after: outcome.after
+      })
+    }
+    if (writes.length === 0) return updateResult(rows.length, 0)
+
+    const { setSql, whereSql } = pipelineWritebackSql(this.table)
+    this.run(`UPDATE ${this.table} SET data = ${setSql} WHERE ${whereSql}`, {
+      updates: `[${writes.map(write => write.entry).join(',')}]`
+    })
+    if (this.changes.watching) {
+      for (const write of writes) this.emitPipelineUpdate(write.before, write.after)
+    }
+    return updateResult(rows.length, writes.length)
+  }
+
+  /**
+   * The `update` event for a pipeline update. Its description is DIFFED from
+   * the two images - a pipeline has no operator spec for `updatedPaths` to
+   * read, and diffing is what the server does for one too (see
+   * diffUpdateDescription in src/change-stream.ts).
+   */
+  private emitPipelineUpdate (before: Document, after: Document): void {
+    this.emitChange('update', {
+      documentKey: { _id: after._id },
+      updateDescription: diffUpdateDescription(before, after),
+      fullDocument: after,
+      fullDocumentBeforeChange: before
+    })
+  }
+
+  private async findOneAndUpdateWithPipeline (
+    filter: Filter<TSchema>, pipeline: Document[], options: FindOneAndUpdateOptions
+  ): Promise<WithId<TSchema> | null> {
+    const session = this.enlist(options)
+    const apply = this.compiledPipeline(pipeline, options)
+    const found = this.findOneRow(filter, options.sort)
+    if (found === null) {
+      if (options.upsert !== true) return null
+      return await this.returnUpserted(await this.pipelineUpsertDocument(filter, apply), options, filter, session)
+    }
+    const before = parseDocument(found.data) as WithId<TSchema>
+    await this.applyPipelineToRow(apply, found.rowid, found.data)
+    return this.returnWritten(before, found.rowid, options, filter)
+  }
+
   /**
    * Finds one document, applies `update` to it, and returns a version of it.
    *
@@ -1630,8 +1809,9 @@ export class Collection<TSchema extends Document = Document> {
    * returns the document that was inserted.
    */
   async findOneAndUpdate (
-    filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: FindOneAndUpdateOptions = {}
+    filter: Filter<TSchema>, update: UpdateFilter<TSchema> | Document[], options: FindOneAndUpdateOptions = {}
   ): Promise<WithId<TSchema> | null> {
+    if (Array.isArray(update)) return await this.findOneAndUpdateWithPipeline(filter, update, options)
     const session = this.enlist(options)
     const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
     this.assertDescribableUpdate(update)
@@ -1953,8 +2133,8 @@ export class Collection<TSchema extends Document = Document> {
       case 'updateMany': {
         const options = { ...session, ...(spec.upsert === true ? { upsert: true } : {}) }
         const updated = name === 'updateOne'
-          ? await this.updateOne(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema>, options)
-          : await this.updateMany(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema>, options)
+          ? await this.updateOne(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema> | Document[], options)
+          : await this.updateMany(spec.filter as Filter<TSchema>, spec.update as UpdateFilter<TSchema> | Document[], options)
         this.accumulateUpdate(updated, index, result)
         return
       }

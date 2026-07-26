@@ -873,6 +873,26 @@ function positionalCriterion (filter: QueryFilterDocument, array: string, field:
   return criterion
 }
 
+/**
+ * The write-back a PIPELINE update uses: one statement however many rows, over
+ * a single bound JSON array of `{ r: rowid, d: <new document> }` entries named
+ * `:updates` (BACKLOG item 28).
+ *
+ * A pipeline update evaluates in JavaScript (see `compileUpdatePipeline` in
+ * src/aggregate.ts for why), so the new documents exist before any write. The
+ * obvious write-back - one UPDATE per row - is N round trips under driver-seam
+ * rule 3; this is one. `d` is embedded as REAL nested JSON, not a string, so
+ * `json_extract` hands back its text without a second layer of escaping, and
+ * `table` is the quoted table name because the correlated `rowid` must name the
+ * OUTER table - `json_each` is a virtual table with no rowid of its own.
+ */
+export function pipelineWritebackSql (table: string): { setSql: string, whereSql: string } {
+  return {
+    setSql: `(SELECT json_extract(u.value, '$.d') FROM json_each(:updates) AS u WHERE json_extract(u.value, '$.r') = ${table}.rowid)`,
+    whereSql: `rowid IN (SELECT json_extract(u.value, '$.r') FROM json_each(:updates) AS u)`
+  }
+}
+
 export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompileOptions = {}): UpdateExpression {
   const keys = Object.keys(update)
   if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')

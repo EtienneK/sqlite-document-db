@@ -421,6 +421,59 @@ probe the `$` projection operator uses — one implementation of "which element
 matched" for both sides. The positional operators are rejected by name in the
 array operators and `$rename`.
 
+### Pipeline updates (`updateOne(filter, [{ $set: … }])`)
+
+The one update form that does NOT compile to SQL: the pipeline evaluates in
+JavaScript per document, through `compileUpdatePipeline` (src/aggregate.ts) —
+the SAME compiled stages `aggregate()` runs, fed a one-document stream per row.
+That is the `$expr` precedent: a SQL compilation of the expression language
+would be a second implementation of every rule in src/expression.ts. The
+allow-list is MongoDB's (`$set`/`$addFields`, `$unset`, `$project`; a `$match`
+or `$group` gets the server's own "not allowed to be used within an update",
+`$replaceRoot`/`$replaceWith` are refused as unimplemented, an EMPTY pipeline
+is refused like an empty update document), and `arrayFilters` cannot combine
+with a pipeline.
+
+**Non-obvious detail — the statement shape survives the JS evaluation.**
+`updateMany` reads the matched rows (ONE SELECT that replaces its
+`countDocuments`, and doubles as the pre-image read when watched) and writes
+every result back in ONE statement: `pipelineWritebackSql` (src/update.ts)
+correlates a bound JSON array of `{ r: rowid, d: <doc> }` through `json_each`.
+The correlated `rowid` must be qualified with the OUTER table's name —
+`json_each` is a virtual table with no rowid of its own. Pinned as a shape
+assertion in
+[test/change-stream-boundaries.spec.ts](test/change-stream-boundaries.spec.ts).
+
+**Non-obvious detail — the no-op comparison is on DECODED values, not text.**
+`equalsBson(before, after)` decides `modifiedCount`, because the stored text is
+SQLite's rendering and the new text is JavaScript's; byte comparison would call
+a rendering difference a modification, forever.
+
+**Non-obvious detail — an expression that evaluates to missing REMOVES the
+field.** `$set: { x: '$nope' }` (or `$$REMOVE`) deletes an existing `x`; the
+old `compileProject` kept it, which was a live `aggregate()` divergence the
+pipeline-update oracle run caught. `deletePathImmutable` is the copy-on-write
+twin of `setPathImmutable`, for the same `$unwind`-sharing reason.
+
+**Non-obvious detail — a pipeline that removes `_id` gets it silently
+RESTORED** (`$unset: '_id'`, or `$project: { _id: 0 }`), while ALTERING it is
+an error — and the restored row still counts as modified, because the server's
+no-op comparison sees the pipeline's output BEFORE the restoration
+(`pipelineOutcome` in src/collection.ts mirrors both halves). An upsert seeds
+from `collectEqualities(filter)` and runs the pipeline over the seed.
+
+**The change event is DIFFED, and that carries one divergence.** A pipeline has
+no operator spec for `updatedPaths` to read, so `diffUpdateDescription`
+(src/change-stream.ts) diffs the two images — granularly, naming `ship.code`
+where the operator form names `ship` whole, recursing into array elements, and
+filling `truncatedArrays` for a shortened array; every shape is dual-engine in
+[test/change-streams.spec.ts](test/change-streams.spec.ts). But MongoDB only
+logs that delta while it is SMALLER than the document — past that it logs a
+whole replacement and the event's TYPE flips to `replace` (measured: the same
+`$set`/`$unset` flips with nothing but padding). This library always answers
+`update` with the full diff, and `strict` refuses a pipeline update while a
+stream is open, exactly like the positional case.
+
 ### How aggregation is split (src/aggregate.ts)
 
 A LEADING run of `$match`/`$sort`/`$skip`/`$limit` is pushed into SQLite via the
@@ -665,18 +718,21 @@ back separately would have doubled the cost. `updateMany`'s pre-images REPLACE
 its `countDocuments`, so watching adds no statement there either. `RETURNING` is
 the one SQL feature only this path needs — every engine DR-3 names has it.
 
-**Non-obvious detail — `updateDescription` is built from the update SPEC, not
-from a diff.** `updatedPaths` (src/update.ts) lists the paths an update writes
-and each is then looked up in the new document; present means updated, absent
-means removed, which is what makes `$unset` and a `$rename`'s source fall out
-without a case each. A document diff would be WRONG:
-`$set: { a: { b: 1, c: 2 } }` over an existing `a` reports `a`, not `a.b`/`a.c`.
-The oracle settled two more rules: `$push`/`$addToSet` name the appended INDEX
-(`tags.1`) when the array is genuinely extended, while `$pop`/`$pull` — and a
-`$push` with `$position`/`$sort`/`$slice` — report the whole rebuilt array, at
-any length (measured at 40 elements, so it is not a size heuristic).
-`truncatedArrays` is always empty because no operator this library implements
-produced one.
+**Non-obvious detail — an OPERATOR update's `updateDescription` is built from
+the update SPEC, not from a diff.** `updatedPaths` (src/update.ts) lists the
+paths an update writes and each is then looked up in the new document; present
+means updated, absent means removed, which is what makes `$unset` and a
+`$rename`'s source fall out without a case each. A document diff would be
+WRONG: `$set: { a: { b: 1, c: 2 } }` over an existing `a` reports `a`, not
+`a.b`/`a.c`. The oracle settled two more rules: `$push`/`$addToSet` name the
+appended INDEX (`tags.1`) when the array is genuinely extended, while
+`$pop`/`$pull` — and a `$push` with `$position`/`$sort`/`$slice` — report the
+whole rebuilt array, at any length (measured at 40 elements, so it is not a
+size heuristic). `truncatedArrays` stays empty for every operator update. A
+PIPELINE update is the opposite case on every count: no spec to read, so
+`diffUpdateDescription` diffs the images — granularly, `truncatedArrays`
+included — which is what the server does for one too (see the pipeline-updates
+section above, including the `replace` divergence `strict` polices).
 
 **Non-obvious detail — events are buffered per transaction and flushed on
 COMMIT**, which is why `ChangeHub.enter`/`leave` pair with `Db`'s transaction
@@ -708,10 +764,13 @@ absent for a related reason: it is a BSON Timestamp
 [src/ejson.ts](src/ejson.ts) cannot store, describing a clock that does not
 exist.
 
-The one divergence `strict` polices: a positional update (`$`, `$[]`,
-`$[<id>]`) while a stream is open, because MongoDB names the concrete element it
-hit (`grades.1.score`) and this library can only name the array. Checked before
-the write, so the refusal leaves the document alone.
+Two divergences `strict` polices, both checked before the write so the refusal
+leaves the document alone: a positional update (`$`, `$[]`, `$[<id>]`) while a
+stream is open, because MongoDB names the concrete element it hit
+(`grades.1.score`) and this library can only name the array; and a PIPELINE
+update while a stream is open, because whether MongoDB answers `update` or
+`replace` for one depends on an oplog size heuristic this library does not
+reproduce (see the pipeline-updates section above).
 
 ### The MongoClient shim
 

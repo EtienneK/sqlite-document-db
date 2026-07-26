@@ -215,10 +215,22 @@ describe('UpdateFilter<TSchema>', () => {
     await col.find({ 'tags.$': 'a' }).toArray()
   })
 
+  it('accepts an aggregation pipeline where the driver does', async () => {
+    // The pipeline's stages are typed as Document: the expression language is
+    // a second grammar (the same reasoning as $expr in RootFilterOperators),
+    // and the driver types this parameter Document[] too.
+    await col.updateOne({ item: 'x' }, [{ $set: { total: { $multiply: ['$qty', 2] } } }])
+    await col.updateMany({ status: 'A' }, [{ $set: { audited: true } }, { $unset: 'shipped' }])
+    await col.findOneAndUpdate({ item: 'x' }, [{ $project: { item: 1 } }])
+    // @ts-expect-error - a pipeline is an array of stage DOCUMENTS
+    await col.updateOne({ item: 'x' }, ['$set'])
+  })
+
   it('leaves an untyped collection permissive', async () => {
     const loose = db.collection('anything')
     await loose.updateOne({ a: 1 }, { $set: { whatever: 'goes' } })
     await loose.updateOne({ a: 1 }, { $push: { anything: 'goes' } })
+    await loose.updateOne({ a: 1 }, [{ $set: { computed: { $add: ['$a', 1] } } }])
     expectTypeOf<UpdateFilter<Document>>().toExtend<Record<string, any>>()
   })
 })
@@ -250,6 +262,13 @@ describe('AnyBulkWriteOperation<TSchema>', () => {
   it('rejects an unknown operator in a bulk update', async () => {
     // @ts-expect-error - $set is a real operator, $sett is not
     await col.bulkWrite([{ updateOne: { filter: { _id: 'x' }, update: { $sett: { qty: 1 } } } }])
+  })
+
+  it('accepts a pipeline in a bulk update', async () => {
+    await col.bulkWrite([
+      { updateOne: { filter: { _id: 'x' }, update: [{ $set: { status: 'D' } }] } },
+      { updateMany: { filter: { status: 'A' }, update: [{ $unset: 'tags' }] } }
+    ])
   })
 
   it('rejects an _id in a bulk replacement', async () => {

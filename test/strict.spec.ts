@@ -317,6 +317,54 @@ describe('strict mode', () => {
     })
   })
 
+  describe('a pipeline update while a change stream is open', () => {
+    // MongoDB reports a pipeline write as an 'update' event with a granular
+    // diff only while that delta is SMALLER than the document; past that it
+    // logs a whole replacement and the event is a 'replace' (measured - the
+    // same $set/$unset flips type with nothing but padding). This library
+    // always answers 'update' with the full diff, so the event TYPE can
+    // differ, and strict refuses the combination.
+
+    it("should answer 'update' with the diff by default, where MongoDB may say 'replace'", async () => {
+      const db = await open(false)
+      await seedGrades(db)
+      const stream = db.collection('t').watch()
+      await stream.tryNext()
+
+      await db.collection('t').updateOne({ _id: 1 }, [{ $unset: 'grades' }])
+
+      const event = await stream.next()
+      expect(event.operationType).toStrictEqual('update')
+      expect(event.updateDescription!.removedFields).toStrictEqual(['grades'])
+      await stream.close()
+      await db.close()
+    })
+
+    it('should reject the update under strict', async () => {
+      const db = await open(true)
+      await seedGrades(db)
+      const stream = db.collection('t').watch()
+      await stream.tryNext()
+
+      await expect(db.collection('t').updateOne({ _id: 1 }, [{ $unset: 'grades' }]))
+        .rejects.toThrow(/strict.*pipeline update/)
+      // Checked BEFORE the write, so the refusal leaves the document alone.
+      expect((await db.collection('t').findOne({ _id: 1 }))?.grades)
+        .toStrictEqual([{ score: 40 }, { score: 90 }])
+      await stream.close()
+      await db.close()
+    })
+
+    it('should allow the same update when nothing is watching', async () => {
+      const db = await open(true)
+      await seedGrades(db)
+      // There is no event to type, so there is nothing to type wrongly.
+      await db.collection('t').updateOne({ _id: 1 }, [{ $unset: 'grades' }])
+      expect(await db.collection('t').findOne({ _id: 1 })).toStrictEqual({ _id: 1 })
+      await db.close()
+    })
+  })
+
   it('should leave everything else exactly as it is', async () => {
     // strict is a boundary check, not a second set of semantics: a supported
     // query has to behave identically with it on.

@@ -285,8 +285,8 @@ export type UpdateFilter<TSchema = Document> =
  */
 export type AnyBulkWriteOperation<TSchema extends Document = Document> =
   | { insertOne: { document: TSchema } }
-  | { updateOne: { filter: Filter<TSchema>, update: UpdateFilter<TSchema>, upsert?: boolean } }
-  | { updateMany: { filter: Filter<TSchema>, update: UpdateFilter<TSchema>, upsert?: boolean } }
+  | { updateOne: { filter: Filter<TSchema>, update: UpdateFilter<TSchema> | Document[], upsert?: boolean } }
+  | { updateMany: { filter: Filter<TSchema>, update: UpdateFilter<TSchema> | Document[], upsert?: boolean } }
   | { replaceOne: { filter: Filter<TSchema>, replacement: WithoutId<TSchema>, upsert?: boolean } }
   | { deleteOne: { filter: Filter<TSchema> } }
   | { deleteMany: { filter: Filter<TSchema> } }
