@@ -181,14 +181,24 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 2 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 3 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 4 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 5 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [The stress test](#34-the-stress-test-complex-documents-every-feature) | M | Requested, and it is the only item that can find defects in work already shipped. `bench/` measures query shapes over simple documents; nothing measures what deeply nested ones do to the COMPILER, which is where every limit this project has hit actually lives. |
+| 2 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Item 26 asked whether SQLite could report changes; the answer is that this library already knows. `RETURNING` makes per-document events free, and `PRAGMA data_version` turns the one real limit into an `invalidate` event instead of a silence. |
+| 3 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | `$currentDate`, `$bit`, the regex/set/object expression families, `$stdDev*`, `$sortByCount`, `$unset`, `$replaceWith`. Individually dull, collectively the difference between "a subset" and "the subset people notice". |
+| 4 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | `partialFilterExpression` and `sparse` map onto SQLite partial indexes, which are measured to work over `json_extract`. The cheapest real capability on this list. |
+| 5 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 6 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. |
+| 7 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 8 | [Cursor + `find().explain()`](#33-the-collection-and-db-surface-the-manual-still-lists) | S | `hasNext()` is reached for constantly in ported code, and `find()` is the one place the index story is invisible. |
+| 9 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 10 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 11 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 12 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`. Diminishing returns; do them when someone asks. |
+| 13 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S-M | `renameCollection`, validation, views, capped collections, stats. |
+| 14 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [`ClientSession`](#25-clientsession-for-the-shim) | S-M | **DONE 2026-07-26.** The shim's missing piece, and the last one: `session.withTransaction()` with `{ session }` on every operation now runs unchanged. Verified against a real replica set, since MongoDB refuses transactions on a standalone. |
-| — | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26.** No update hook in `node:sqlite`; the session extension records NOTHING for these tables (measured, 0 bytes - no primary key), and is connection-local anyway. A local change-notification API under another name is the honest version. |
-| — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
+| — | [Vector similarity operators](#32-vector-similarity-without-an-extension) | S | Unscheduled but nearly free - `$similarityCosine` and friends are arithmetic, and they make brute-force kNN expressible with no extension and no dependency. |
+| — | [Change streams, the SQLite-level version](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26, and still the right answer to the question it asked.** Superseded the same day by [item 27](#27-change-streams-reopened-2026-07-26), which emits events from the WRITE PATH instead of trying to recover them from the engine. |
+| — | [`$text` and `$search`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so `$text` could not be oracle-verified; `$search` is Atlas-only, so it cannot be verified even in principle. [Item 31](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) is the feature under a name that promises what it can keep. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
 **Sessions landed 2026-07-26** ([item 25](#25-clientsession-for-the-shim)),
@@ -242,6 +252,16 @@ has a decision record rather than a line here. `startSession()` was never in
 this category and is now implemented - see
 [item 25](#25-clientsession-for-the-shim).
 
+**Change streams left this category on 2026-07-26**, the same day they entered
+it. The decision record in [item 26](#26-change-streams-decided-against-2026-07-26)
+is sound about what it measured and asked the wrong question: it looked for a
+way to recover changes FROM SQLITE, when the write path already knows what it
+did. [Item 27](#27-change-streams-reopened-2026-07-26) is the version built from
+that end - which lands the feature for a single process and, crucially, makes
+the boundary of that scope a loud `invalidate` event rather than a silence.
+`$text` and `$search` did NOT move: their problem is that the answers differ,
+which no amount of implementation fixes.
+
 ---
 
 ### Item history
@@ -277,6 +297,14 @@ priority table above.
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
 | 25 | ~~[`ClientSession` for the shim](#25-clientsession-for-the-shim)~~ | S-M | **DONE 2026-07-26** — sessions, `{ session }` everywhere, oracle-verified on a replica set |
+| 27 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Open — supersedes 26: emit from the write path, `RETURNING` for post-images, `data_version` for `invalidate` |
+| 28 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | Open — `$currentDate`, `$bit`, pipeline updates, and the expression/stage/accumulator families the manual lists |
+| 29 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | Open — partial and sparse map onto SQLite partial indexes (measured); TTL and `hint` need decisions |
+| 30 | [Geospatial queries](#30-geospatial-queries) | M | Open — R-Tree and geopoly are compiled in; spherical-vs-planar is the real work |
+| 31 | [Search under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | Open — FTS5 with a caller-chosen tokenizer; `$text`/`$search` stay refused |
+| 32 | [Vector similarity](#32-vector-similarity-without-an-extension) | S / L | Open — the `$similarity*` operators are arithmetic; indexed ANN needs an extension and is not scheduled |
+| 33 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | Open — cursor methods, `find().explain()`, `renameCollection`, validation, views, capped, stats |
+| 34 | [The stress test](#34-the-stress-test-complex-documents-every-feature) | M | Open — requested 2026-07-26; complex documents through every feature, asserting CEILINGS not timings |
 | 26 | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26**, with the measurement |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
@@ -938,7 +966,10 @@ answer than a search feature that silently disagrees with the thing it imitates.
 
 Revisit if MongoDB parity stops being the standard, or if someone wants
 FTS-backed search under a differently-named API that promises nothing about
-`$text`.
+`$text`. **Someone did, on 2026-07-26** - see
+[item 31](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature),
+which also records why `$search` (MongoDB's Atlas-only search product) is a
+harder no than `$text` rather than an alternative to it.
 
 Original analysis follows.
 
@@ -2024,6 +2055,12 @@ transaction machinery already exists.
 
 ## 26. Change streams: DECIDED AGAINST 2026-07-26
 
+> **SUPERSEDED the same day by [item 27](#27-change-streams-reopened-2026-07-26).**
+> Everything measured below is still true, and none of it is load-bearing any
+> more: this item asked whether SQLITE could report what changed, and item 27
+> observes that the write path already knows. Kept in full, because "we looked
+> for it in the engine and the engine has nothing" is worth not re-discovering.
+
 `watch()` throws, and should keep throwing. This is a decision, not a gap.
 
 ### What was measured, not assumed
@@ -2069,3 +2106,375 @@ Local-first applications genuinely want that, and it can be honest about being
 single-process and non-resumable because it is not pretending to be a
 cluster-wide oplog. Same resolution as `$text` -> a caller-owned FTS5 table via
 `db.sql`.
+
+---
+
+# The documentation sweep, 2026-07-26
+
+Everything below came from a pass over the MongoDB manual's own reference
+indexes - [query operators](https://www.mongodb.com/docs/manual/reference/operator/query/),
+[update operators](https://www.mongodb.com/docs/manual/reference/operator/update/),
+[aggregation stages](https://www.mongodb.com/docs/manual/reference/operator/aggregation-pipeline/),
+[expression operators](https://www.mongodb.com/docs/manual/reference/operator/aggregation/),
+[indexes](https://www.mongodb.com/docs/manual/indexes/) and
+[change events](https://www.mongodb.com/docs/manual/reference/change-events/) -
+compared against what this library actually implements, rather than against
+what earlier backlog items happened to mention.
+
+**Four measurements were taken first**, because several items below turn on
+them (Node 26, `node:sqlite`, SQLite 3.53.3):
+
+| Capability | Result |
+| --- | --- |
+| FTS5 / R-Tree / geopoly virtual tables | **all three compile** |
+| `INSERT`/`UPDATE`/`DELETE ... RETURNING` | **works**, including the post-image `data` |
+| Partial indexes (`CREATE INDEX ... WHERE ...`) | **works** over `json_extract` expressions |
+| `PRAGMA data_version` | **2 -> 2** for this connection's own writes, **2 -> 3** for another connection's |
+
+The last two rows are the ones that change decisions rather than just enable
+work: `RETURNING` makes per-document change events cost no extra statement, and
+`data_version` is a reliable "somebody else wrote, and you did not see it"
+signal.
+
+---
+
+## 27. Change streams, REOPENED 2026-07-26
+
+**Size: M.** This supersedes [item 26](#26-change-streams-decided-against-2026-07-26),
+which stays where it is: its measurements are still correct, and they are the
+reason this item exists in a different shape.
+
+**Item 26 answered the wrong question.** It asked "can SQLite tell us what
+changed?" and measured its way to no - no update hook, and the session extension
+records zero bytes for a `(data JSON)` table with no primary key. But this
+library does not need SQLite to tell it: **every write already goes through a
+`Collection` method that knows exactly what it did**. Emitting an event there is
+ordinary bookkeeping, not archaeology.
+
+Two facts have also changed since that decision was written, both on the same
+day:
+
+- **There is an oracle now.** [test/global-setup.ts](test/global-setup.ts) boots
+  a replica set for [item 25](#25-clientsession-for-the-shim), and change
+  streams need exactly that. Event SHAPES - `_id`, `operationType`, `ns`,
+  `documentKey`, `fullDocument`, `updateDescription` - can be compared against a
+  real server for insert/update/replace/delete/drop, which item 26 assumed was
+  impossible.
+- **`RETURNING` works** (measured above). `updateMany` emits one event PER
+  DOCUMENT on MongoDB, and item 26 assumed that meant reading the affected rows
+  before and after. `UPDATE ... RETURNING rowid, data` hands back every
+  post-image in the statement that did the work - no pre-flight SELECT, which
+  matters under the driver-seam rule (every statement is a possible round trip).
+
+### The design
+
+- Events are emitted by the write methods, buffered per transaction and flushed
+  **on commit** - a rollback discards them. The transaction frames added by
+  item 25 are where that hooks in. This also matches the server, which does not
+  publish uncommitted transaction data.
+- `watch()` on `Collection`, `Db` and `MongoClient`, returning an async
+  iterable of change events, with the pipeline argument run through the
+  aggregation machinery that already exists (`$match` on an event document is
+  the common case, and `matchBatch` already applies a filter to documents that
+  are not rows).
+- `fullDocument`/`fullDocumentBeforeChange` come from the `RETURNING` images;
+  `updateDescription` is a diff of the two, computed only when someone is
+  watching, so an unwatched collection pays nothing.
+- Resume tokens are a monotonic counter for the lifetime of the process.
+
+### The divergences, and the one that makes this honest
+
+- **Only writes made through this library, on this connection, are seen.** No
+  oplog, no cluster. This is the big one.
+- **`db.sql` writes are invisible**, because intercepting them would mean
+  parsing arbitrary SQL.
+- **A resume token does not survive a restart**, so `resumeAfter` with a foreign
+  token must throw rather than silently skip.
+- **`fullDocument` on an update is the exact post-image**, where MongoDB's
+  `updateLookup` reads the document at LOOKUP time and can therefore return a
+  later version. Ours is arguably better and is certainly different.
+
+**`PRAGMA data_version` is what keeps the first two from being silent.** It
+changes when any OTHER connection commits and does not change for this one
+(measured), so a watcher that sees it move knows it has missed events it cannot
+describe - and can emit `invalidate`, which is an event MongoDB already has and
+which callers already handle. That converts "quietly incomplete", the thing this
+project refuses to ship, into a loud, enumerable boundary that `strict` can
+police.
+
+That is the whole argument for calling it `watch()` rather than inventing a
+name: the shape is the driver's, the limits are stated, and the moment a limit
+is crossed the stream says so.
+
+**Verify.** Dual-engine against the replica set for every event shape; single
+engine for the boundary (another connection writes -> `invalidate`), the way
+[test/strict.spec.ts](test/strict.spec.ts) handles the rest of the known
+divergences.
+
+---
+
+## 28. The operator gap sweep
+
+**Size: S each, mostly.** What the manual lists and this library does not
+implement, in rough order of how often it is reached for. None of these is
+blocked on anything.
+
+### Update operators (src/update.ts)
+
+- **`$currentDate`** - sets a field to now, as a Date or a Timestamp. Dates
+  already round-trip (DR-1), so the Date form is an afternoon. **S.**
+- **`$bit`** - bitwise AND/OR/XOR on an integer field. The `$bits*` QUERY
+  operators already solved the hard part (a mask past
+  `Number.MAX_SAFE_INTEGER` binds as a decimal string and is `CAST` to
+  INTEGER); this is the write side of the same trick. **S.**
+- **Aggregation-pipeline updates** - `updateOne(filter, [{ $set: ... },
+  { $unset: ... }])`, MongoDB 4.2+. Both halves exist: the expression language
+  and the update compiler. The interesting question is whether it compiles to
+  SQL (fast, and a second implementation of the expression rules - the thing
+  `$expr` deliberately refused) or evaluates in JS per document like `$expr`
+  does. **The `$expr` precedent says JS**, through `mdb_expr`-style plumbing,
+  and it should say so out loud. **M.**
+
+### Accumulators (src/aggregate.ts)
+
+`$stdDevPop`/`$stdDevSamp` and `$mergeObjects` are each a few lines. The
+`N`-family (`$firstN`, `$lastN`, `$maxN`, `$minN`, `$top`, `$topN`, `$bottom`,
+`$bottomN`) is one shared shape done eight times. `$median`/`$percentile` need
+an interpolation rule that must be taken from the server rather than guessed.
+**S, S, M.**
+
+### Expression operators (src/expression.ts)
+
+Grouped by how much they are missed:
+
+| Family | Missing | Size |
+| --- | --- | --- |
+| Regex | `$regexMatch` `$regexFind` `$regexFindAll` | S - the `$regex` machinery exists, and `$expr` currently cannot do regex at all |
+| Object | `$mergeObjects` `$objectToArray` `$arrayToObject` `$getField` `$setField` `$unsetField` | S |
+| Set | `$setUnion` `$setIntersection` `$setDifference` `$setEquals` `$setIsSubset` `$allElementsTrue` `$anyElementTrue` | S - `equalsBson` already defines the equality they need |
+| Date arithmetic | `$dateAdd` `$dateSubtract` `$dateDiff` `$dateTrunc` `$dateFromParts` `$dateToParts` `$dateFromString` `$isoWeek` `$isoDayOfWeek` `$isoWeekYear` `$week` | M - and `timezone` stays REJECTED, per the existing rule |
+| Array | `$indexOfArray` `$sortArray` `$zip` `$firstN` `$lastN` `$maxN` `$minN` | S |
+| String | `$substr` `$substrBytes` `$indexOfBytes` `$strLenBytes` | S - byte twins of the CP operators already implemented; note UTF-8 bytes, not UTF-16 |
+| Arithmetic | `$exp` `$ln` `$log` `$log10` | S |
+| Trigonometry | the 15 `$sin`/`$acosh`/`$degreesToRadians` family | S - pure `Math`, and dull |
+| Type | `$convert` `$toLong` `$toDecimal` `$toObjectId` `$toArray` | `$convert` is S; the rest are DR-1 questions, not expression questions |
+| Misc | `$rand` `$sampleRate` `$hash` `$literal` (have) | S, but `$rand` makes a pipeline non-deterministic and the specs will need to cope |
+
+Absent on purpose, and the reasons already written down elsewhere:
+`$function`/`$accumulator` (same as `$where`), `$meta` (needs `$text`/`$search`),
+`$tsSecond`/`$tsIncrement` and `$binarySize`/`$bsonSize` (need BSON types the
+storage layer does not hold - a DR-1 question), and the `$encStr*` family
+(queryable encryption, which is a server feature).
+
+### Stages (src/aggregate.ts)
+
+[Item 16](#16-aggregation-pipeline) already lists `$facet`, `$bucket`,
+`$replaceRoot`, `$out`, `$merge`, `$sample` and `$graphLookup`. The sweep adds:
+
+- **`$unset` (the stage) and `$replaceWith`** - aliases of `$project`-exclusion
+  and `$replaceRoot`. Nearly free once their targets exist. **S.**
+- **`$sortByCount`** - exactly `$group` + `$sort`, both of which exist. **S.**
+- **`$bucketAuto`** - `$bucket` with computed boundaries. Do it with `$bucket`.
+- **`$unionWith`** - a second collection's pipeline concatenated in. The
+  `$lookup` work already opens a foreign collection on this connection. **M.**
+- **`$documents`** - a literal document source, and the natural way to test
+  expression operators without a collection. **S.**
+- **`$setWindowFields`, `$densify`, `$fill`** - the analytics family. Real work,
+  and the first place `db.sql` and a window function is the honest answer
+  instead. **L.**
+- **`$redact`, `$geoNear`, `$collStats`, `$indexStats`, `$planCacheStats`** -
+  `$geoNear` belongs with [item 30](#30-geospatial-queries); the diagnostics
+  belong with [item 33](#33-the-collection-and-db-surface-the-manual-still-lists).
+
+### Query operators (src/query.ts)
+
+Only three things are missing that are not geospatial (item 30) or already
+decided (`$text`, `$where`): **`$jsonSchema`** (which belongs with document
+validation, item 33), **`$comment`**, and **`$rand`/`$sampleRate`-style
+sampling. **S.**
+
+---
+
+## 29. Index properties: partial, sparse, TTL, and `hint`
+
+**Size: S-M.** `createIndex` supports `unique` and `name` and nothing else,
+while three of MongoDB's index properties map onto SQLite almost exactly.
+
+- **`partialFilterExpression` -> a SQLite PARTIAL INDEX.** Measured to work over
+  `json_extract` expressions. This library already compiles a filter document to
+  a SQL `WHERE` clause, so the option is close to `CREATE INDEX ... WHERE
+  ${toSql(...)}`. The catch is the matching rule: SQLite only uses a partial
+  index when the query's `WHERE` provably implies the index's, so
+  [test/query-plan.spec.ts](test/query-plan.spec.ts) is what decides whether
+  this is real. **S-M.**
+- **`sparse: true`** - the same mechanism with
+  `WHERE json_extract(data, '$.f') IS NOT NULL`. It also fixes a documented
+  wart: a non-sparse unique index here rejects a SECOND document missing the
+  field. **S.**
+- **`expireAfterSeconds` (TTL)** - the only one with no SQLite counterpart.
+  MongoDB runs a reaper every 60 seconds; the honest local versions are a purge
+  on next access or an opt-in timer, and either is a divergence to enumerate
+  rather than hide. Decide the shape before building. **M.**
+- **`hint`** on find/count/update - SQLite spells it `INDEXED BY`. Worth more
+  here than on a server, because of the documented case where a dotted query's
+  array arm cannot use an index. **S.**
+- **`hidden`, `createIndexes()`, `dropIndexes()`, `indexExists()`** - the small
+  completions [item 2](#2-createindex-and-friends) left open. **S.**
+
+Wildcard, hashed, clustered and collation indexes are NOT in scope: the first
+needs every path indexed, the middle two exist for sharding, and collation is
+its own project.
+
+---
+
+## 30. Geospatial queries
+
+**Size: M, and larger than it looks.** The manual's geospatial family
+(`$geoWithin`, `$geoIntersects`, `$near`, `$nearSphere`, with `$box`, `$center`,
+`$centerSphere`, `$polygon`, `$geometry`, `$maxDistance`, `$minDistance`, plus
+the `$geoNear` stage and 2dsphere indexes) is the largest single block of the
+query language this library does not implement, and it is not mentioned anywhere
+else in this backlog.
+
+**SQLite is unusually well equipped for it**: the bundled build has **R-Tree AND
+geopoly** (measured). An R-Tree gives indexed bounding-box search, which is
+`$geoWithin` with `$box`/`$center` almost directly, and geopoly does polygon
+containment.
+
+**What makes it M rather than S** is that MongoDB's operators are spherical,
+not planar. `$centerSphere` and `$nearSphere` are great-circle distances on a
+sphere; R-Tree is flat. A bounding box on latitude/longitude is a fine
+*candidate* filter, but the exact test has to be haversine in a registered
+function - which then costs index eligibility exactly the way `$expr` does, and
+should be documented in the same words.
+
+Sequencing: `$geoWithin` with `$box`/`$center`/`$polygon` first (planar, exact,
+indexable), then `$near`/`$nearSphere` with an R-Tree pre-filter and a haversine
+refinement, then GeoJSON `$geometry` and `$geoIntersects` on top of geopoly.
+2dsphere index parity is the part to decide against, unless someone asks.
+
+---
+
+## 31. Search: `$search` cannot be the API, but search can be the feature
+
+**Size: M.** [`$text` was decided against](#text-decided-2026-07-26--not-implemented-and-it-says-why)
+because FTS5's stemmer disagrees with MongoDB's Snowball one, so the same query
+returns different documents. Reviewing
+[MongoDB Search](https://www.mongodb.com/docs/search/) does not change that
+answer - it strengthens it, for a new reason:
+
+**`$search` and `$searchMeta` are Atlas-only.** They are not in the server this
+library is checked against, and `mongodb-memory-server` cannot start them, so
+there is no oracle even in principle. (An `mongodb/mongodb-atlas-local`
+container exists and does include Search; running one in CI to verify a feature
+whose analyzers are Lucene's is a large bill for a comparison that would still
+fail on tokenization.) Anything named `$search` here would be a promise nobody
+can check - the exact thing items 8 and 23 exist to prevent.
+
+**But the feature underneath is wanted, and SQLite has FTS5 compiled in.** The
+honest version is a search API *of this library's own*, which promises nothing
+about MongoDB parity:
+
+- `collection.createSearchIndex({ fields, tokenizer })` creating an FTS5 table
+  shadowed to the collection, kept in step by triggers (or by the same write
+  path [item 27](#27-change-streams-reopened-2026-07-26) is adding hooks to -
+  they want the same seam);
+- a `$sqliteSearch`-style stage, or a `searchText()` method, returning documents
+  and a rank;
+- the tokenizer named by the CALLER, since that is the thing that cannot be
+  made to agree with anybody.
+
+`db.sql` already makes this possible by hand, which is what the `$text` error
+message says. This item is about making it supported, tested and documented
+rather than a recipe - while keeping `$text` and `$search` throwing, each
+naming this as the alternative.
+
+---
+
+## 32. Vector similarity, without an extension
+
+**Size: S for the operators, L for indexed search.** The manual now lists
+`$similarityCosine`, `$similarityDotProduct` and `$similarityEuclidean` as
+ordinary expression operators. They are pure arithmetic over two arrays of
+numbers - **an afternoon in [src/expression.ts](src/expression.ts)**, no
+extension, no dependency, and they are oracle-verifiable against a real server
+like every other expression operator.
+
+That is enough for brute-force kNN over a modest collection:
+`$addFields` the similarity, `$sort`, `$limit`. Document it as such, including
+where it stops being reasonable.
+
+**`$vectorSearch` itself is Atlas-only** and is the same story as `$search`
+(item 31): no local oracle. Approximate-nearest-neighbour indexing would need
+`sqlite-vec`, which is a loadable native extension - `node:sqlite` does expose
+`loadExtension` (measured), so a caller could supply one, but shipping it would
+end the zero-dependency property. If this is ever built, it belongs behind the
+same seam as [item 24](#24-other-sqlite-engines-libsql-turso-d1): the library
+uses it if the driver has it.
+
+---
+
+## 33. The collection and Db surface the manual still lists
+
+**Size: S each.** Small, and mostly missing because nothing has needed them:
+
+- **Cursor methods** - `hasNext()`, `tryNext()`, `forEach()`, `map()`,
+  `rewind()`, `count()`. Ported code reaches for `hasNext()` constantly, and
+  `FindCursor` today has only `next`/`toArray`/`close` plus the chainables. **S.**
+- **`find().explain()`** - `aggregate()` has `explain()` and CLAUDE.md calls
+  that method the contract; `find()` has nothing. It should report the SQL and
+  the `EXPLAIN QUERY PLAN` output, which is what the plan-regression tests
+  already assert on internally. **S, and it makes the index story visible.**
+- **`renameCollection()`** - `ALTER TABLE ... RENAME TO`, plus the
+  `_sdb_collections` registry row and the cache eviction that `drop()` already
+  does. **S.**
+- **Document validation** - `createCollection(name, { validator })` and the
+  `$jsonSchema` query operator. Evaluated in JS at write time, the way `$expr`
+  is. Note `createCollection` currently REJECTS every option except `session`,
+  so this is the first one it would accept. **M.**
+- **Views** (`createView`) - a stored pipeline, read-only. SQLite has views, but
+  these should almost certainly be resolved in the pipeline layer instead. **M.**
+- **Capped collections** - a size/count ceiling with FIFO eviction. A trigger,
+  or a check on insert. Decide whether it is worth having at all. **S-M.**
+- **`db.command()`, `db.stats()`, `collection.stats()`, `$collStats`,
+  `$indexStats`** - diagnostics. `db.command()` in particular is a can of worms
+  (it is the whole wire protocol behind one method) and should stay
+  unimplemented; the stats ones are `PRAGMA page_count` arithmetic. **S.**
+
+---
+
+## 34. The stress test: complex documents, every feature
+
+**Size: M.** Requested 2026-07-26. `bench/` measures QUERY SHAPES over 20k
+simple documents - it answers "does the index get used", and it says nothing
+about what happens to deeply nested, wide, awkward documents.
+
+**Build a corpus of genuinely complex documents**: tens of nesting levels,
+arrays of documents containing arrays of documents, hundreds of fields per
+level, long strings, dates and unicode throughout, near the 200-level
+`MAX_DOCUMENT_DEPTH` cap - then run EVERY feature over it and measure. Queries
+and every query operator, the dotted-array paths, all the update operators
+including the positional ones, aggregation with each stage, projections with
+`$slice`/`$elemMatch`/`$`, index creation, `distinct`, `bulkWrite`,
+transactions and sessions.
+
+**What it is actually looking for** is the class of failure this project has
+hit repeatedly, which is never a slow query - it is a limit:
+
+- **SQLite's parser recursion limit.** `$push: { $each: [...900] }` failed with
+  "Recursion limit" because the obvious compilation nested one call per element.
+  Deeply nested documents produce deeply nested expressions the same way, and
+  the dotted-path expansion (`MAX_ARRAY_PATH_DEPTH`) is self-similar by design.
+- **JavaScript stack depth.** `encode` recurses once per level, which is why
+  `MAX_DOCUMENT_DEPTH` is 200 and not 1000 - and why the job that caught it was
+  Windows on the oldest supported Node, not Linux on the newest.
+- **Statement SIZE.** A compiled update over a deep path is a large SQL string,
+  and nothing currently measures how large.
+- **Memory.** Cursors stream, but `toArray()`, the aggregation JS stages and
+  `matchBatch`'s TEMP table all materialise.
+
+**Verify.** Its own vitest config like `bench/`, no mongod, and asserting
+CEILINGS rather than timings - "this completes", "this stays under N MB", "this
+does not exceed the parser's limits" - so it fails on a regression rather than
+on a busy CI runner. Where a limit is genuinely reached, the answer is a clear
+error naming the limit, which is the same standard the depth cap already meets.

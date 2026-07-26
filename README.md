@@ -1026,43 +1026,62 @@ how each piece would be implemented. The headlines:
 
 **Querying**
 
-- `$text`. It needs a stemming full-text index, and SQLite's FTS5 stemmer does
-  not agree with MongoDB's — the same query would return different documents on
-  the two, which is the one thing this library will not do quietly. Use
-  `$regex`, or build an FTS5 table of your own through [`db.sql`](#raw-sql),
-  where the tokenizer is your choice. The error says so.
+- The geospatial family (`$geoWithin`, `$near`, `$geoIntersects`, …) — the
+  largest single block of the query language not implemented here. SQLite's
+  R-Tree and geopoly modules make it feasible; MongoDB's operators are
+  *spherical* and those are planar, which is what makes it real work.
+- `$text` and `$search`. `$text` needs a stemming full-text index, and SQLite's
+  FTS5 stemmer does not agree with MongoDB's — the same query would return
+  different documents on the two, which is the one thing this library will not
+  do quietly. `$search` is Atlas-only, so it cannot be checked against a real
+  server even in principle. Use `$regex`, or build an FTS5 table of your own
+  through [`db.sql`](#raw-sql), where the tokenizer is your choice. The error
+  says so, and a supported search API under its own name is planned.
 - `$where` will **not** be supported (it executes arbitrary JavaScript). `$expr`
   covers the same comparisons without running code.
 
 **Updating**
 
+- `$currentDate` and `$bit`, and updates expressed as an aggregation pipeline
+  (`updateOne(filter, [{ $set: … }])`).
 
 **Collection / Db API**
 
-- `renameCollection()`, index options beyond `unique`/`name`, `watch()`
+- `renameCollection()`, document validation (`$jsonSchema`), views, capped
+  collections, and the cursor conveniences (`hasNext()`, `forEach()`, `map()`)
+- Index properties beyond `unique`/`name`: `partialFilterExpression`, `sparse`,
+  TTL and `hint`. The first two map onto SQLite partial indexes and are the
+  cheapest real capability outstanding.
 
 **Aggregation** — the pipeline is a common-shapes subset, not the whole thing:
 
 - Stages: `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`,
-  `$graphLookup`; and `$lookup`'s `let`+`pipeline` form
-- Expression operators outside the table above: the set family
-  (`$setUnion`, …), trigonometry, `$dateFromString` and the rest of the date
-  arithmetic (`$dateAdd`, `$dateDiff`, `$dateTrunc`), and timezone support on
-  the date operators. `$function` and `$accumulator` will **not** be supported,
-  for the same reason as `$where`
-- `$group` accumulators beyond the nine listed above
+  `$graphLookup`, `$unionWith`, `$sortByCount`; and `$lookup`'s `let`+`pipeline`
+  form
+- Expression operators outside the table above: the regex family
+  (`$regexMatch`, …), the set family (`$setUnion`, …), the object family
+  (`$mergeObjects`, `$objectToArray`, …), trigonometry, `$dateFromString` and
+  the rest of the date arithmetic (`$dateAdd`, `$dateDiff`, `$dateTrunc`), and
+  timezone support on the date operators. `$function` and `$accumulator` will
+  **not** be supported, for the same reason as `$where`
+- `$group` accumulators beyond the nine listed above — `$stdDevPop`,
+  `$mergeObjects`, and the `N`-family (`$firstN`, `$topN`, …)
+
+**Change streams** — `watch()` throws today. The first attempt to build them
+asked SQLite what had changed and got nothing back (no update hook; the session
+extension records zero bytes for these tables). The version now planned emits
+events from this library's own write path instead, which works for a single
+process — and uses `PRAGMA data_version` to detect another connection's writes,
+so the limit of that scope surfaces as an `invalidate` event rather than as
+silence. BACKLOG.md items 26 and 27 have the measurements and the design.
 
 **Not planned**
 
-- Change streams, replication, sharding, `$where`, server-side JavaScript,
-  GridFS, the wire protocol. A process that needs those needs a server.
+- Replication, sharding, `$where`, server-side JavaScript, GridFS, the wire
+  protocol, `db.command()`. A process that needs those needs a server.
   (Multi-document atomicity within one connection *is* supported — see
   [Transactions](#transactions) and
-  [Sessions](#sessions-and-the-one-thing-they-cannot-do).) Change streams were investigated far enough to
-  be worth a decision record rather than a line here: `node:sqlite` exposes no
-  update hook, and SQLite's session extension records *nothing* for these tables
-  and is connection-local regardless — so it could see neither another process's
-  writes nor its own resume point. BACKLOG.md item 26 has the measurements.
+  [Sessions](#sessions-and-the-one-thing-they-cannot-do).)
 
 ## Thanks
 
