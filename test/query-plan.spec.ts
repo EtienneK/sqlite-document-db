@@ -105,4 +105,72 @@ describe('find() query plans', () => {
     expect(plan).toContain('INDEX ixd_collection_items_at_1')
     expect(plan).not.toContain('SCAN collection_items')
   })
+
+  /**
+   * BACKLOG item 29: a SPARSE index is a SQLite partial index over
+   * `... IS NOT NULL`, and SQLite only uses a partial index when the query's
+   * WHERE provably IMPLIES the index's. A range predicate implies IS NOT NULL,
+   * so this one is genuinely usable - which is the thing worth pinning, since
+   * a partial index that never gets used is not an index, it is overhead.
+   */
+  it('a sparse index should still serve a range find()', async () => {
+    const logs = await capture(async db => {
+      await db.collection('items').createIndex({ qty: 1 }, { sparse: true })
+      await db.collection('items').insertMany([{ qty: 1 }, { qty: 2 }])
+      await db.collection('items').find({ qty: { $gt: 1 } }).next()
+    })
+    const docs = Array.from({ length: 1000 }, (_, i) => ({ _id: String(i), qty: i }))
+    const plan = explain(logs, docs)
+    expect(plan).toContain('INDEX ix_collection_items_qty_1')
+    expect(plan).not.toContain('SCAN collection_items')
+  })
+})
+
+/**
+ * `find().explain()` - the same question the tests above ask by replay, asked
+ * from the public API (BACKLOG item 33). This library's own shape, not
+ * MongoDB's: their explain describes a query planner that is not here.
+ */
+describe('find().explain()', () => {
+  it('should report the SQL, its parameters and the plan SQLite chose', async () => {
+    const db = await Db.fromUrl(':memory:')
+    const items = db.collection('items')
+    await items.insertMany(Array.from({ length: 500 }, (_unused, i) => ({ _id: String(i), qty: i })))
+    await items.createIndex({ qty: 1 })
+
+    const explained = await items.find({ qty: { $gt: 400 } }).explain()
+    expect(explained.sql).toContain('SELECT data FROM')
+    expect(Object.values(explained.params)).toContain(400)
+    expect(explained.plan.length).toBeGreaterThan(0)
+    expect(explained.indexes).toContain('ix_collection_items_qty_1')
+
+    // An unindexed field has no index to name, which is the answer the method
+    // exists to give.
+    expect((await items.find({ nope: 1 }).explain()).indexes).toStrictEqual([])
+    await db.close()
+  })
+
+  it('should describe the cursor as configured, including a hint', async () => {
+    const db = await Db.fromUrl(':memory:')
+    const items = db.collection('items')
+    await items.insertMany([{ _id: '1', qty: 1 }, { _id: '2', qty: 2 }])
+    await items.createIndex({ qty: 1 })
+
+    const explained = await items.find({}).sort({ qty: -1 }).limit(5).skip(1).explain()
+    expect(explained.sql).toContain('LIMIT 5')
+    expect(explained.sql).toContain('OFFSET 1')
+
+    expect((await items.find({}, { hint: 'qty_1' }).explain()).sql).toContain('INDEXED BY')
+    await db.close()
+  })
+
+  it('should not consume the cursor', async () => {
+    const db = await Db.fromUrl(':memory:')
+    const items = db.collection('items')
+    await items.insertMany([{ _id: '1' }, { _id: '2' }])
+    const cursor = items.find({})
+    await cursor.explain()
+    expect((await cursor.toArray()).length).toStrictEqual(2)
+    await db.close()
+  })
 })

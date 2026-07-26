@@ -100,6 +100,15 @@ belongs in types.ts.**
   shortened, so it must not touch the include/exclude counts — but it DOES have
   to join the inclusion tree when the mode is inclusion, or the sliced field
   vanishes.
+- [src/regex.ts](src/regex.ts) — MongoDB regex options → a JavaScript `RegExp`.
+  It exists because BOTH the `$regex` query operator (query.ts) and the
+  `$regexMatch`/`$regexFind`/`$regexFindAll` expression operators
+  (expression.ts) need the identical flag policy, and query.ts already imports
+  expression.ts for `$expr` — so one of them importing the other would close a
+  cycle. The policy is the part with decisions in it: `x` is refused (no JS
+  equivalent, and ignoring it would change which documents match), and `g`/`y`
+  are stripped for the query operator (stateful `test()` skips rows) but
+  REFUSED for the expression ones, because MongoDB refuses them there.
 - [src/errors.ts](src/errors.ts) — `MongoServerError` / `DUPLICATE_KEY_ERROR` (11000).
 - [src/filter-types.ts](src/filter-types.ts) — `Filter<TSchema>` / `UpdateFilter<TSchema>`
   and the dot-notation path algebra behind them. Types only; no runtime code.
@@ -128,6 +137,52 @@ User indexes (`createIndex`) are SQLite expression indexes named
 collection NAMES; see below). The plan-regression tests in
 [test/query-plan.spec.ts](test/query-plan.spec.ts) replay captured SQL and fail if
 `find()`'s statements ever stop using these indexes.
+
+**Non-obvious detail — a UNIQUE index needs a THIRD SQLite index to mean what
+MongoDB means.** A SQL unique index counts every NULL as distinct, so two
+documents *missing* the indexed field were both accepted where a server refuses
+the second. A non-sparse unique index therefore also gets `ixu_<table>_<name>`:
+a PARTIAL unique index over `json_quote(json_extract(...))` restricted to the
+rows where the extract IS NULL. `json_quote` renders both a missing field and a
+stored JSON null as the text `'null'`, which is exactly the conflation MongoDB
+makes. Verified dual-engine in [test/indexes.spec.ts](test/indexes.spec.ts).
+`mongoIndexName()` maps the companion back, so a violation reports the index the
+caller named.
+
+**Non-obvious detail — `partialFilterExpression` is much narrower than it looks,
+and that is measured.** SQLite answers "subqueries prohibited in partial index
+WHERE clauses", and every comparison this compiler emits carries an
+array-element arm (`EXISTS (SELECT ... FROM json_each(...))`) because
+`{ status: 'A' }` also has to match `{ status: ['A'] }`. Dropping that arm would
+index FEWER documents than MongoDB does, which is silently wrong for a unique
+partial index — so `INDEX_FILTER_OPS` in query.ts allows `$exists`, `$and` and
+`$or` and refuses the rest with the reason. `sparse: true` is the single-field
+shorthand and is the case that works. **Do not "widen" this without solving the
+subquery problem.**
+
+**Non-obvious detail — a partial index's predicate is compiled with INLINE
+literals.** `CREATE INDEX ... WHERE` has nothing to bind a parameter to, so
+`SqlBindings.inline` makes `bindValue`/`bindJson`/`bindRaw` emit quoted literals
+through the same `quoteLiteral` paths use. It is the ONE place a value is
+interpolated, and nothing else may set the flag.
+
+**Non-obvious detail — `sparse` and `partialFilterExpression` are carried in a
+SQL COMMENT.** They cannot be recovered from the compiled predicate, and adding
+a second metadata table for them was not worth it, so `createIndex` appends
+`/* sdb-index {...} */` and `indexes()` parses it back. SQLite stores a CREATE
+statement's text verbatim and rewrites the table name inside it on
+`ALTER TABLE ... RENAME`, so the comment survives a `rename()`. Every `*` in
+`JSON.stringify` output is inside a string literal, which is why escaping it as
+`*` keeps a field name from ending the comment early.
+
+**Non-obvious detail — `hint` goes on the table reference the index would
+actually serve.** `INDEXED BY` on the OUTER `FROM` of a rowid-union query forces
+a full index scan plus a temp B-tree for `ORDER BY rowid` (measured), because
+the outer table is reached by rowid. So the hint is threaded through
+`CompileOptions.table` — which is what `withElementMatch` names in its UNION
+arms — and applied to the outer `FROM` only when the compiled filter did NOT use
+that form. `toSql` reports which, via `usesRowidUnion`. Like MongoDB's hint it
+FAILS ("no query solution") rather than falling back.
 
 ### How query compilation works
 
@@ -295,6 +350,20 @@ ONCE PER ELEMENT. That made the documented capped-list idiom
 array is evaluated once. Found by `npm run stress`, which now pins the SHAPE of
 that SQL (it must not contain `json_array_length`) rather than a timing.
 
+**Non-obvious detail — `$bit` spells XOR out of AND and OR.** SQLite has `&`,
+`|`, `~`, `<<` and `>>` and no `^`, so `xor` compiles to
+`(a | b) & ~(a & b)` — the identity holds in two's complement and cannot
+overflow, because every bit of `a & b` is already a bit of `a | b`. The masks
+bind as decimal STRINGS and are `CAST` to INTEGER, the same trick the `$bits*`
+QUERY operators use and for the same reason (bit 62 is past
+`Number.MAX_SAFE_INTEGER`).
+
+**Non-obvious detail — `$currentDate` reads the clock ONCE per statement**, not
+once per row, so every document an `updateMany` touches gets the same instant.
+`{ $type: 'timestamp' }` is refused rather than answered with a Date: a BSON
+Timestamp is one of the types [src/ejson.ts](src/ejson.ts) cannot store, and
+substituting a different type is the failure mode this library exists to avoid.
+
 **Non-obvious detail — `$position` orders its runs explicitly.** Inserting
 mid-array stitches together three runs (before the insert point, the new values,
 after it) and `ORDER BY`s them by a group tag. `UNION ALL` does not promise an
@@ -364,6 +433,17 @@ holding the last one.
 `Array.prototype.sort` never calls the comparator for a one-element list, so a
 check inside the comparator missed a `$group` that produced a single row.
 
+**Non-obvious detail — `$unset` and `$sortByCount` are COMPOSED, not written.**
+`$unset` compiles to a `$project` exclusion and `$sortByCount` to `$group` +
+sort-by-count, because that is how the manual defines them. A second
+implementation of either would be a second set of semantics to keep in step.
+
+**Non-obvious detail — an N-family accumulator's `n` is a CONSTANT here.**
+`accumulatorFor` builds the accumulator before any group exists, so `n` is
+evaluated once against an empty document. MongoDB additionally allows an
+expression over the group key; here that raises rather than answering, which is
+the acceptable form of the divergence.
+
 ### The expression language (src/expression.ts)
 
 `$add`, `$cond`, `$dateToString`, `$map` and the rest. Four rules, each settled
@@ -392,7 +472,30 @@ shows on exact halves — so it is the kind of thing that ships.
 **`$sum`/`$avg`/`$min`/`$max` exist twice**: as accumulators in `$group`
 (src/aggregate.ts) and as array operators everywhere else (here). That is
 MongoDB's design, not a duplication to clean up — `$group` never reaches the
-expression versions, because `accumulatorFor` intercepts first.
+expression versions, because `accumulatorFor` intercepts first. The same is now
+true of `$mergeObjects` and the N-family (`$firstN`/`$lastN`/`$maxN`/`$minN`),
+and the two halves DIFFER on purpose: as accumulators `$firstN`/`$lastN` count a
+missing field as null while `$maxN`/`$minN` skip it, which the oracle settled.
+
+**Non-obvious detail — `$regexFindAll` does not report a zero-width match at the
+END of the string.** MongoDB attempts a match at every index up to the last
+CHARACTER, not past it, so `x*` over `'ab'` is two matches on the server and
+three in JavaScript — while the empty string still gets its one attempt at 0.
+Both halves are verified; the two regex engines genuinely differ here.
+
+**Non-obvious detail — `$toDate` and `$convert` refuse an INT where they accept
+a double.** MongoDB's conversion table has no int → date entry, so
+`{ $toDate: 0 }` raises and `{ $toDate: 1600000000000 }` does not. This library
+tells the two apart exactly as `$type` does — an integral number in int32 range
+is an `int`, anything else a `double` — which is what makes the same values
+raise here and there.
+
+**Non-obvious detail — the set operators' ORDER is copied, not chosen.**
+`$setUnion` and `$setIntersection` come back in BSON order and `$setDifference`
+in the first array's; MongoDB documents the order as unspecified and this is
+what the server actually does. `$setUnion`/`$setIntersection`/`$setDifference`
+propagate null, while `$setEquals`/`$setIsSubset`/`$allElementsTrue`/
+`$anyElementTrue` raise on one — also the server's rule, and not guessable.
 
 Dates are UTC-only and a `timezone` option is REJECTED rather than ignored.
 `$function`/`$accumulator` are never implemented, for the same reason as
@@ -432,6 +535,17 @@ keep being handed out and every call on it would fail with "no such table". The
 divergence: collections are created EAGERLY here (on `db.collection(name)`) and
 lazily on MongoDB (on first write), which is why the drop parity test recreates
 by inserting rather than by asking for indexes.
+
+**`rename()` has the same hazard twice over, plus the indexes.**
+`ALTER TABLE ... RENAME TO` moves the data and repoints every index at the new
+table, but the index NAMES embed the OLD table's and `indexes()` finds them by
+that prefix — so each one is recreated under the new name and the old dropped.
+SQLite has already rewritten the table name inside the stored CREATE statement,
+which is what makes that a substitution rather than a re-derivation. The
+`onRename` hook (the twin of `onDrop`) is what lets `Collection` hand back an
+instance for the new name: it evicts BOTH cache entries, because the source
+instance is bound to a table that is gone and any instance already opened under
+the target name was bound to the table the rename replaced.
 
 ### Transactions
 
@@ -789,6 +903,15 @@ Mongodb variant flaky for reasons that are nobody's bug.
   The one thing callers *can* interleave is a `for await` over a cursor: writing
   to the same collection inside that loop is unspecified in SQLite. Documented in
   the README rather than prevented.
+- **`cursor.hasNext()` PEEKS, and the peeked document is held.** There is no
+  count to consult — the answer has to be about this cursor's remaining
+  documents — so it reads one and `next()` returns it from the buffer. `close()`
+  and `rewind()` both clear it. `tryNext()` is exactly `next()`: `node:sqlite` is
+  synchronous, so there is never a document that exists but has not arrived yet.
+- **`find().explain()` is async and `aggregate().explain()` is not**, and the
+  asymmetry is the point: the first runs `EXPLAIN QUERY PLAN` (a statement), the
+  second reports a split decided at compile time. Neither returns MongoDB's
+  shape, which describes a query planner that is not here.
 - Single-document writes (`deleteOne`, `updateOne`, `replaceOne`) locate their
   target with `findOneRow()` and then address it **by rowid**. Do not "simplify"
   this back to a second filter on `_id`: the id's type changes how that filter

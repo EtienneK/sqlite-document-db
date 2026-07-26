@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The operator gap sweep.** Everything the MongoDB manual lists that was
+  small enough to be an afternoon, in one pass and oracle-verified:
+  - Update operators **`$currentDate`** and **`$bit`**, both usable through the
+    positional operators. `$currentDate` reads the clock once per statement, so
+    every document an `updateMany` touches gets the same instant;
+    `{ $type: 'timestamp' }` is refused, because a BSON Timestamp is not one of
+    the types this library can store.
+  - Query operators **`$comment`** and **`$sampleRate`**. `$sampleRate` is a
+    per-document coin flip, so it composes with an ordinary criterion.
+  - Accumulators **`$stdDevPop`**, **`$stdDevSamp`**, **`$mergeObjects`**, the
+    N-family (`$firstN`, `$lastN`, `$maxN`, `$minN`) and the positional family
+    (`$top`, `$topN`, `$bottom`, `$bottomN`).
+  - Aggregation stages **`$unset`** and **`$sortByCount`**.
+  - Expression operators: the regex family (`$regexMatch`, `$regexFind`,
+    `$regexFindAll`), the object family (`$mergeObjects`, `$objectToArray`,
+    `$arrayToObject`, `$getField`, `$setField`, `$unsetField`), the set family
+    (`$setUnion`, `$setIntersection`, `$setDifference`, `$setEquals`,
+    `$setIsSubset`, `$allElementsTrue`, `$anyElementTrue`), more array operators
+    (`$indexOfArray`, `$sortArray`, `$zip`, `$firstN`/`$lastN`/`$maxN`/`$minN`),
+    the byte twins of the string operators (`$substrBytes`/`$substr`,
+    `$strLenBytes`, `$indexOfBytes`), `$exp`/`$ln`/`$log`/`$log10`, the fifteen
+    trigonometry operators, `$convert` and `$rand`.
+- **Vector similarity**: `$similarityCosine`, `$similarityDotProduct` and
+  `$similarityEuclidean`, which make brute-force k-nearest-neighbour search
+  expressible with no extension and no dependency — `$addFields` the score,
+  `$sort`, `$limit`. Every document is scored, so it is for modest collections.
+- **Index properties.** `sparse: true` and `partialFilterExpression` (both
+  SQLite partial indexes), `hint` on `find()` and `countDocuments()` (SQLite's
+  `INDEXED BY`, which like MongoDB's hint fails rather than falling back), plus
+  `createIndexes()`, `dropIndexes()` and `indexExists()`. `indexes()` reports
+  `sparse` and `partialFilterExpression` back.
+  **`partialFilterExpression` is narrower here than on MongoDB, and the error
+  says why**: SQLite forbids subqueries in a partial index's `WHERE`, and every
+  comparison this library compiles carries one so that `{ status: 'A' }` also
+  matches `{ status: ['A'] }`. `$exists`, `$and` and `$or` are what is left.
+  `hidden` and `expireAfterSeconds` (TTL) are **rejected rather than ignored**.
+- **The rest of the cursor surface**: `hasNext()`, `tryNext()`, `forEach()`,
+  `map()`, `rewind()` and `count()` on `find()` cursors, and `hasNext()`,
+  `tryNext()` and `forEach()` on aggregation cursors. `hasNext()` peeks, so the
+  document it looked at is still the one `next()` returns.
+- **`find().explain()`**, reporting the SQL a cursor runs, its parameters,
+  SQLite's `EXPLAIN QUERY PLAN` output and the indexes that plan names. This
+  library's own shape — MongoDB's describes a query planner that is not here —
+  and it answers the question that shape is usually opened for.
+- **`collection.rename()` and `db.renameCollection()`**, which move the
+  documents and recreate the indexes under the new table's name.
+- **`db.stats()`**. The counts (`collections`, `objects`, `dataSize`) mean what
+  they do on MongoDB; the byte figures describe a SQLite file and are documented
+  as such. `db.command()` remains unimplemented, and `collection.stats()` is not
+  added because the driver dropped it in v7.
+
 - **A `MongoClient`-shaped entry point**, so a test suite can swap
   `from 'mongodb'` for `from 'sqlite-document-db'` and change nothing else. A
   `mongodb://` connection string is accepted and opens an in-memory database;
@@ -125,6 +176,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A non-sparse unique index accepted a second document missing the field.**
+  A SQL unique index counts every NULL as distinct, so a unique index on
+  `email` let `{ _id: 1 }` and `{ _id: 2 }` both through where a real server
+  refuses the second — and a stored `null` collided with neither. Such an index
+  now creates a companion partial unique index over
+  `json_quote(json_extract(...))` covering the rows whose key is absent, which
+  is exactly MongoDB's semantics (missing and null are the same key there too).
+  **This is a behaviour change**: a collection that relied on the old leniency
+  will now get a duplicate-key error on the second document without the field.
+  Use `sparse: true` for the old behaviour, which is also what MongoDB means by
+  it.
 - **`$push` with a negative `$slice` was quadratic in the array's length**,
   which made the documented capped-list idiom (`$each` + `$sort` + `$slice`)
   the slowest operation in the library. It named the whole array expression a

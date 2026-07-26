@@ -430,6 +430,105 @@ describe('Array and field update operators', () => {
         })
       })
 
+      // ----------------------------------------------------------- $currentDate
+      describe('$currentDate', () => {
+        it('should set a Date, in both spellings', async () => {
+          const before = Date.now()
+          await items().updateOne({ _id: 1 }, { $currentDate: { seen: true, 'audit.at': { $type: 'date' } } })
+          const doc = await find(1)
+          expect(doc.seen).toBeInstanceOf(Date)
+          expect(doc.audit.at).toBeInstanceOf(Date)
+          expect(doc.seen.getTime()).toBeGreaterThanOrEqual(before)
+          expect(doc.seen.getTime()).toBeLessThanOrEqual(Date.now())
+        })
+
+        it('should overwrite whatever was there', async () => {
+          await items().updateOne({ _id: 1 }, { $currentDate: { label: true } })
+          expect((await find(1)).label).toBeInstanceOf(Date)
+        })
+
+        it('should stamp every document an updateMany touches', async () => {
+          await items().updateMany({ qty: { $gte: 50 } }, { $currentDate: { seen: true } })
+          expect((await find(2)).seen).toBeInstanceOf(Date)
+          expect((await find(3)).seen).toBeInstanceOf(Date)
+          expect((await find(1)).seen).toBeUndefined()
+        })
+
+        it('should apply to an upserted document too', async () => {
+          await items().updateOne({ item: 'fresh' }, { $currentDate: { seen: true } }, { upsert: true })
+          expect((await items().findOne({ item: 'fresh' })).seen).toBeInstanceOf(Date)
+        })
+
+        it('should reject a specification that is neither a boolean nor $type', async () => {
+          await expect(items().updateOne({ _id: 1 }, { $currentDate: { seen: 'now' } })).rejects.toThrow()
+          await expect(items().updateOne({ _id: 1 }, { $currentDate: { seen: { $type: 'nope' } } })).rejects.toThrow()
+          await expect(items().updateOne({ _id: 1 }, { $currentDate: { _id: true } })).rejects.toThrow()
+        })
+
+        it('should write through a positional operator', async () => {
+          await items().updateOne({ _id: 4, 'results.product': 'xyz' }, { $currentDate: { 'results.$.at': true } })
+          const doc = await find(4)
+          expect(doc.results[1].at).toBeInstanceOf(Date)
+          expect(doc.results[0].at).toBeUndefined()
+        })
+      })
+
+      // ------------------------------------------------------------------- $bit
+      describe('$bit', () => {
+        it('should and, or and xor a whole number', async () => {
+          await items().updateOne({ _id: 1 }, { $bit: { qty: { and: 12 } } })
+          expect((await find(1)).qty).toStrictEqual(25 & 12)
+          await items().updateOne({ _id: 2 }, { $bit: { qty: { or: 5 } } })
+          expect((await find(2)).qty).toStrictEqual(50 | 5)
+          await items().updateOne({ _id: 3 }, { $bit: { qty: { xor: 37 } } })
+          expect((await find(3)).qty).toStrictEqual(100 ^ 37)
+        })
+
+        it('should apply several operations in the order they are written', async () => {
+          await items().updateOne({ _id: 1 }, { $bit: { qty: { and: 15, or: 1 } } })
+          expect((await find(1)).qty).toStrictEqual((25 & 15) | 1)
+        })
+
+        it('should treat a missing field as zero', async () => {
+          await items().updateOne({ _id: 1 }, { $bit: { flags: { or: 4 } } })
+          expect((await find(1)).flags).toStrictEqual(4)
+          await items().updateOne({ _id: 2 }, { $bit: { flags: { and: 4 } } })
+          expect((await find(2)).flags).toStrictEqual(0)
+        })
+
+        it('should handle negative operands, which set the high bits', async () => {
+          await items().updateOne({ _id: 1 }, { $bit: { qty: { or: -1 } } })
+          expect((await find(1)).qty).toStrictEqual(-1)
+        })
+
+        it('should refuse a non-integral target rather than coercing it', async () => {
+          await expect(items().updateOne({ _id: 1 }, { $bit: { item: { or: 1 } } })).rejects.toThrow()
+          await items().updateOne({ _id: 1 }, { $set: { rate: 2.5 } })
+          await expect(items().updateOne({ _id: 1 }, { $bit: { rate: { or: 1 } } })).rejects.toThrow()
+          // ...and leaves the document alone.
+          expect((await find(1)).item).toStrictEqual('journal')
+        })
+
+        it('should refuse an operand that is not a whole number, and an unknown operation', async () => {
+          await expect(items().updateOne({ _id: 1 }, { $bit: { qty: { or: 2.5 } } })).rejects.toThrow()
+          await expect(items().updateOne({ _id: 1 }, { $bit: { qty: { nope: 1 } } })).rejects.toThrow()
+          await expect(items().updateOne({ _id: 1 }, { $bit: { qty: 1 } })).rejects.toThrow()
+        })
+
+        it('should apply to an upserted document, counting up from zero', async () => {
+          await items().updateOne({ item: 'fresh' }, { $bit: { flags: { or: 6 } } }, { upsert: true })
+          expect((await items().findOne({ item: 'fresh' })).flags).toStrictEqual(6)
+        })
+
+        it('should write through a positional operator', async () => {
+          await items().updateOne(
+            { _id: 4, 'results.product': 'xyz' }, { $bit: { 'results.$.score': { or: 1 } } }
+          )
+          const doc = await find(4)
+          expect(doc.results.map((r: any) => r.score)).toStrictEqual([10, 5 | 1, 7])
+        })
+      })
+
       // ------------------------------------------------------------ findOneAnd*
       it('findOneAndUpdate should apply the array operators and honour returnDocument', async () => {
         const after = await items().findOneAndUpdate(

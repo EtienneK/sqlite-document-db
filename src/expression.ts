@@ -25,11 +25,12 @@
  * Not implemented, and rejected by name: `$function`/`$accumulator` (arbitrary
  * JavaScript, like `$where`), `$$NOW`/`$$CLUSTER_TIME` (not deterministic, and
  * nothing here has a session), `$dateFromString` (a parser for a format
- * language nobody would get right by halves), the trigonometry family, and the
- * set operators. See "Missing Features" in the README.
+ * language nobody would get right by halves) and the date-arithmetic family.
+ * See "Missing Features" in the README.
  */
 
 import { compareBson, equalsBson } from './bson-order.js'
+import { toRegExp } from './regex.js'
 import type { Document } from './types.js'
 
 /** What an expression is evaluated against. */
@@ -73,7 +74,11 @@ export function evaluateExpression (expression: unknown, doc: Document, strict =
 
 export function evaluate (expression: unknown, ctx: EvalContext): unknown {
   if (typeof expression === 'string') return evaluateString(expression, ctx)
-  if (expression === null || typeof expression !== 'object' || expression instanceof Date) return expression
+  // A RegExp is an object with no own enumerable keys, so without this it would
+  // fall through to the plain-document branch and evaluate to `{}` - which is
+  // how `{ $regexMatch: { regex: /x/ } }` would have silently matched nothing.
+  if (expression === null || typeof expression !== 'object' || expression instanceof Date ||
+    expression instanceof RegExp) return expression
   if (Array.isArray(expression)) return expression.map(element => evaluate(element, ctx))
 
   const entries = Object.entries(expression as Document)
@@ -302,6 +307,36 @@ const OPERATORS: Record<string, Operator> = {
     return Math.trunc(value! * factor) / factor
   }),
 
+  $exp: (raw, ctx) => arithmetic('$exp', args('$exp', raw, ctx, 1), ([n]) => Math.exp(n!)),
+  $ln: (raw, ctx) => arithmetic('$ln', args('$ln', raw, ctx, 1), ([n]) => positiveLog('$ln', n!, Math.log)),
+  $log10: (raw, ctx) => arithmetic('$log10', args('$log10', raw, ctx, 1), ([n]) => positiveLog('$log10', n!, Math.log10)),
+  $log: (raw, ctx) => arithmetic('$log', args('$log', raw, ctx, 2), ([n, base]) => {
+    if (base! <= 0 || base === 1) throw Error(`$log's base must be a positive number not equal to 1, but is ${base!}`)
+    return positiveLog('$log', n!, value => Math.log(value) / Math.log(base!))
+  }),
+
+  // --- Trigonometry -------------------------------------------------------
+  //
+  // Radians throughout, like MongoDB. Each is `Math`, with one rule on top: a
+  // result that is NaN means the argument was outside the function's domain,
+  // which is an error on the server rather than a NaN in the output.
+
+  $sin: trigonometry('$sin', Math.sin),
+  $cos: trigonometry('$cos', Math.cos),
+  $tan: trigonometry('$tan', Math.tan),
+  $asin: trigonometry('$asin', Math.asin),
+  $acos: trigonometry('$acos', Math.acos),
+  $atan: trigonometry('$atan', Math.atan),
+  $sinh: trigonometry('$sinh', Math.sinh),
+  $cosh: trigonometry('$cosh', Math.cosh),
+  $tanh: trigonometry('$tanh', Math.tanh),
+  $asinh: trigonometry('$asinh', Math.asinh),
+  $acosh: trigonometry('$acosh', Math.acosh),
+  $atanh: trigonometry('$atanh', Math.atanh),
+  $degreesToRadians: trigonometry('$degreesToRadians', degrees => degrees * Math.PI / 180),
+  $radiansToDegrees: trigonometry('$radiansToDegrees', radians => radians * 180 / Math.PI),
+  $atan2: (raw, ctx) => arithmetic('$atan2', args('$atan2', raw, ctx, 2), ([y, x]) => Math.atan2(y!, x!)),
+
   // --- Comparison ---------------------------------------------------------
   //
   // All of these order values by the BSON type order in src/bson-order.ts, the
@@ -404,6 +439,29 @@ const OPERATORS: Record<string, Operator> = {
     return -1
   },
 
+  // The byte twins of the CP operators above. MongoDB counts UTF-8 BYTES here,
+  // not UTF-16 code units, so `é` is 2 and an emoji is 4 - JavaScript's own
+  // `.length` agrees with neither. `$substr` is MongoDB's deprecated spelling
+  // of `$substrBytes` and is the same operator.
+  $substr: (raw, ctx) => substrBytes('$substr', raw, ctx),
+  $substrBytes: (raw, ctx) => substrBytes('$substrBytes', raw, ctx),
+
+  $strLenBytes: (raw, ctx) => utf8('$strLenBytes', args('$strLenBytes', raw, ctx, 1)[0]).length,
+
+  $indexOfBytes: (raw, ctx) => {
+    const [value, search, start, end] = args('$indexOfBytes', raw, ctx, 2, 4)
+    if (isNullish(value)) return null
+    const haystack = utf8('$indexOfBytes', value)
+    const needle = utf8('$indexOfBytes', search)
+    const from = start === undefined ? 0 : wholeNumber('$indexOfBytes', start)
+    const to = end === undefined ? haystack.length : wholeNumber('$indexOfBytes', end)
+    if (from < 0) throw Error('$indexOfBytes requires a non-negative starting index')
+    for (let i = from; i + needle.length <= Math.min(to, haystack.length); i++) {
+      if (needle.every((byte, offset) => haystack[i + offset] === byte)) return i
+    }
+    return -1
+  },
+
   $split: (raw, ctx) => {
     const [value, separator] = args('$split', raw, ctx, 2)
     if (isNullish(value) || isNullish(separator)) return null
@@ -426,6 +484,187 @@ const OPERATORS: Record<string, Operator> = {
 
   $replaceOne: (raw, ctx) => replace('$replaceOne', raw, ctx, false),
   $replaceAll: (raw, ctx) => replace('$replaceAll', raw, ctx, true),
+
+  // --- Regular expressions ------------------------------------------------
+  //
+  // The same JavaScript `RegExp` the `$regex` QUERY operator uses (see
+  // src/regex.ts for the shared flag policy), so a pattern behaves the same on
+  // both sides of the library. `idx` counts CODE POINTS, as MongoDB's does.
+  //
+  // Missing and null input is NOT an error here: `$regexMatch` is false,
+  // `$regexFind` is null and `$regexFindAll` is the empty array - verified
+  // against the server, and the reason these are usable in a schema-less store.
+
+  $regexMatch: (raw, ctx) => {
+    const { input, regex } = regexArgs('$regexMatch', raw, ctx)
+    return input === null ? false : regex.test(input)
+  },
+
+  $regexFind: (raw, ctx) => {
+    const { input, regex } = regexArgs('$regexFind', raw, ctx)
+    if (input === null) return null
+    return regexMatchDocument(regex.exec(input), input)
+  },
+
+  $regexFindAll: (raw, ctx) => {
+    const { input, regex } = regexArgs('$regexFindAll', raw, ctx)
+    if (input === null) return []
+    const all = new RegExp(regex.source, regex.flags + 'g')
+    const found: Document[] = []
+    let match: RegExpExecArray | null
+    while ((match = all.exec(input)) !== null) {
+      // MongoDB starts a match attempt at every index from 0 up to and
+      // including the LAST CHARACTER - not past it - so a zero-width pattern
+      // finds two matches in 'ab' where JavaScript finds three. The empty
+      // string still gets its one attempt at 0. Both halves verified against
+      // the server; the two regex engines genuinely differ here.
+      if (match[0] !== '' || input === '' || match.index < input.length) {
+        found.push(regexMatchDocument(match, input)!)
+      }
+      // An empty match would otherwise spin forever on the same index.
+      if (match[0] === '') all.lastIndex++
+    }
+    return found
+  },
+
+  // --- Objects ------------------------------------------------------------
+
+  /**
+   * Merges documents left to right; null and missing arguments are SKIPPED
+   * rather than propagating, which is what makes `$mergeObjects` usable over a
+   * field some documents do not have. A single argument that resolves to an
+   * array merges that array's elements.
+   */
+  $mergeObjects: (raw, ctx) => {
+    const values = variadic(raw, ctx)
+    const documents = values.length === 1 && Array.isArray(values[0]) ? values[0] : values
+    const merged: Document = {}
+    for (const value of documents) {
+      if (isNullish(value)) continue
+      Object.assign(merged, asDocument('$mergeObjects', value))
+    }
+    return merged
+  },
+
+  $objectToArray: (raw, ctx) => {
+    const value = args('$objectToArray', raw, ctx, 1)[0]
+    if (isNullish(value)) return null
+    return Object.entries(asDocument('$objectToArray', value)).map(([k, v]) => ({ k, v }))
+  },
+
+  /** Both spellings: `[[k, v], ...]` and `[{ k, v }, ...]`. Last key wins. */
+  $arrayToObject: (raw, ctx) => {
+    const value = args('$arrayToObject', raw, ctx, 1)[0]
+    if (isNullish(value)) return null
+    const result: Document = {}
+    for (const entry of asArray('$arrayToObject', value)) {
+      if (Array.isArray(entry)) {
+        if (entry.length !== 2) {
+          throw Error(`$arrayToObject requires an array of size 2 arrays, found array of size: ${entry.length}`)
+        }
+        result[asString('$arrayToObject', entry[0])] = entry[1]
+        continue
+      }
+      const pair = asDocument('$arrayToObject', entry)
+      if (!Object.hasOwn(pair, 'k') || !Object.hasOwn(pair, 'v')) {
+        throw Error("$arrayToObject requires an object with keys 'k' and 'v'")
+      }
+      result[asString('$arrayToObject', pair.k)] = pair.v
+    }
+    return result
+  },
+
+  /**
+   * Reads a field by NAME rather than by path - which is the whole point:
+   * `$getField` is how a field whose name contains a `.` or starts with `$`
+   * gets read at all. The shorthand `{ $getField: 'name' }` reads it from
+   * `$$CURRENT`.
+   */
+  $getField: (raw, ctx) => {
+    const { field, input } = fieldTarget('$getField', raw, ctx, ['field', 'input'])
+    if (isNullish(input)) return null
+    return asDocument('$getField', input)[field]
+  },
+
+  /** Setting a field to `$$REMOVE` (an expression evaluating to missing) drops it. */
+  $setField: (raw, ctx) => {
+    const { field, input, spec } = fieldTarget('$setField', raw, ctx, ['field', 'input', 'value'])
+    if (isNullish(input)) return null
+    const result = { ...asDocument('$setField', input) }
+    const value = evaluate(spec.value, ctx)
+    if (value === undefined) delete result[field]
+    else result[field] = value
+    return result
+  },
+
+  $unsetField: (raw, ctx) => {
+    const { field, input } = fieldTarget('$unsetField', raw, ctx, ['field', 'input'])
+    if (isNullish(input)) return null
+    const result = { ...asDocument('$unsetField', input) }
+    delete result[field]
+    return result
+  },
+
+  // --- Sets ---------------------------------------------------------------
+  //
+  // An "array" is a set here, deduplicated by the same `equalsBson` `$addToSet`
+  // uses. `$setUnion` and `$setIntersection` come back in BSON order (which is
+  // what the server does, though it documents the order as unspecified);
+  // `$setDifference` keeps the first array's order.
+
+  $setUnion: (raw, ctx) => {
+    const sets = setArgs('$setUnion', raw, ctx)
+    if (sets === null) return null
+    return dedupe(sets.flat()).toSorted(compareBson)
+  },
+
+  $setIntersection: (raw, ctx) => {
+    const sets = setArgs('$setIntersection', raw, ctx)
+    if (sets === null) return null
+    if (sets.length === 0) return []
+    const [first, ...rest] = sets
+    return dedupe(first!.filter(value => rest.every(other => other.some(o => equalsBson(o, value)))))
+      .toSorted(compareBson)
+  },
+
+  $setDifference: (raw, ctx) => {
+    const sets = setArgs('$setDifference', raw, ctx, 2)
+    if (sets === null) return null
+    const [first, second] = sets as [unknown[], unknown[]]
+    return dedupe(first.filter(value => !second.some(other => equalsBson(other, value))))
+  },
+
+  $setEquals: (raw, ctx) => {
+    const sets = setArgs('$setEquals', raw, ctx, 2, Infinity, false)!
+    const [first, ...rest] = sets
+    return rest.every(other =>
+      first!.every(value => other.some(o => equalsBson(o, value))) &&
+      other.every(value => first!.some(o => equalsBson(o, value))))
+  },
+
+  $setIsSubset: (raw, ctx) => {
+    const [subset, superset] = setArgs('$setIsSubset', raw, ctx, 2, 2, false)!
+    return subset!.every(value => superset!.some(other => equalsBson(other, value)))
+  },
+
+  $allElementsTrue: (raw, ctx) => setArgs('$allElementsTrue', raw, ctx, 1, 1, false)![0]!.every(isTruthy),
+  $anyElementTrue: (raw, ctx) => setArgs('$anyElementTrue', raw, ctx, 1, 1, false)![0]!.some(isTruthy),
+
+  // --- Vector similarity --------------------------------------------------
+  //
+  // BACKLOG item 32: plain arithmetic over two equal-length arrays of numbers,
+  // which is enough to express brute-force kNN as `$addFields` + `$sort` +
+  // `$limit`. There is no index behind them - every document is scored - so
+  // they are for modest collections, and the README says so. `$vectorSearch`
+  // itself is Atlas-only and has no local oracle, so it is not implemented.
+
+  $similarityDotProduct: (raw, ctx) => similarity('$similarityDotProduct', raw, ctx, (a, b) => dot(a, b)),
+  $similarityCosine: (raw, ctx) => similarity('$similarityCosine', raw, ctx, (a, b) => {
+    const magnitude = Math.sqrt(dot(a, a)) * Math.sqrt(dot(b, b))
+    return magnitude === 0 ? 0 : dot(a, b) / magnitude
+  }),
+  $similarityEuclidean: (raw, ctx) => similarity('$similarityEuclidean', raw, ctx, (a, b) =>
+    Math.sqrt(a.reduce((sum, value, index) => sum + (value - b[index]!) ** 2, 0))),
 
   // --- Arrays -------------------------------------------------------------
 
@@ -484,6 +723,87 @@ const OPERATORS: Record<string, Operator> = {
     const [needle, array] = args('$in', raw, ctx, 2)
     return asArray('$in', array).some(element => equalsBson(element, needle))
   },
+
+  $indexOfArray: (raw, ctx) => {
+    const [array, search, start, end] = args('$indexOfArray', raw, ctx, 2, 4)
+    if (isNullish(array)) return null
+    const list = asArray('$indexOfArray', array)
+    const from = start === undefined ? 0 : wholeNumber('$indexOfArray', start)
+    const to = end === undefined ? list.length : wholeNumber('$indexOfArray', end)
+    if (from < 0) throw Error('$indexOfArray requires a non-negative starting index')
+    for (let i = from; i < Math.min(to, list.length); i++) {
+      if (equalsBson(list[i], search)) return i
+    }
+    return -1
+  },
+
+  /**
+   * `sortBy` is either 1/-1 (order the elements themselves) or a
+   * `{ field: 1 | -1 }` document - the same two spellings `$push: { $sort }`
+   * takes, ordered by the same BSON comparison.
+   */
+  $sortArray: (raw, ctx) => {
+    const spec = options('$sortArray', raw, ['input', 'sortBy'])
+    const input = evaluate(spec.input, ctx)
+    if (isNullish(input)) return null
+    const list = asArray('$sortArray', input)
+    const by = spec.sortBy
+    if (by === 1 || by === -1) return list.toSorted((a, b) => compareBson(a, b) * by)
+    const entries = Object.entries(options('the sortBy option to $sortArray', by, Object.keys(by as Document ?? {})))
+    if (entries.length === 0) throw Error('the sortBy option to $sortArray requires at least one field')
+    for (const [field, direction] of entries) {
+      if (direction !== 1 && direction !== -1) {
+        throw Error(`the sortBy option to $sortArray must be 1 or -1 for '${field}'`)
+      }
+    }
+    return list.toSorted((a, b) => {
+      for (const [field, direction] of entries) {
+        // pathValue, so a missing field ranks as null - which is what $sort
+        // does everywhere else in this library.
+        const comparison = compareBson(pathValue(a, field), pathValue(b, field))
+        if (comparison !== 0) return comparison * (direction as number)
+      }
+      return 0
+    })
+  },
+
+  /** Transposes arrays: `[[1,2],[3,4]]` becomes `[[1,3],[2,4]]`. */
+  $zip: (raw, ctx) => {
+    const spec = options('$zip', raw, ['inputs', 'useLongestLength', 'defaults'])
+    const inputs = evaluate(spec.inputs, ctx)
+    if (isNullish(inputs)) return null
+    const arrays = asArray('$zip', inputs).map(input => {
+      if (isNullish(input)) return null
+      return asArray('$zip', input)
+    })
+    if (arrays.length === 0) throw Error('$zip requires at least one input array')
+    if (arrays.some(array => array === null)) return null
+
+    const longest = evaluate(spec.useLongestLength, ctx) === true
+    const defaults = spec.defaults === undefined ? [] : asArray('$zip', evaluate(spec.defaults, ctx))
+    if (defaults.length > 0) {
+      if (!longest) throw Error('the defaults option to $zip requires useLongestLength: true')
+      if (defaults.length !== arrays.length) {
+        throw Error('$zip requires one default per input array when defaults are given')
+      }
+    }
+    const lengths = (arrays as unknown[][]).map(array => array.length)
+    const length = longest ? Math.max(...lengths) : Math.min(...lengths)
+    return Array.from({ length }, (_unused, index) =>
+      (arrays as unknown[][]).map((array, arrayIndex) =>
+        index < array.length ? array[index] : (defaults[arrayIndex] ?? null)))
+  },
+
+  // The N-family: one shared shape, four selections. `n` and `input` are both
+  // expressions, and `input` must resolve to an array (missing and null are
+  // null, as everywhere else). $maxN/$minN SKIP null and missing elements;
+  // $firstN/$lastN keep them, which is the difference the oracle settled.
+  $firstN: (raw, ctx) => takeN('$firstN', raw, ctx, (list, n) => list.slice(0, n)),
+  $lastN: (raw, ctx) => takeN('$lastN', raw, ctx, (list, n) => n >= list.length ? list : list.slice(list.length - n)),
+  $maxN: (raw, ctx) => takeN('$maxN', raw, ctx, (list, n) =>
+    list.filter(value => !isNullish(value)).toSorted((a, b) => compareBson(b, a)).slice(0, n)),
+  $minN: (raw, ctx) => takeN('$minN', raw, ctx, (list, n) =>
+    list.filter(value => !isNullish(value)).toSorted(compareBson).slice(0, n)),
 
   $range: (raw, ctx) => {
     const [start, end, step] = args('$range', raw, ctx, 2, 3)
@@ -604,17 +924,46 @@ const OPERATORS: Record<string, Operator> = {
   $toInt: (raw, ctx) => toNumber('$toInt', args('$toInt', raw, ctx, 1)[0], true),
   $toDouble: (raw, ctx) => toNumber('$toDouble', args('$toDouble', raw, ctx, 1)[0], false),
 
-  $toDate: (raw, ctx) => {
-    const value = args('$toDate', raw, ctx, 1)[0]
-    if (isNullish(value)) return null
-    if (value instanceof Date) return value
-    if (typeof value === 'number') return new Date(value)
-    if (typeof value === 'string') {
-      const date = new Date(value)
-      if (Number.isNaN(date.getTime())) throw Error(`$toDate could not parse the string: ${value}`)
-      return date
+  $toDate: (raw, ctx) => toDate('$toDate', args('$toDate', raw, ctx, 1)[0]),
+
+  /**
+   * The general form of the `$toX` operators, plus `onError` and `onNull`.
+   *
+   * `to` is a type NAME or a BSON type code. The targets this library can
+   * produce are the ones its storage layer can hold; `decimal`, `objectId` and
+   * the rest are valid names that raise (or answer with `onError`) rather than
+   * silently producing something else. `long` is accepted and yields an
+   * ordinary JavaScript number, which loses precision past 2^53 - MongoDB's
+   * would not.
+   */
+  $convert: (raw, ctx) => {
+    const spec = options('$convert', raw, ['input', 'to', 'onError', 'onNull', 'format'])
+    if (spec.format !== undefined) throw Error('the format option to $convert is not supported')
+    for (const key of ['input', 'to']) {
+      if (!Object.hasOwn(spec, key)) throw Error(`$convert requires '${key}'`)
     }
-    throw Error(`$toDate cannot convert a value of type ${typeName(value)}`)
+    const input = evaluate(spec.input, ctx)
+    if (isNullish(input)) return Object.hasOwn(spec, 'onNull') ? evaluate(spec.onNull, ctx) : null
+    const to = convertTarget(evaluate(spec.to, ctx))
+    try {
+      return convertValue(to, input)
+    } catch (error) {
+      if (!Object.hasOwn(spec, 'onError')) throw error
+      return evaluate(spec.onError, ctx)
+    }
+  },
+
+  // --- Miscellaneous ------------------------------------------------------
+
+  /**
+   * A float in [0, 1). It takes no arguments and is the one operator here whose
+   * answer changes between two runs of the same pipeline - which is what makes
+   * it useful for sampling and useless for an equality assertion.
+   */
+  $rand: (raw) => {
+    const spec = options('$rand', raw, [])
+    if (Object.keys(spec).length !== 0) throw Error('$rand takes no arguments')
+    return Math.random()
   }
 }
 
@@ -725,6 +1074,204 @@ function stringOrEmpty (name: string, value: unknown): string {
   return isNullish(value) ? '' : asString(name, value)
 }
 
+function asDocument (name: string, value: unknown): Document {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || value instanceof Date) {
+    throw Error(`${name} only supports objects, but got ${typeName(value)}`)
+  }
+  return value as Document
+}
+
+/** `Math.log`-family guard: MongoDB raises on a non-positive argument. */
+function positiveLog (name: string, value: number, compute: (value: number) => number): number {
+  if (value <= 0) throw Error(`${name}'s argument must be a positive number, but is ${value}`)
+  return compute(value)
+}
+
+/**
+ * One trigonometric operator: numeric, null-propagating, and NaN means the
+ * argument was outside the function's domain (`$acos` of 2, `$acosh` of 0),
+ * which MongoDB reports as an error rather than as a NaN in the result.
+ */
+function trigonometry (name: string, compute: (value: number) => number): Operator {
+  return (raw, ctx) => arithmetic(name, args(name, raw, ctx, 1), ([value]) => {
+    const result = compute(value!)
+    if (Number.isNaN(result)) throw Error(`${name} cannot take ${value!}: it is outside the operator's domain`)
+    return result
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Strings, measured in UTF-8 bytes
+// ---------------------------------------------------------------------------
+
+const UTF8_ENCODER = new TextEncoder()
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true })
+
+function utf8 (name: string, value: unknown): Uint8Array {
+  return UTF8_ENCODER.encode(asString(name, value))
+}
+
+/** True for a byte that continues a multi-byte character rather than starting one. */
+function isContinuation (bytes: Uint8Array, index: number): boolean {
+  return index < bytes.length && (bytes[index]! & 0b1100_0000) === 0b1000_0000
+}
+
+/**
+ * `$substrBytes` / `$substr`.
+ *
+ * The indexes are BYTE offsets into the UTF-8 encoding, so a range that would
+ * split a character is an error rather than a string with a replacement
+ * character in it - which is what MongoDB does, and what makes the operator
+ * safe to use at all.
+ */
+function substrBytes (name: string, raw: unknown, ctx: EvalContext): unknown {
+  const [value, start, length] = args(name, raw, ctx, 3)
+  if (isNullish(value)) return ''
+  const bytes = utf8(name, value)
+  const from = wholeNumber(name, start)
+  const count = wholeNumber(name, length)
+  if (from < 0) throw Error(`${name}: starting index must be non-negative`)
+  // A negative length means "to the end", as it does on the server.
+  const to = count < 0 ? bytes.length : Math.min(from + count, bytes.length)
+  if (isContinuation(bytes, from)) throw Error(`${name}: invalid range, starting index is in the middle of a UTF-8 character`)
+  if (isContinuation(bytes, to)) throw Error(`${name}: invalid range, ending index is in the middle of a UTF-8 character`)
+  if (from >= bytes.length) return ''
+  return UTF8_DECODER.decode(bytes.slice(from, to))
+}
+
+// ---------------------------------------------------------------------------
+// Regular expressions
+// ---------------------------------------------------------------------------
+
+/** The `{ input, regex, options }` the `$regex*` operators share. */
+function regexArgs (name: string, raw: unknown, ctx: EvalContext): { input: string | null, regex: RegExp } {
+  const spec = options(name, raw, ['input', 'regex', 'options'])
+  if (!Object.hasOwn(spec, 'input')) throw Error(`${name} requires 'input'`)
+  if (!Object.hasOwn(spec, 'regex')) throw Error(`${name} requires 'regex'`)
+  const value = evaluate(spec.input, ctx)
+  const regex = toRegExp(evaluate(spec.regex, ctx), spec.options === undefined ? undefined : evaluate(spec.options, ctx), {
+    operator: name, optionsKey: `${name}'s 'options'`
+  })
+  // Missing and null input answer "no match" rather than raising - a wrong TYPE
+  // still does, which is the rule the whole module follows.
+  return { input: isNullish(value) ? null : asString(name, value), regex }
+}
+
+/** How many CODE POINTS a string holds - not the UTF-16 units `.length` counts. */
+function codePointLength (text: string): number {
+  let count = 0
+  for (const _character of text) count++
+  return count
+}
+
+/** MongoDB's `{ match, idx, captures }`, with `idx` counted in CODE POINTS. */
+function regexMatchDocument (match: RegExpExecArray | null, input: string): Document | null {
+  if (match === null) return null
+  return {
+    match: match[0],
+    idx: codePointLength(input.slice(0, match.index)),
+    // A group that did not participate is null, not missing.
+    captures: match.slice(1).map(capture => capture ?? null)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Objects and sets
+// ---------------------------------------------------------------------------
+
+/** The `{ field, input }` shape `$getField`/`$setField`/`$unsetField` share. */
+function fieldTarget (
+  name: string, raw: unknown, ctx: EvalContext, known: string[]
+): { field: string, input: unknown, spec: Record<string, unknown> } {
+  // `{ $getField: 'name' }` is shorthand for reading it out of $$CURRENT.
+  if (typeof raw === 'string' || (raw !== null && typeof raw === 'object' && !Array.isArray(raw) &&
+    !Object.keys(raw).some(key => known.includes(key)))) {
+    if (name !== '$getField') throw Error(`${name} requires a document with ${known.map(k => `'${k}'`).join(', ')}`)
+    return { field: asString(name, evaluate(raw, ctx)), input: ctx.root, spec: {} }
+  }
+  const spec = options(name, raw, known)
+  for (const key of known) {
+    if (!Object.hasOwn(spec, key)) throw Error(`${name} requires '${key}'`)
+  }
+  return { field: asString(name, evaluate(spec.field, ctx)), input: evaluate(spec.input, ctx), spec }
+}
+
+/**
+ * The argument arrays of a set operator.
+ *
+ * Returns null (rather than the arrays) when any argument is null or missing
+ * and the operator propagates that - `$setUnion`, `$setIntersection` and
+ * `$setDifference` do; `$setEquals`, `$setIsSubset` and the two
+ * `$*ElementsTrue` operators raise instead, as MongoDB does.
+ */
+function setArgs (
+  name: string, raw: unknown, ctx: EvalContext, min = 1, max = Infinity, nullable = true
+): unknown[][] | null {
+  const values = variadic(raw, ctx)
+  if (values.length < min || values.length > max) {
+    throw Error(max === min
+      ? `${name} takes exactly ${min} argument${min === 1 ? '' : 's'}, but ${values.length} were given`
+      : `${name} needs at least ${min} arguments, but ${values.length} were given`)
+  }
+  if (nullable && values.some(isNullish)) return null
+  return values.map(value => asArray(name, value))
+}
+
+function dedupe (values: unknown[]): unknown[] {
+  const unique: unknown[] = []
+  for (const value of values) {
+    if (!unique.some(existing => equalsBson(existing, value))) unique.push(value)
+  }
+  return unique
+}
+
+// ---------------------------------------------------------------------------
+// Vectors
+// ---------------------------------------------------------------------------
+
+function dot (a: number[], b: number[]): number {
+  return a.reduce((sum, value, index) => sum + value * b[index]!, 0)
+}
+
+/** Two equal-length arrays of numbers, and the arithmetic over them. */
+function similarity (
+  name: string, raw: unknown, ctx: EvalContext, compute: (a: number[], b: number[]) => number
+): unknown {
+  const [left, right] = args(name, raw, ctx, 2)
+  if (isNullish(left) || isNullish(right)) return null
+  const a = asArray(name, left).map(value => asNumber(name, value))
+  const b = asArray(name, right).map(value => asNumber(name, value))
+  if (a.length !== b.length) {
+    throw Error(`array arguments to ${name} must be of the same length, but are ${a.length} and ${b.length}`)
+  }
+  if (a.length === 0) throw Error(`${name} requires non-empty vectors`)
+  return compute(a, b)
+}
+
+// ---------------------------------------------------------------------------
+// The N-family
+// ---------------------------------------------------------------------------
+
+/** `n` as MongoDB validates it: a whole number greater than zero. */
+export function assertPositiveN (name: string, value: unknown): number {
+  const n = wholeNumber(name, value)
+  if (n <= 0) throw Error(`the 'n' given to ${name} must be greater than 0, found ${n}`)
+  return n
+}
+
+function takeN (
+  name: string, raw: unknown, ctx: EvalContext, select: (list: unknown[], n: number) => unknown[]
+): unknown {
+  const spec = options(name, raw, ['input', 'n'])
+  for (const key of ['input', 'n']) {
+    if (!Object.hasOwn(spec, key)) throw Error(`${name} requires '${key}'`)
+  }
+  const n = assertPositiveN(name, evaluate(spec.n, ctx))
+  const input = evaluate(spec.input, ctx)
+  if (isNullish(input)) return null
+  return select(asArray(name, input), n)
+}
+
 function wholeNumber (name: string, value: unknown): number {
   const number = asNumber(name, value)
   if (!Number.isInteger(number)) throw Error(`${name} requires whole numbers, but got ${number}`)
@@ -772,7 +1319,7 @@ function replace (name: string, raw: unknown, ctx: EvalContext, all: boolean): u
  * fails, so `'2.5'` is an error rather than 2. Overflowing int32 is an error
  * too - MongoDB has a 32-bit int and this is the point where that shows.
  */
-function toNumber (name: string, value: unknown, whole: boolean): unknown {
+function toNumber (name: string, value: unknown, whole: boolean, int32 = true): unknown {
   if (isNullish(value)) return null
   let number: number
   let fromString = false
@@ -790,11 +1337,79 @@ function toNumber (name: string, value: unknown, whole: boolean): unknown {
     throw Error(`${name} could not convert the string: ${String(value)}`)
   }
   const truncated = Math.trunc(number)
-  if (truncated < -2147483648 || truncated > 2147483647) {
+  if (int32 && (truncated < -2147483648 || truncated > 2147483647)) {
     throw Error(`${name} would overflow a 32-bit integer: ${number}`)
   }
   return truncated
 }
+
+/**
+ * `$toDate`, and `$convert`'s date target.
+ *
+ * A 32-bit INT is refused where a double or a long is accepted, which is
+ * MongoDB's rule and is easy to mistake for a bug: `{ $toDate: 0 }` raises and
+ * `{ $toDate: 1600000000000 }` does not. This library tells the two apart the
+ * same way `$type` does - an integral number in int32 range serialises as an
+ * int, anything else as a double - so the same values raise here and there.
+ */
+function toDate (name: string, value: unknown): unknown {
+  if (isNullish(value)) return null
+  if (value instanceof Date) return value
+  if (typeof value === 'number') {
+    if (typeName(value) === 'int') throw Error(`unsupported conversion from int to date in ${name}`)
+    return new Date(value)
+  }
+  if (typeof value === 'string') {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) throw Error(`${name} could not parse the string: ${value}`)
+    return date
+  }
+  throw Error(`${name} cannot convert a value of type ${typeName(value)}`)
+}
+
+/** BSON type codes accepted by `$convert`'s `to`, mapped to their names. */
+const CONVERT_TARGET_BY_CODE: Record<number, string> = {
+  1: 'double', 2: 'string', 5: 'binData', 7: 'objectId', 8: 'bool', 9: 'date', 16: 'int', 18: 'long', 19: 'decimal'
+}
+
+/**
+ * Targets this library can produce. The rest are valid MongoDB type names that
+ * the storage layer has no value for, so they raise (or answer with `onError`)
+ * rather than quietly producing something of a different type - the same stance
+ * `$type` takes for the aliases it can never match.
+ */
+const CONVERT_TARGETS = new Set(['double', 'int', 'long', 'bool', 'string', 'date'])
+
+function convertTarget (to: unknown): string {
+  if (typeof to === 'number') {
+    const name = CONVERT_TARGET_BY_CODE[to]
+    if (name === undefined) throw Error(`unknown type code in $convert: ${to}`)
+    return name
+  }
+  if (typeof to !== 'string') throw Error('$convert requires a type name or a BSON type code for `to`')
+  return to
+}
+
+function convertValue (to: string, input: unknown): unknown {
+  switch (to) {
+    case 'string': return OPERATORS.$toString!({ $literal: input }, EMPTY_CONTEXT)
+    case 'bool': return OPERATORS.$toBool!({ $literal: input }, EMPTY_CONTEXT)
+    case 'double': return toNumber('$convert', input, false)
+    case 'int': return toNumber('$convert', input, true)
+    // MongoDB's long is 64-bit; this one is a JavaScript number, so it does not
+    // have to fit int32 but it does lose precision past 2^53.
+    case 'long': return toNumber('$convert', input, true, false)
+    case 'date': return toDate('$convert', input)
+    default:
+      if (!CONVERT_TARGETS.has(to) && !Object.values(CONVERT_TARGET_BY_CODE).includes(to)) {
+        throw Error(`unknown type name in $convert: ${to}`)
+      }
+      throw Error(`$convert cannot produce a '${to}': this library's storage layer has no such type`)
+  }
+}
+
+/** For the two `$convert` targets that reuse an operator body over a literal. */
+const EMPTY_CONTEXT: EvalContext = { root: {}, vars: {}, strict: false }
 
 const UTC_ONLY = (name: string): string =>
   `the timezone option to ${name} is not supported: dates are handled in UTC here, and answering a ` +

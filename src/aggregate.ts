@@ -21,14 +21,14 @@
 
 import { compareBson, equalsBson } from './bson-order.js'
 import { encodeValue } from './ejson.js'
-import { evaluateExpression, pathValue } from './expression.js'
+import { assertPositiveN, evaluateExpression, pathValue } from './expression.js'
 import type { Document, SortSpecification } from './types.js'
 import { compileProjection, type ProjectionSpec } from './projection.js'
 
 /** The stages this library implements. Anything else is rejected by name. */
 const SUPPORTED_STAGES = [
   '$match', '$sort', '$limit', '$skip', '$count', '$group', '$project', '$unwind', '$addFields',
-  '$set', '$lookup'
+  '$set', '$unset', '$sortByCount', '$lookup'
 ]
 
 /** Stages that can be pushed into SQL, in the order SQL applies them. */
@@ -187,7 +187,94 @@ interface Accumulator {
 
 type AccumulatorFactory = () => Accumulator
 
-const ACCUMULATORS = ['$sum', '$avg', '$min', '$max', '$first', '$last', '$push', '$addToSet', '$count']
+const ACCUMULATORS = [
+  '$sum', '$avg', '$min', '$max', '$first', '$last', '$push', '$addToSet', '$count',
+  '$stdDevPop', '$stdDevSamp', '$mergeObjects',
+  '$firstN', '$lastN', '$maxN', '$minN', '$top', '$topN', '$bottom', '$bottomN'
+]
+
+/** The N-family accumulators, which all take `{ n, input }`. */
+const N_ACCUMULATORS = new Set(['$firstN', '$lastN', '$maxN', '$minN'])
+
+/** The positional accumulators, which all take `{ sortBy, output }` and sometimes `n`. */
+const POSITION_ACCUMULATORS = new Set(['$top', '$topN', '$bottom', '$bottomN'])
+
+/**
+ * The `{ n, input }` an N-family accumulator takes.
+ *
+ * `n` is evaluated ONCE, against an empty document, so it must be a constant.
+ * MongoDB additionally allows an expression over the group key; that would mean
+ * building the accumulator after the key is known, which the factory shape here
+ * does not do - and a `n` naming a field raises rather than answering.
+ */
+function nSpec (name: string, argument: unknown): { n: number, input: unknown } {
+  if (argument === null || typeof argument !== 'object' || Array.isArray(argument)) {
+    throw Error(`${name} requires a document with 'n' and 'input'`)
+  }
+  const { n, input, ...rest } = argument as Document
+  const unknown = Object.keys(rest)[0]
+  if (unknown !== undefined) throw Error(`unrecognized option to ${name}: ${unknown}`)
+  if (input === undefined) throw Error(`${name} requires 'input'`)
+  return { n: assertPositiveN(name, evaluateExpression(n, {})), input }
+}
+
+/** The `{ sortBy, output, n? }` a `$top`/`$bottom` accumulator takes. */
+function positionSpec (name: string, argument: unknown): { n: number, sortBy: Array<[string, 1 | -1]>, output: unknown } {
+  if (argument === null || typeof argument !== 'object' || Array.isArray(argument)) {
+    throw Error(`${name} requires a document with 'sortBy' and 'output'`)
+  }
+  const { n, sortBy, output, ...rest } = argument as Document
+  const unknown = Object.keys(rest)[0]
+  if (unknown !== undefined) throw Error(`unrecognized option to ${name}: ${unknown}`)
+  if (output === undefined) throw Error(`${name} requires 'output'`)
+  const single = name === '$top' || name === '$bottom'
+  if (single && n !== undefined) throw Error(`${name} does not take an 'n'; use ${name}N`)
+  return {
+    n: single ? 1 : assertPositiveN(name, evaluateExpression(n, {})),
+    sortBy: Object.entries(assertSortSpec(sortBy)) as Array<[string, 1 | -1]>,
+    output
+  }
+}
+
+/** Orders documents by a `$sort`-shaped specification, in BSON order. */
+function bySortSpec (sortBy: Array<[string, 1 | -1]>, strict: boolean): (a: Document, b: Document) => number {
+  return (a, b) => {
+    for (const [field, direction] of sortBy) {
+      const comparison = compareBson(pathValue(a, field, strict), pathValue(b, field, strict))
+      if (comparison !== 0) return direction === 1 ? comparison : -comparison
+    }
+    return 0
+  }
+}
+
+/**
+ * `$stdDevPop` / `$stdDevSamp`, by Welford's method.
+ *
+ * Non-numeric and missing values are ignored, as they are for `$sum` and
+ * `$avg`. The population form of a single value is 0; the sample form needs
+ * two, and is null below that - both verified against the server.
+ */
+function standardDeviation (argument: unknown, strict: boolean, sample: boolean): AccumulatorFactory {
+  return () => {
+    let count = 0
+    let mean = 0
+    let sumOfSquares = 0
+    return {
+      step: doc => {
+        const value = evaluateExpression(argument, doc, strict)
+        if (typeof value !== 'number' || !Number.isFinite(value)) return
+        count++
+        const delta = value - mean
+        mean += delta / count
+        sumOfSquares += delta * (value - mean)
+      },
+      value: () => {
+        if (count === 0 || (sample && count < 2)) return null
+        return Math.sqrt(sumOfSquares / (sample ? count - 1 : count))
+      }
+    }
+  }
+}
 
 function accumulatorFor (field: string, spec: unknown, strict: boolean): AccumulatorFactory {
   if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
@@ -202,11 +289,82 @@ function accumulatorFor (field: string, spec: unknown, strict: boolean): Accumul
     throw Error(`unsupported accumulator: ${name} (supported: ${ACCUMULATORS.join(', ')})`)
   }
 
+  if (N_ACCUMULATORS.has(name)) {
+    const { n, input } = nSpec(name, argument)
+    return () => {
+      const values: unknown[] = []
+      return {
+        step: doc => {
+          const value = evaluateExpression(input, doc, strict)
+          // $maxN/$minN SKIP null and missing; $firstN/$lastN count a missing
+          // field as null and keep it. Verified against the server.
+          if ((name === '$maxN' || name === '$minN') && (value === undefined || value === null)) return
+          values.push(value ?? null)
+          // $firstN never needs more than n, and $lastN never needs the ones
+          // that have already fallen off the end.
+          if (name === '$firstN' && values.length > n) values.pop()
+          if (name === '$lastN' && values.length > n) values.shift()
+        },
+        value: () => {
+          if (name === '$firstN' || name === '$lastN') return values
+          const ordered = values.toSorted(name === '$maxN' ? (a, b) => compareBson(b, a) : compareBson)
+          return ordered.slice(0, n)
+        }
+      }
+    }
+  }
+
+  if (POSITION_ACCUMULATORS.has(name)) {
+    const { n, sortBy, output } = positionSpec(name, argument)
+    const compare = bySortSpec(sortBy, strict)
+    const fromTop = name === '$top' || name === '$topN'
+    return () => {
+      // (sort key, output) pairs rather than whole documents: the output
+      // expression is evaluated as each document goes past, so nothing has to
+      // hold on to the source documents once the group has been read.
+      const rows: Array<{ keys: Document, value: unknown }> = []
+      return {
+        step: doc => {
+          const keys: Document = {}
+          for (const [sortField] of sortBy) setPath(keys, sortField, pathValue(doc, sortField, strict))
+          rows.push({ keys, value: evaluateExpression(output, doc, strict) ?? null })
+        },
+        value: () => {
+          // A stable sort, so documents with equal keys keep the order they
+          // arrived in - which is what makes $top deterministic here.
+          const ordered = rows.toSorted((a, b) => compare(a.keys, b.keys))
+          const taken = fromTop ? ordered.slice(0, n) : ordered.slice(Math.max(ordered.length - n, 0))
+          const values = taken.map(row => row.value)
+          return name === '$top' || name === '$bottom' ? (values[0] ?? null) : values
+        }
+      }
+    }
+  }
+
   switch (name) {
     case '$count':
       return () => {
         let count = 0
         return { step: () => { count++ }, value: () => count }
+      }
+    case '$stdDevPop':
+      return standardDeviation(argument, strict, false)
+    case '$stdDevSamp':
+      return standardDeviation(argument, strict, true)
+    case '$mergeObjects':
+      return () => {
+        const merged: Document = {}
+        return {
+          step: doc => {
+            const value = evaluateExpression(argument, doc, strict)
+            if (value === undefined || value === null) return
+            if (typeof value !== 'object' || Array.isArray(value) || value instanceof Date) {
+              throw Error('$mergeObjects only supports objects')
+            }
+            Object.assign(merged, value)
+          },
+          value: () => merged
+        }
       }
     case '$sum':
       return () => {
@@ -386,6 +544,32 @@ export function compileStages (
           })
           yield * docs
         }
+      }
+      case '$sortByCount': {
+        // Exactly `$group` by the expression plus `$sort` by the count,
+        // descending - which is how the manual defines it, so it is composed
+        // from the two stages rather than reimplemented. MongoDB does not
+        // specify the order of groups with EQUAL counts; this one keeps the
+        // order they were first seen in.
+        const group = compileGroup({ _id: value, count: { $sum: 1 } }, strict)
+        return async function * (input) {
+          const docs: Document[] = []
+          for await (const doc of group(input)) docs.push(doc)
+          yield * docs.toSorted((a, b) => compareBson(b.count, a.count))
+        }
+      }
+      case '$unset': {
+        // The alias of a `$project` exclusion, and compiled as one.
+        const fields = typeof value === 'string' ? [value] : value
+        if (!Array.isArray(fields) || fields.length === 0) {
+          throw Error('$unset requires a field name or a non-empty array of field names')
+        }
+        const spec: Document = {}
+        for (const unset of fields) {
+          if (typeof unset !== 'string' || unset === '') throw Error('$unset field names must be non-empty strings')
+          spec[unset] = 0
+        }
+        return compileProject('$project', spec, strict)
       }
       case '$lookup':
         return compileLookup(value, readForeign, strict)

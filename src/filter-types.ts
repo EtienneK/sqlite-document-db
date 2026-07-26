@@ -131,6 +131,10 @@ export interface RootFilterOperators<TSchema> {
    * would promise more than it checks.
    */
   $expr?: Document
+  /** A note for whoever reads the query log. It selects nothing. */
+  $comment?: unknown
+  /** Keep each document with this probability, from 0 to 1. */
+  $sampleRate?: number
 }
 
 /**
@@ -220,6 +224,16 @@ export type PositionalPaths<TSchema> =
       ? A extends string ? `${A}.${PositionalSegment}` | `${A}.${PositionalSegment}.${string}` : never
       : never
 
+/**
+ * A `$bit` operand: at least one of the three operations, applied in the order
+ * they are written. Spelled as a union so `{}` does not compile - MongoDB
+ * rejects an empty one too.
+ */
+export type BitOperation =
+  | { and: number, or?: number, xor?: number }
+  | { or: number, and?: number, xor?: number }
+  | { xor: number, and?: number, or?: number }
+
 /** An `$addToSet` operand: one element, or `$each` with several. */
 export type AddToSetOperand<T> = T | { $each: readonly T[] }
 
@@ -246,6 +260,14 @@ export type UpdateFilter<TSchema = Document> =
       $min?: MatchKeysAndValues<Omit<TSchema, '_id'>>
       $max?: MatchKeysAndValues<Omit<TSchema, '_id'>>
       $rename?: { [P in Paths<Omit<TSchema, '_id'>>]?: string }
+      /** Sets the field to the current time. `{ $type: 'timestamp' }` is refused. */
+      $currentDate?: {
+        [P in Paths<Omit<TSchema, '_id'>> | PositionalPaths<Omit<TSchema, '_id'>>]?: boolean | { $type: 'date' }
+      }
+      /** Bitwise AND/OR/XOR against a whole-number field. */
+      $bit?: {
+        [P in NumericPaths<Omit<TSchema, '_id'>> | PositionalPaths<Omit<TSchema, '_id'>>]?: BitOperation
+      }
       $push?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: PushOperand<ElementOf<TSchema, P>> }
       $addToSet?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: AddToSetOperand<ElementOf<TSchema, P>> }
       $pop?: { [P in ArrayPaths<Omit<TSchema, '_id'>>]?: 1 | -1 }

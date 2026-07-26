@@ -31,19 +31,19 @@ export { DUPLICATE_KEY_ERROR, MongoServerError } from './errors.js'
 export type { PartialWriteResult } from './errors.js'
 export type { ProjectionSpec } from './projection.js'
 export type {
-  AddToSetOperand, ArrayPaths, BsonTypeAlias, Condition, Filter, FilterOperators,
+  AddToSetOperand, ArrayPaths, BitOperation, BsonTypeAlias, Condition, Filter, FilterOperators,
   InferIdType, Paths, PathValue, PositionalPaths, PullOperand, PushOperand, UpdateFilter
 } from './filter-types.js'
 export type {
   AggregateOptions, AggregationCursor, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult,
-  CollectionInfo, CountOptions, CreateCollectionOptions, CreateIndexOptions, DbOptions,
-  DeleteOptions, DeleteResult, DistinctOptions, Document, DropCollectionOptions,
+  CollectionInfo, CountOptions, CreateCollectionOptions, CreateIndexOptions, Cursor, DbOptions,
+  DbStats, DbStatsOptions, DeleteOptions, DeleteResult, DistinctOptions, Document, DropCollectionOptions,
   DropDatabaseOptions, DropIndexOptions, EstimatedDocumentCountOptions, FindCursor,
   FindOneAndDeleteOptions, FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions,
-  IndexDescription, IndexDirection, IndexSpecification, InsertManyOptions, InsertManyResult,
-  InsertOneOptions, InsertOneResult, ListCollectionsOptions, ListIndexesOptions,
-  PipelineExplanation, ReplaceOptions, SessionOption, SortSpecification, UpdateOptions,
-  UpdateResult, WithId, WithoutId
+  Hint, IndexDescription, IndexDescriptionInput, IndexDirection, IndexSpecification,
+  InsertManyOptions, InsertManyResult, InsertOneOptions, InsertOneResult, ListCollectionsOptions,
+  ListIndexesOptions, PipelineExplanation, QueryExplanation, RenameOptions, ReplaceOptions,
+  SessionOption, SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
 } from './types.js'
 
 export default Db

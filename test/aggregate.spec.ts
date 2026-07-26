@@ -265,6 +265,147 @@ describe('Aggregation pipeline', () => {
         })
       })
 
+      /**
+       * BACKLOG item 28: the accumulators the manual lists and this library
+       * did not have. The oracle settles two rules here that no name implies -
+       * that `$firstN` counts a missing field as null while `$maxN` skips it,
+       * and that `$stdDevSamp` needs two values where `$stdDevPop` needs one.
+       */
+      describe('the accumulator sweep', () => {
+        it('should compute standard deviations, population and sample', async () => {
+          const result = await run([
+            { $group: { _id: '$cust', pop: { $stdDevPop: '$qty' }, samp: { $stdDevSamp: '$qty' } } },
+            { $sort: { _id: 1 } }
+          ])
+          expect(result).toStrictEqual([
+            { _id: 'ann', pop: 1, samp: Math.sqrt(2) },
+            { _id: 'bob', pop: 1.5, samp: Math.sqrt(4.5) },
+            // One value: the population deviation is 0 and the sample one does
+            // not exist.
+            { _id: 'cid', pop: 0, samp: null }
+          ])
+        })
+
+        it('should ignore non-numeric values, and answer null when there are none', async () => {
+          const result = await run([{ $group: { _id: null, pop: { $stdDevPop: '$item' } } }])
+          expect(result).toStrictEqual([{ _id: null, pop: null }])
+        })
+
+        it('should merge documents across a group', async () => {
+          const result = await run([
+            { $group: { _id: '$cust', merged: { $mergeObjects: '$size' } } },
+            { $sort: { _id: 1 } }
+          ])
+          expect(result).toStrictEqual([
+            { _id: 'ann', merged: { uom: 'cm' } },
+            { _id: 'bob', merged: { uom: 'cm' } },
+            { _id: 'cid', merged: { uom: 'in' } }
+          ])
+        })
+
+        it('should take the first, last, largest and smallest n', async () => {
+          const result = await run([
+            { $sort: { _id: 1 } },
+            {
+              $group: {
+                _id: '$cust',
+                first: { $firstN: { n: 2, input: '$qty' } },
+                last: { $lastN: { n: 2, input: '$qty' } },
+                max: { $maxN: { n: 2, input: '$qty' } },
+                min: { $minN: { n: 2, input: '$qty' } }
+              }
+            },
+            { $sort: { _id: 1 } }
+          ])
+          expect(result).toStrictEqual([
+            { _id: 'ann', first: [3, 1], last: [3, 1], max: [3, 1], min: [1, 3] },
+            { _id: 'bob', first: [5, 2], last: [5, 2], max: [5, 2], min: [2, 5] },
+            { _id: 'cid', first: [9], last: [9], max: [9], min: [9] }
+          ])
+        })
+
+        it('should count a missing field as null in $firstN and skip it in $maxN', async () => {
+          const result = await run([
+            { $sort: { _id: 1 } },
+            {
+              $group: {
+                _id: null,
+                // `tags` is absent from one document, which is the case that
+                // tells the two families apart.
+                first: { $firstN: { n: 5, input: '$tags' } },
+                absentFirst: { $firstN: { n: 3, input: '$nothingHere' } },
+                absentMax: { $maxN: { n: 3, input: '$nothingHere' } }
+              }
+            }
+          ])
+          expect(result[0].first).toStrictEqual([['x', 'y'], ['y'], [], null, ['z', 'x']])
+          expect(result[0].absentFirst).toStrictEqual([null, null, null])
+          expect(result[0].absentMax).toStrictEqual([])
+        })
+
+        it('should take the top and bottom of a group by a sort order', async () => {
+          const result = await run([
+            {
+              $group: {
+                _id: '$cust',
+                dearest: { $top: { sortBy: { price: -1 }, output: '$item' } },
+                cheapest: { $bottom: { sortBy: { price: -1 }, output: '$item' } },
+                twoBiggest: { $topN: { n: 2, sortBy: { qty: -1 }, output: ['$item', '$qty'] } },
+                twoSmallest: { $bottomN: { n: 2, sortBy: { qty: -1 }, output: '$qty' } }
+              }
+            },
+            { $sort: { _id: 1 } }
+          ])
+          expect(result).toStrictEqual([
+            { _id: 'ann', dearest: 'abc', cheapest: 'abc', twoBiggest: [['abc', 3], ['abc', 1]], twoSmallest: [3, 1] },
+            { _id: 'bob', dearest: 'xyz', cheapest: 'jkl', twoBiggest: [['jkl', 5], ['xyz', 2]], twoSmallest: [5, 2] },
+            { _id: 'cid', dearest: 'xyz', cheapest: 'xyz', twoBiggest: [['xyz', 9]], twoSmallest: [9] }
+          ])
+        })
+
+        it('should reject an n that is not a positive whole number', async () => {
+          await expect(run([{ $group: { _id: null, v: { $firstN: { n: 0, input: '$qty' } } } }])).rejects.toThrow()
+          await expect(run([{ $group: { _id: null, v: { $topN: { sortBy: { qty: 1 }, output: '$qty' } } } }]))
+            .rejects.toThrow()
+        })
+      })
+
+      /** BACKLOG item 28: the two stages that are aliases of stages we have. */
+      describe('$unset and $sortByCount', () => {
+        it('$unset should remove one field or several', async () => {
+          expect(await run([{ $match: { _id: 1 } }, { $unset: 'tags' }]))
+            .toStrictEqual([{ _id: 1, cust: 'ann', item: 'abc', qty: 3, price: 10, at: orders[0]!.at, size: { uom: 'cm' } }])
+          expect(await run([{ $match: { _id: 1 } }, { $unset: ['tags', 'at', 'size', 'price'] }]))
+            .toStrictEqual([{ _id: 1, cust: 'ann', item: 'abc', qty: 3 }])
+        })
+
+        it('$unset should be able to drop _id, which $project-exclusion also allows', async () => {
+          expect(await run([{ $match: { _id: 1 } }, { $unset: ['_id', 'tags', 'at', 'size', 'price', 'cust'] }]))
+            .toStrictEqual([{ item: 'abc', qty: 3 }])
+        })
+
+        it('$unset should reach into a nested field by path', async () => {
+          expect(await run([{ $match: { _id: 1 } }, { $unset: ['size.uom', 'tags', 'at', 'price'] }]))
+            .toStrictEqual([{ _id: 1, cust: 'ann', item: 'abc', qty: 3, size: {} }])
+        })
+
+        it('$sortByCount should group and order by frequency', async () => {
+          // A second sort key, because MongoDB does not specify the order of
+          // groups with EQUAL counts and `abc` and `xyz` both appear twice.
+          expect(await run([{ $sortByCount: '$item' }, { $sort: { count: -1, _id: 1 } }])).toStrictEqual([
+            { _id: 'abc', count: 2 },
+            { _id: 'xyz', count: 2 },
+            { _id: 'jkl', count: 1 }
+          ])
+          expect((await run([{ $sortByCount: '$cust' }])).map(d => d.count)).toStrictEqual([2, 2, 1])
+        })
+
+        it('$sortByCount should take an expression, not only a field path', async () => {
+          expect(await run([{ $sortByCount: { $toUpper: '$cust' } }, { $sort: { count: -1, _id: 1 } }]))
+            .toStrictEqual([{ _id: 'ANN', count: 2 }, { _id: 'BOB', count: 2 }, { _id: 'CID', count: 1 }])
+        })
+      })
+
       describe('cursor behaviour', () => {
 
         it('should be async-iterable', async () => {

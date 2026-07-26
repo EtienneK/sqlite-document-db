@@ -19,8 +19,8 @@ code the import is just `import Db from 'sqlite-document-db'`.
 | [02-crud.mjs](02-crud.mjs) | Insert, read, update, delete — and what each call reports |
 | [03-query-operators.mjs](03-query-operators.mjs) | Comparison, logical, element and evaluation operators |
 | [04-arrays-and-embedded.mjs](04-arrays-and-embedded.mjs) | Implicit element matching, `$all`, `$size`, `$elemMatch` |
-| [05-indexes.mjs](05-indexes.mjs) | `createIndex` and friends, with a before/after timing on 20k docs |
-| [06-cursors-sort-projection.mjs](06-cursors-sort-projection.mjs) | Streaming, sorting, paging, choosing fields |
+| [05-indexes.mjs](05-indexes.mjs) | `createIndex` and friends with a before/after timing on 20k docs, `sparse`/partial indexes, `hint`, and `find().explain()` |
+| [06-cursors-sort-projection.mjs](06-cursors-sort-projection.mjs) | Streaming, sorting, paging, choosing fields, and `hasNext`/`map`/`rewind`/`count` |
 | [07-dates.mjs](07-dates.mjs) | Storing and querying `Date`, and what gets rejected |
 | [08-upsert-and-find-modify.mjs](08-upsert-and-find-modify.mjs) | `upsert`, `$setOnInsert`, `findOneAndUpdate`/`Replace`/`Delete` |
 | [09-errors.mjs](09-errors.mjs) | Duplicate keys (`11000`), and the mistakes that are refused |

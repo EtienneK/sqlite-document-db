@@ -1,5 +1,6 @@
 import { encodeValue } from './ejson.js'
 import { assertKnownExpressionOperators } from './expression.js'
+import { toRegExp as compileRegExp } from './regex.js'
 
 export type QueryFilterDocument = Record<string, any>
 
@@ -17,11 +18,38 @@ export interface SqlBindings {
   n: number
   values: SqlParams
   prefix: string
+  /**
+   * Render values as SQL LITERALS instead of parameters.
+   *
+   * For `CREATE INDEX ... WHERE`, which cannot carry a bound parameter at all -
+   * a partial index's predicate is part of the schema, so there is nothing to
+   * bind it to. It is the one place values are interpolated, and it goes
+   * through `quoteLiteral` (the same escaping paths use) rather than through
+   * ad-hoc string building. Nothing else may set this.
+   */
+  inline?: boolean
+  /**
+   * Set when the compiled predicate used the indexable `rowid IN (...)` form of
+   * implicit array matching. `find()`'s `hint` reads it: `INDEXED BY` has to go
+   * on the table reference the index would actually serve, which is the UNION
+   * arms when there are any and the outer FROM when there are not.
+   */
+  usedRowidUnion?: boolean
 }
 
 /** A fresh parameter registry. `prefix` names the parameters it hands out. */
-export function createBindings (prefix = 'p'): SqlBindings {
-  return { n: 0, values: {}, prefix }
+export function createBindings (prefix = 'p', inline = false): SqlBindings {
+  return { n: 0, values: {}, prefix, ...(inline ? { inline } : {}) }
+}
+
+/** One value as SQL text. Only for `inline` bindings - see the field's comment. */
+function sqlLiteral (value: string | number | null): string {
+  if (value === null) return 'NULL'
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw Error(`cannot use ${String(value)} as a SQL literal`)
+    return String(value)
+  }
+  return quoteLiteral(value)
 }
 
 /**
@@ -44,6 +72,12 @@ interface SqlContext {
   elemMatchDepth?: number
   /** Reject constructs whose answer is known to differ from MongoDB's. */
   strict?: boolean
+  /**
+   * Compiling a `partialFilterExpression` for `CREATE INDEX ... WHERE`, where
+   * SQLite forbids subqueries and user-defined functions. See
+   * `INDEX_FILTER_OPS`.
+   */
+  indexFilter?: boolean
 }
 
 // Only PATHS are ever rendered as string literals. Values go through
@@ -76,13 +110,17 @@ export function quoteIdentifier (name: string): string {
  */
 function bindValue (ctx: SqlContext, value: any): string {
   if (value === undefined) throw Error('cannot use undefined as a query value; use null instead')
-  const name = `${ctx.bindings.prefix}${ctx.bindings.n++}`
-  if (typeof value === 'boolean') {
-    ctx.bindings.values[name] = value ? 1 : 0
-    return `:${name}`
+  const scalar = typeof value === 'boolean'
+    ? (value ? 1 : 0)
+    : (typeof value === 'string' || typeof value === 'number' || value === null ? value : undefined)
+  if (ctx.bindings.inline === true) {
+    return scalar === undefined
+      ? `json(${sqlLiteral(JSON.stringify(encodeValue(value)))})`
+      : sqlLiteral(scalar)
   }
-  if (typeof value === 'string' || typeof value === 'number' || value === null) {
-    ctx.bindings.values[name] = value
+  const name = `${ctx.bindings.prefix}${ctx.bindings.n++}`
+  if (scalar !== undefined) {
+    ctx.bindings.values[name] = scalar
     return `:${name}`
   }
   ctx.bindings.values[name] = JSON.stringify(encodeValue(value))
@@ -97,8 +135,10 @@ function bindValue (ctx: SqlContext, value: any): string {
  * bare 1 would store the number 1 where `true` was meant).
  */
 export function bindJson (bindings: SqlBindings, value: any): string {
+  const json = JSON.stringify(encodeValue(value))
+  if (bindings.inline === true) return `json(${sqlLiteral(json)})`
   const name = `${bindings.prefix}${bindings.n++}`
-  bindings.values[name] = JSON.stringify(encodeValue(value))
+  bindings.values[name] = json
   return `json(:${name})`
 }
 
@@ -108,6 +148,7 @@ export function bindJson (bindings: SqlBindings, value: any): string {
  * (see the $min/$max ordering comparison in src/update.ts).
  */
 export function bindRaw (bindings: SqlBindings, value: string | number | null): string {
+  if (bindings.inline === true) return sqlLiteral(value)
   const name = `${bindings.prefix}${bindings.n++}`
   bindings.values[name] = value
   return `:${name}`
@@ -183,9 +224,10 @@ const OPS_KEYS = Object.keys(OPS)
  *
  * `$expr` belongs here and NOT in `OPS`: it takes an aggregation expression
  * rather than a field criterion, so `{ qty: { $expr: ... } }` has to stay the
- * error it is on the server.
+ * error it is on the server. `$comment` and `$sampleRate` are the same shape -
+ * they say something about the QUERY rather than about a field.
  */
-const TOP_LEVEL_OPS_KEYS = new Set(['$and', '$or', '$nor', '$expr'])
+const TOP_LEVEL_OPS_KEYS = new Set(['$and', '$or', '$nor', '$expr', '$comment', '$sampleRate'])
 
 /**
  * Filter-document operators that are DECIDED against rather than merely absent,
@@ -204,30 +246,11 @@ const REFUSED_TOP_LEVEL_OPS: Record<string, string> = {
 
 /**
  * Normalizes $regex input (a RegExp or a pattern string, optionally with a
- * separate $options string) to a single RegExp, validating the pattern and
- * flags in the process. MongoDB's 'x' (extended) option has no JavaScript
- * equivalent and is rejected; 'g'/'y' are stateful in JavaScript (test()
- * advances lastIndex, skipping rows) and are stripped.
+ * separate $options string) to a single RegExp. The flag policy lives in
+ * src/regex.ts, which the `$regexMatch` family shares.
  */
 function toRegExp (pattern: unknown, options?: unknown): RegExp {
-  let source: string
-  let flags: string
-  if (pattern instanceof RegExp) {
-    source = pattern.source
-    flags = pattern.flags
-  } else if (typeof pattern === 'string') {
-    source = pattern
-    flags = ''
-  } else {
-    throw Error('$regex has to be a string or a RegExp')
-  }
-  if (options !== undefined) {
-    if (typeof options !== 'string') throw Error('$options has to be a string')
-    if (flags !== '' && options !== '') throw Error('options set in both $regex and $options')
-    flags = options
-  }
-  if (flags.includes('x')) throw Error('$options flag "x" (extended) is not supported')
-  return new RegExp(source, flags.replace(/[gy]/g, ''))
+  return compileRegExp(pattern, options, { stripStatefulFlags: true })
 }
 
 const INT32_MIN = -2147483648
@@ -322,6 +345,7 @@ function withElementMatch (ctx: SqlContext, scalarPred: string, ...elemArms: str
   const arms = [scalarPred, ...elemArms]
   if (arms.length === 1) return `(${arms[0]!})`
   if (ctx.table === undefined) return `(${arms.join(' OR ')})`
+  ctx.bindings.usedRowidUnion = true
   return `rowid IN (${arms.map(arm => `SELECT rowid FROM ${ctx.table} WHERE ${arm}`).join(' UNION ALL ')})`
 }
 
@@ -501,7 +525,32 @@ function bitPredicate (op: string, valueExpr: string, maskExpr: string): string 
   }
 }
 
+/**
+ * The only operators a `partialFilterExpression` may use.
+ *
+ * MEASURED, not guessed: SQLite answers "subqueries prohibited in partial index
+ * WHERE clauses", and every comparison this compiler emits carries an
+ * array-element arm - an `EXISTS (SELECT ... FROM json_each(...))` - because
+ * `{ status: 'A' }` also has to match `{ status: ['A'] }`. Dropping that arm
+ * would build an index over FEWER documents than MongoDB's, which is silently
+ * wrong for a UNIQUE partial index, so the compiler refuses instead.
+ *
+ * What is left is "this field exists", which is the case partial indexes are
+ * usually reached for and is exactly what `sparse: true` compiles to. MongoDB's
+ * own list is narrow too - it takes no `$not`, `$nor` or `$size` - and this is
+ * the intersection of the two.
+ */
+const INDEX_FILTER_OPS = new Set(['$exists', '$and', '$or'])
+
 function convertOp (ctx: SqlContext, field: string, op: string, value: any): string {
+  if (ctx.indexFilter === true && !INDEX_FILTER_OPS.has(op)) {
+    throw Error(
+      `a partialFilterExpression cannot use ${op === '$eq' && !field.startsWith('$') ? 'an equality match' : op} ` +
+      `on '${field}': SQLite forbids subqueries in a partial index, and matching a value against ARRAY ` +
+      `elements needs one. Supported here: ${[...INDEX_FILTER_OPS].join(', ')} - which is what the ` +
+      'sparse option compiles to'
+    )
+  }
   if (ctx.strict === true && field.includes('.') && ARRAY_PATH_OPS.has(op)) {
     // Only MAX_ARRAY_PATH_DEPTH array levels are expanded, so a longer path
     // matches strictly fewer documents than MongoDB would if the extra levels
@@ -755,6 +804,21 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       const expression = bindValue(ctx, JSON.stringify(encodeValue(value)))
       return `mdb_expr(${expression}, ${quoteIdentifier(ctx.col)}) = 1`
     }
+    // ---------------------- Miscellaneous ----------------------
+    case '$comment':
+      // A note for whoever reads the query log. It selects nothing, and MongoDB
+      // accepts any value at all - so this is one of the very few places where
+      // taking an option and doing nothing with it IS the behaviour.
+      return 'TRUE'
+    case '$sampleRate': {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+        throw Error(`numeric argument to $sampleRate must be in [0, 1]; but got: ${String(value)}`)
+      }
+      // SQLite's random() is evaluated once per row, which is what makes this a
+      // per-document coin flip rather than one decision for the whole query.
+      // The modulo keeps abs() away from -2^63, which it cannot negate.
+      return `(abs(random() % 1000000) < ${bindValue(ctx, Math.round(value * 1000000))})`
+    }
     case '$size': {
       // MongoDB requires a non-negative whole number, and only ever matches
       // arrays - json_array_length answers 0 for a scalar, so without the type
@@ -859,14 +923,18 @@ export interface CompileOptions {
   bindings?: SqlBindings
   /** Reject constructs whose answer is known to differ from MongoDB's. */
   strict?: boolean
+  /** Compiling a partial index's predicate. See `INDEX_FILTER_OPS`. */
+  indexFilter?: boolean
 }
 
 export function toSql (
   columnName: string, query: QueryFilterDocument, options: CompileOptions = {}
-): { sql: string, params: SqlParams } {
+): { sql: string, params: SqlParams, usesRowidUnion: boolean } {
   const bindings = options.bindings ?? createBindings()
-  const sql = convert({ col: columnName, table: options.table, bindings, strict: options.strict }, query)
-  return { sql, params: bindings.values }
+  const sql = convert({
+    col: columnName, table: options.table, bindings, strict: options.strict, indexFilter: options.indexFilter
+  }, query)
+  return { sql, params: bindings.values, usesRowidUnion: bindings.usedRowidUnion === true }
 }
 
 /**

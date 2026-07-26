@@ -63,4 +63,18 @@ console.log('positional ', JSON.stringify(await orders.find(
   { 'lines.qty': { $gt: 5 } }, { projection: { _id: 0, who: 1, 'lines.$': 1 } }
 ).toArray()))
 
+// The rest of the cursor surface. hasNext() PEEKS - the document it looked at
+// is still the one next() returns - and map() gives a cursor over transformed
+// documents rather than a chainable FindCursor, exactly as the driver's does.
+const peeking = orders.find({}).sort({ who: 1 })
+while (await peeking.hasNext()) console.log('hasNext    ', (await peeking.next()).who)
+
+console.log('map        ', await orders.find({}).map(order => order.who).toArray())
+console.log('count      ', await orders.find({}).limit(1).count(), '(the cursor own limit applies)')
+
+const rewound = orders.find({})
+await rewound.next()
+rewound.rewind()
+console.log('rewind     ', (await rewound.toArray()).length, 'documents again')
+
 await db.close()

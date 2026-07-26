@@ -81,6 +81,18 @@ describe('Filter<TSchema>', () => {
     await col.find({ qty: { $bitsAnyClear: [0, 2] } }).toArray()
     // @ts-expect-error - a bitmask is a number or an array of bit positions
     await col.find({ qty: { $bitsAllSet: 'nope' } }).toArray()
+    await col.find({ $comment: 'why this query exists', qty: 1 }).toArray()
+    await col.find({ $sampleRate: 0.1 }).toArray()
+    // @ts-expect-error - a rate is a number
+    await col.find({ $sampleRate: 'half' }).toArray()
+  })
+
+  it('accepts a hint, by index name or by key pattern', async () => {
+    await col.find({ qty: 1 }, { hint: 'qty_1' }).toArray()
+    await col.find({ qty: 1 }, { hint: { qty: 1 } }).toArray()
+    await col.countDocuments({ qty: 1 }, { hint: 'qty_1' })
+    // @ts-expect-error - a direction is 1 or -1
+    await col.find({ qty: 1 }, { hint: { qty: 2 } }).toArray()
   })
 
   it('types dot-notation paths against the nested schema', async () => {
@@ -146,8 +158,21 @@ describe('UpdateFilter<TSchema>', () => {
   it('rejects _id in $set and unsupported update operators', async () => {
     // @ts-expect-error - _id is immutable
     await col.updateOne({ item: 'x' }, { $set: { _id: 'other' } })
-    // @ts-expect-error - $bit is not implemented
+    // @ts-expect-error - $setValueOnInsert is not an operator
+    await col.updateOne({ item: 'x' }, { $setValueOnInsert: { qty: 1 } })
+  })
+
+  it('types $bit and $currentDate against the fields they can apply to', async () => {
     await col.updateOne({ item: 'x' }, { $bit: { qty: { and: 1 } } })
+    await col.updateOne({ item: 'x' }, { $bit: { qty: { or: 1, xor: 2 } } })
+    await col.updateOne({ item: 'x' }, { $currentDate: { shipped: true } })
+    await col.updateOne({ item: 'x' }, { $currentDate: { shipped: { $type: 'date' } } })
+    // @ts-expect-error - $bit is a bitwise operator, so its target must be numeric
+    await col.updateOne({ item: 'x' }, { $bit: { item: { and: 1 } } })
+    // @ts-expect-error - 'and'/'or'/'xor' are the only operations
+    await col.updateOne({ item: 'x' }, { $bit: { qty: { nope: 1 } } })
+    // @ts-expect-error - a BSON Timestamp is not one of the types this can store
+    await col.updateOne({ item: 'x' }, { $currentDate: { shipped: { $type: 'timestamp' } } })
   })
 
   it('types the array operators against the array they apply to', async () => {

@@ -125,6 +125,25 @@ export type IndexSpecification = string | Record<string, IndexDirection>
 export interface CreateIndexOptions extends SessionOption {
   unique?: boolean
   name?: string
+  /**
+   * Index only the documents that HAVE the field (any of them, for a compound
+   * key), which is a SQLite partial index over `... IS NOT NULL`.
+   *
+   * It also changes what `unique` means, exactly as it does on MongoDB: a
+   * non-sparse unique index treats every document missing the field as holding
+   * the same (null) key and so permits only one of them, while a sparse one
+   * ignores them entirely.
+   */
+  sparse?: boolean
+  /**
+   * Index only the documents matching this filter.
+   *
+   * **Narrower than MongoDB's**, and the error message says why: SQLite forbids
+   * subqueries in a partial index's `WHERE`, and every comparison this library
+   * compiles carries one so that `{ status: 'A' }` also matches
+   * `{ status: ['A'] }`. `$exists`, `$and` and `$or` are what is left.
+   */
+  partialFilterExpression?: Document
 }
 
 export interface DropIndexOptions extends SessionOption {}
@@ -135,15 +154,32 @@ export interface IndexDescription {
   name: string
   key: Record<string, IndexDirection>
   unique?: boolean
+  sparse?: boolean
+  partialFilterExpression?: Document
+}
+
+/** One entry of `createIndexes()`, as the driver shapes it. */
+export interface IndexDescriptionInput extends Omit<CreateIndexOptions, 'session'> {
+  key: Record<string, IndexDirection>
 }
 
 export type SortSpecification = string | Record<string, 1 | -1>
+
+/**
+ * Force a particular index, by name or by the key pattern it was built from.
+ *
+ * SQLite spells it `INDEXED BY`, and like MongoDB's hint it FAILS rather than
+ * quietly falling back: an index that cannot serve the query raises "no query
+ * solution", and an index that does not exist raises before that.
+ */
+export type Hint = string | Record<string, IndexDirection>
 
 export interface FindOptions extends SessionOption {
   sort?: SortSpecification
   limit?: number
   skip?: number
   projection?: ProjectionSpec
+  hint?: Hint
 }
 
 export interface CountOptions extends SessionOption {
@@ -151,6 +187,7 @@ export interface CountOptions extends SessionOption {
   limit?: number
   /** Skip this many matches before counting. */
   skip?: number
+  hint?: Hint
 }
 
 export interface EstimatedDocumentCountOptions extends SessionOption {}
@@ -161,6 +198,11 @@ export interface AggregateOptions extends SessionOption {}
 
 export interface DropCollectionOptions extends SessionOption {}
 
+export interface RenameOptions extends SessionOption {
+  /** Drop an existing collection of the target name instead of failing. */
+  dropTarget?: boolean
+}
+
 export interface InsertOneOptions extends SessionOption {}
 
 export interface DeleteOptions extends SessionOption {}
@@ -170,6 +212,25 @@ export interface CreateCollectionOptions extends SessionOption {}
 export interface DropDatabaseOptions extends SessionOption {}
 
 export interface ListCollectionsOptions extends SessionOption {}
+
+export interface DbStatsOptions extends SessionOption {}
+
+/**
+ * `db.stats()`. The counts mean what they do on MongoDB; the byte figures
+ * describe a SQLite file. See the method for which is which.
+ */
+export interface DbStats {
+  db: string
+  collections: number
+  objects: number
+  avgObjSize: number
+  dataSize: number
+  storageSize: number
+  indexes: number
+  indexSize: number
+  totalSize: number
+  ok: number
+}
 
 export interface InsertManyOptions extends SessionOption {
   /**
@@ -253,20 +314,52 @@ export interface PipelineExplanation {
   inJavaScript: string[]
 }
 
-export interface AggregationCursor<TSchema extends Document = Document> {
-  next: () => Promise<TSchema | null>
-  toArray: () => Promise<TSchema[]>
+/**
+ * What every cursor can do, whatever produced it - the driver calls this
+ * `AbstractCursor`, and `map()` returns one because a mapped cursor is no
+ * longer a cursor over documents of the collection's schema.
+ */
+export interface Cursor<TDocument> {
+  next: () => Promise<TDocument | null>
+  /**
+   * The next document if one is already available, else null.
+   *
+   * On a real server this is "do not wait for the network"; `node:sqlite` is
+   * synchronous and has no such state, so it is exactly `next()`. It exists
+   * because ported code calls it.
+   */
+  tryNext: () => Promise<TDocument | null>
+  /** True while another document is waiting. Peeks; it never consumes one. */
+  hasNext: () => Promise<boolean>
+  toArray: () => Promise<TDocument[]>
+  /** Applies `fn` to every remaining document, then closes the cursor. */
+  forEach: (fn: (doc: TDocument) => unknown) => Promise<void>
   close: () => Promise<void>
+  [Symbol.asyncIterator]: () => AsyncIterableIterator<TDocument>
+}
+
+/** What `find().explain()` reports. This library's own shape - see the method. */
+export interface QueryExplanation {
+  /** The SELECT this cursor runs. */
+  sql: string
+  /** Its bound parameters, in the order the compiler allocated them. */
+  params: Record<string, string | number | null>
+  /** SQLite's `EXPLAIN QUERY PLAN` output, one string per step. */
+  plan: string[]
+  /** The indexes the plan names, if any - the question the method exists for. */
+  indexes: string[]
+}
+
+export interface AggregationCursor<TSchema extends Document = Document> extends Cursor<TSchema> {
   /**
    * Where this pipeline's work happens. Unlike MongoDB's `explain`, this
    * reports the SQL/JavaScript split rather than an index plan - the question
    * it answers is "is my leading $match still index-eligible?".
    */
   explain: () => PipelineExplanation
-  [Symbol.asyncIterator]: () => AsyncIterableIterator<TSchema>
 }
 
-export interface FindCursor<TSchema extends Document = Document> {
+export interface FindCursor<TSchema extends Document = Document> extends Cursor<WithId<TSchema>> {
   /** Sorts results in MongoDB's BSON type order. Chainable; throws once iteration has started. */
   sort: (spec: SortSpecification) => FindCursor<TSchema>
   /** Caps the number of results; 0 means no limit. Chainable; throws once iteration has started. */
@@ -275,10 +368,22 @@ export interface FindCursor<TSchema extends Document = Document> {
   skip: (count: number) => FindCursor<TSchema>
   /** Restricts the fields returned. Chainable; throws once iteration has started. */
   project: (spec: ProjectionSpec) => FindCursor<TSchema>
-  next: () => Promise<WithId<TSchema> | null>
-  toArray: () => Promise<Array<WithId<TSchema>>>
-  close: () => Promise<void>
-  [Symbol.asyncIterator]: () => AsyncIterableIterator<WithId<TSchema>>
+  /** A cursor over transformed documents. Not chainable, exactly as the driver's is not. */
+  map: <T>(transform: (doc: WithId<TSchema>) => T) => Cursor<T>
+  /** Puts the cursor back to un-started, so it can be iterated again. */
+  rewind: () => void
+  /** How many documents this cursor would yield, honouring its skip and limit. */
+  count: () => Promise<number>
+  /**
+   * The SQL this cursor runs and the plan SQLite chose for it.
+   *
+   * MongoDB's shape is a large nested report about a query planner that is not
+   * here, so this is this library's own - and it answers the question the
+   * MongoDB one is usually opened for: is the index being used? It is `async`
+   * because it runs a statement; `AggregationCursor.explain()` is not, because
+   * the split it reports is decided at compile time.
+   */
+  explain: () => Promise<QueryExplanation>
 }
 
 export interface DbOptions {

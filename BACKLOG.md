@@ -37,6 +37,12 @@ still not (niche; revisit with item 3). Full EJSON (option B) remains open —
 the wire format is identical. Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
 [5b](#5-typescript-typing) and [6](#6-cursor-sort-limit-and-skip), and caps DR-2.
 
+**The `Binary` half of option B has a caller now** (2026-07-26): it is what gates
+GridFS, and rejecting `Uint8Array` also means `db.sql` cannot reach SQLite's BLOB
+type at all. See [item 35](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong)
+for the measurements and the build order — `$binary` inline as base64 is the next
+option-B step, and it is worth taking on its own merits.
+
 ### Context
 
 Documents are stored with `JSON.stringify` into a `data JSON` column. JSON has no
@@ -182,21 +188,24 @@ the closed items are listed after it for provenance.
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
 | 1 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Item 26 asked whether SQLite could report changes; the answer is that this library already knows. `RETURNING` makes per-document events free, and `PRAGMA data_version` turns the one real limit into an `invalidate` event instead of a silence. |
-| 2 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | `$currentDate`, `$bit`, the regex/set/object expression families, `$stdDev*`, `$sortByCount`, `$unset`, `$replaceWith`. Individually dull, collectively the difference between "a subset" and "the subset people notice". |
-| 3 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | `partialFilterExpression` and `sparse` map onto SQLite partial indexes, which are measured to work over `json_extract`. The cheapest real capability on this list. |
-| 4 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 5 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. |
-| 6 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 7 | [Cursor + `find().explain()`](#33-the-collection-and-db-surface-the-manual-still-lists) | S | `hasNext()` is reached for constantly in ported code, and `find()` is the one place the index story is invisible. |
-| 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 9 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 10 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
-| 11 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`. Diminishing returns; do them when someone asks. |
-| 12 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S-M | `renameCollection`, validation, views, capped collections, stats. |
-| 13 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 2 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 3 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. |
+| 4 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 5 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 6 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 6= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 7 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 8 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
+| 9 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
+| 10 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
+| 11 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
+| 12 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **DONE 2026-07-26** apart from pipeline updates and date arithmetic, both M and both listed above. `$currentDate`, `$bit`, `$comment`, `$sampleRate`, the regex/set/object/array/byte-string/trigonometry/`$convert` expression families, eleven accumulators, `$unset` and `$sortByCount`. |
+| — | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | **DONE 2026-07-26** for `sparse`, `partialFilterExpression`, `hint`, `createIndexes()`, `dropIndexes()` and `indexExists()`. The measurement that shaped it: SQLite forbids SUBQUERIES in a partial index, and every comparison this compiler emits has one. |
+| — | [Cursor methods, `find().explain()`, `renameCollection`, `db.stats()`](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | **DONE 2026-07-26.** `hasNext`/`tryNext`/`forEach`/`map`/`rewind`/`count`, the query plan behind a `find()`, and the two admin methods. |
+| — | [Vector similarity operators](#32-vector-similarity-without-an-extension) | S | **DONE 2026-07-26** - `$similarityCosine`/`$similarityDotProduct`/`$similarityEuclidean`, oracle-verified. Indexed ANN still needs an extension and is still not scheduled. |
 | — | [The stress test](#34-the-stress-test-complex-documents-every-feature) | M | **DONE 2026-07-26.** Found a quadratic `$slice` in the documented capped-list idiom (9.4s -> 8ms at 6,000 elements) on its first run, plus an O(depth²) dotted path now pinned as a known curve. |
 | — | [`ClientSession`](#25-clientsession-for-the-shim) | S-M | **DONE 2026-07-26.** The shim's missing piece, and the last one: `session.withTransaction()` with `{ session }` on every operation now runs unchanged. Verified against a real replica set, since MongoDB refuses transactions on a standalone. |
-| — | [Vector similarity operators](#32-vector-similarity-without-an-extension) | S | Unscheduled but nearly free - `$similarityCosine` and friends are arithmetic, and they make brute-force kNN expressible with no extension and no dependency. |
 | — | [Change streams, the SQLite-level version](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26, and still the right answer to the question it asked.** Superseded the same day by [item 27](#27-change-streams-reopened-2026-07-26), which emits events from the WRITE PATH instead of trying to recover them from the engine. |
 | — | [`$text` and `$search`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so `$text` could not be oracle-verified; `$search` is Atlas-only, so it cannot be verified even in principle. [Item 31](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) is the feature under a name that promises what it can keep. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
@@ -243,7 +252,7 @@ forward:
   JavaScript matcher.
 
 **Not planned, and worth saying so:** multi-document atomicity beyond a single
-connection, replication, sharding, `$where`, server-side JavaScript, GridFS, the
+connection, replication, sharding, `$where`, server-side JavaScript, the
 wire protocol. A process that needs those needs a server.
 [Change streams](#26-change-streams-decided-against-2026-07-26) and
 [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) are in the
@@ -251,6 +260,14 @@ same category but were investigated far enough to be worth writing down, so each
 has a decision record rather than a line here. `startSession()` was never in
 this category and is now implemented - see
 [item 25](#25-clientsession-for-the-shim).
+
+**GridFS left this list on 2026-07-26, and it should never have been on it.**
+It is a driver-side convention over two ordinary collections, so "needs a
+server" was simply false about it — and the real obstacle (no binary type
+anywhere in the stack, so not even `db.sql` can reach SQLite's BLOB) was
+nowhere on file. See [item 35](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong),
+which measures the storage shapes and refuses a narrower thing instead: invisible
+blob references inside ordinary documents.
 
 **Change streams left this category on 2026-07-26**, the same day they entered
 it. The decision record in [item 26](#26-change-streams-decided-against-2026-07-26)
@@ -298,18 +315,20 @@ priority table above.
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
 | 25 | ~~[`ClientSession` for the shim](#25-clientsession-for-the-shim)~~ | S-M | **DONE 2026-07-26** — sessions, `{ session }` everywhere, oracle-verified on a replica set |
 | 27 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Open — supersedes 26: emit from the write path, `RETURNING` for post-images, `data_version` for `invalidate` |
-| 28 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | Open — `$currentDate`, `$bit`, pipeline updates, and the expression/stage/accumulator families the manual lists |
-| 29 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | Open — partial and sparse map onto SQLite partial indexes (measured); TTL and `hint` need decisions |
+| 28 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **The S half DONE 2026-07-26** — `$currentDate`, `$bit`, `$comment`, `$sampleRate`, seven expression families, eleven accumulators, `$unset`, `$sortByCount`. Pipeline updates and date arithmetic (both M) remain |
+| 29 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | **DONE 2026-07-26** except TTL — `sparse`, `partialFilterExpression` (narrower than MongoDB's, and it says why), `hint`, `createIndexes`, `dropIndexes`, `indexExists` |
 | 30 | [Geospatial queries](#30-geospatial-queries) | M | Open — R-Tree and geopoly are compiled in; spherical-vs-planar is the real work |
 | 31 | [Search under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | Open — FTS5 with a caller-chosen tokenizer; `$text`/`$search` stay refused |
-| 32 | [Vector similarity](#32-vector-similarity-without-an-extension) | S / L | Open — the `$similarity*` operators are arithmetic; indexed ANN needs an extension and is not scheduled |
-| 33 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | Open — cursor methods, `find().explain()`, `renameCollection`, validation, views, capped, stats |
+| 32 | [Vector similarity](#32-vector-similarity-without-an-extension) | S / L | **The S half DONE 2026-07-26** — `$similarityCosine`/`$similarityDotProduct`/`$similarityEuclidean`; indexed ANN needs an extension and is not scheduled |
+| 33 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | **The S half DONE 2026-07-26** — cursor methods, `find().explain()`, `renameCollection`, `db.stats()`. Validation, views and capped collections remain, and are M |
 | 34 | ~~[The stress test](#34-the-stress-test-complex-documents-every-feature)~~ | M | **DONE 2026-07-26** — `npm run stress`; found a quadratic `$slice` (fixed, 1000x) and an O(depth²) dotted path (pinned) |
+| 35 | [GridFS and binary data](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S/M/M | **Raised 2026-07-26** — reclassified from "needs a server", which was false about it; storage shapes measured, three steps, one narrower refusal |
 | 26 | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26**, with the measurement |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
 format); items 5b, 15, 16 and 18 depend on
-**[DR-2](#dr-2-how-mongodb-compatible-should-the-api-be)** (compatibility target).
+**[DR-2](#dr-2-how-mongodb-compatible-should-the-api-be)** (compatibility target),
+and item 35's step 2 is the last piece of DR-1 still open.
 
 **DR-2 is now settled in one direction worth recording:** the answer to "how
 MongoDB-compatible?" is *a subset that is honest about being one*. Everything
@@ -2229,7 +2248,95 @@ divergences.
 
 ## 28. The operator gap sweep
 
-**Size: S each, mostly.** What the manual lists and this library does not
+**Size: S each, mostly. The S half DONE 2026-07-26**, in one pass: every
+operator below that was sized S now exists, is oracle-verified, and is listed in
+the README. What is left is the two M entries - **aggregation-pipeline updates**
+and the **date-arithmetic family** - and they stay open because each has a
+design question rather than a body of work.
+
+What landed:
+
+- **Update operators**: `$currentDate` (one clock read per statement, and
+  `{ $type: 'timestamp' }` refused because the storage layer has no such type)
+  and `$bit` (`and`/`or`/`xor`, applied in the order written; SQLite has no XOR
+  operator, so it is spelled `(a | b) & ~(a & b)`). Both work through the
+  positional operators, which cost nothing extra because both are `FieldWriter`s.
+- **Query operators**: `$comment` (which selects nothing - the one place taking
+  an option and doing nothing with it IS the behaviour) and `$sampleRate`,
+  compiled to `abs(random() % 1000000) < rate * 1000000`, a per-ROW coin flip
+  because SQLite evaluates `random()` per row.
+- **Accumulators**: `$stdDevPop`/`$stdDevSamp` (Welford), `$mergeObjects`, the
+  N-family (`$firstN` `$lastN` `$maxN` `$minN`) and the positional family
+  (`$top` `$topN` `$bottom` `$bottomN`).
+- **Expression operators**: the regex, object, set, array, byte-string,
+  remaining-arithmetic, trigonometry, `$convert` and `$rand` families, plus
+  [item 32](#32-vector-similarity-without-an-extension)'s three `$similarity*`
+  operators.
+- **Stages**: `$unset` and `$sortByCount`, both COMPOSED from the stages they
+  are defined as rather than reimplemented.
+
+**Five things the oracle settled that reasoning would have got wrong**, all now
+pinned in
+[test/operators/expression-operator-sweep.spec.ts](test/operators/expression-operator-sweep.spec.ts):
+
+- **`$regexFindAll` does not report a zero-width match at the END of a string.**
+  MongoDB attempts a match at every index up to the last CHARACTER; JavaScript
+  goes one further. `x*` over `'ab'` is two matches there and three here - and
+  the empty string still gets its one attempt at index 0.
+- **`$setUnion` and `$setIntersection` come back in BSON order; `$setDifference`
+  keeps the first array's.** The manual calls the order unspecified. This is
+  what the server does.
+- **The set operators split on null.** `$setUnion`/`$setIntersection`/
+  `$setDifference` propagate it; `$setEquals`/`$setIsSubset`/`$allElementsTrue`/
+  `$anyElementTrue` raise on it.
+- **`$firstN`/`$lastN` count a MISSING field as null and keep it; `$maxN`/
+  `$minN` skip it.** The same four names behave differently in the same group.
+- **`$toDate` refuses an INT where it accepts a double.** MongoDB's conversion
+  table has no int → date entry, so `{ $toDate: 0 }` raises and
+  `{ $toDate: 1600000000000 }` does not. This library already distinguished the
+  two the same way `$type` does, so matching cost nothing.
+
+One deliberate divergence: the `x` (extended) regex option is refused in
+`$regexMatch` and friends as it already was in `$regex`, because JavaScript has
+no equivalent and ignoring it would change which documents match. The flag
+policy now lives in [src/regex.ts](src/regex.ts), shared by both sides.
+
+### What the sweep left, and why
+
+Everything below is sized S in the list further down and was still SKIPPED,
+which is worth recording so nobody re-derives the reason:
+
+- **`$replaceWith` is blocked on `$replaceRoot`**, which is not implemented (it
+  is in the exotic-stages list under [item 16](#16-aggregation-pipeline)).
+  `$replaceWith` is its alias, so it is free the day that lands and impossible
+  before it. Same shape as `$bucketAuto`, which needs `$bucket`.
+- **`$documents` is blocked on `db.aggregate()`, which does not exist.** It is
+  only legal as the FIRST stage of a DATABASE-level pipeline - it invents its
+  own input rather than reading a collection - so putting it in
+  `collection.aggregate()` would accept a pipeline a real server rejects. The
+  honest version is `Db.aggregate()` first, which is its own (small) API
+  decision rather than part of an operator sweep.
+- **`$jsonSchema`** belongs with document validation
+  ([item 33](#33-the-collection-and-db-surface-the-manual-still-lists)), which
+  is M: the operator and the `createCollection({ validator })` option are one
+  feature, and building half of it would leave a query operator with nothing to
+  validate against.
+- **`$median`/`$percentile`** need an interpolation rule that has to be taken
+  from the server rather than guessed, which is what makes them M.
+- **`hidden` on `createIndex` cannot be built at all**, so it raises with the
+  reason: SQLite has no way to keep an index from its own planner, and the
+  option could only ever be ignored - the failure mode this library avoids.
+- **`collection.stats()` was not built on purpose.** The driver DROPPED it in
+  v7, so adding it here would promise an API MongoDB does not have, which is
+  the first rule in [src/filter-types.ts](src/filter-types.ts) generalised.
+  `db.stats()` is on the driver and is implemented.
+
+Two leftovers from earlier items were also left alone, and both already have a
+line of their own: compound-index date companions
+([item 2](#2-createindex-and-friends), niche) and projection narrowing the
+result TYPE ([item 5b](#5-typescript-typing)).
+
+Original analysis follows. What the manual lists and this library does not
 implement, in rough order of how often it is reached for. None of these is
 blocked on anything.
 
@@ -2311,7 +2418,61 @@ sampling. **S.**
 
 ## 29. Index properties: partial, sparse, TTL, and `hint`
 
-**Size: S-M.** `createIndex` supports `unique` and `name` and nothing else,
+**Size: S-M — DONE 2026-07-26 except TTL.** `sparse`, `partialFilterExpression`,
+`hint`, `createIndexes()`, `dropIndexes()` and `indexExists()` all landed, and
+`hidden`/`expireAfterSeconds` are REFUSED rather than ignored. Dual-engine in
+[test/indexes.spec.ts](test/indexes.spec.ts), with a plan-regression test for
+the sparse case in [test/query-plan.spec.ts](test/query-plan.spec.ts).
+
+**Three things came out of building it, and two of them were surprises.**
+
+**1. `partialFilterExpression` is far narrower than this item assumed, and the
+reason is measured.** SQLite answers *"subqueries prohibited in partial index
+WHERE clauses"*, and every comparison this library compiles carries one: the
+array-element arm (`EXISTS (SELECT ... FROM json_each(...))`) that makes
+`{ status: 'A' }` also match `{ status: ['A'] }`. So a partial index over an
+equality cannot be built at all.
+
+The tempting workaround - compile the SCALAR arm only - is wrong in a way that
+is hard to see: it indexes FEWER documents than MongoDB would, which for a
+UNIQUE partial index means silently accepting a document a server would refuse.
+It is refused instead, by name, with the reason (`INDEX_FILTER_OPS` in
+[src/query.ts](src/query.ts)). What is left is `$exists`, `$and` and `$or` -
+which is what `sparse` compiles to, and is the case partial indexes are usually
+reached for anyway. MongoDB's own list is narrow too (no `$not`, `$nor`,
+`$size`), so this is the intersection rather than a new restriction.
+
+**2. The wart this item recorded was backwards, and fixing it needed a THIRD
+index.** The note said a non-sparse unique index here *rejects* a second
+document missing the field. It accepts it: a SQL unique index counts every NULL
+as distinct, so `{ _id: 1 }` and `{ _id: 2 }` both passed a unique index on
+`email` where a real server refuses the second. A non-sparse unique index now
+also creates `ixu_<table>_<name>` - a PARTIAL unique index over
+`json_quote(json_extract(...))` covering only the rows where the extract is
+NULL. `json_quote` renders both a missing field and a stored JSON null as the
+text `'null'`, which is exactly the conflation MongoDB makes, so one companion
+index closes both halves of the divergence.
+
+**3. `hint` has to go on the right table reference.** `INDEXED BY` on the OUTER
+`FROM` of a rowid-union query makes SQLite scan the index and add a temp B-tree
+for `ORDER BY rowid` - correct, and slower than no hint at all. It is threaded
+through `CompileOptions.table` instead, which is what the UNION arms name, and
+applied to the outer `FROM` only when the filter did not compile to that form;
+`toSql` reports which via `usesRowidUnion`.
+
+Two smaller notes: a partial index's predicate is compiled with INLINE literals
+(`CREATE INDEX` has nothing to bind a parameter to), which is the one place a
+value is interpolated and goes through the same `quoteLiteral` paths use; and
+`sparse`/`partialFilterExpression` are carried in a trailing SQL COMMENT on the
+CREATE statement, because they cannot be recovered from the compiled predicate
+and a second metadata table was not worth it. SQLite stores that text verbatim
+and rewrites the table name in it on a rename, so the comment survives
+`renameCollection`.
+
+**Still open: TTL**, which is the one with no SQLite counterpart and is now
+sized M in the priority table. Original analysis follows.
+
+`createIndex` supports `unique` and `name` and nothing else,
 while three of MongoDB's index properties map onto SQLite almost exactly.
 
 - **`partialFilterExpression` -> a SQLite PARTIAL INDEX.** Measured to work over
@@ -2407,7 +2568,17 @@ naming this as the alternative.
 
 ## 32. Vector similarity, without an extension
 
-**Size: S for the operators, L for indexed search.** The manual now lists
+**Size: S for the operators — DONE 2026-07-26; L for indexed search, still not
+scheduled.** `$similarityCosine`, `$similarityDotProduct` and
+`$similarityEuclidean` are in [src/expression.ts](src/expression.ts) and
+oracle-verified like every other expression operator. They return the RAW
+figures (cosine similarity, dot product, Euclidean distance), which is what the
+server returns; two vectors of different lengths, a non-numeric element, or
+fewer than two arguments each raise. A zero vector's cosine is 0 rather than
+NaN. The README documents the shape of a brute-force kNN query and says where it
+stops being reasonable.
+
+Original analysis follows. The manual now lists
 `$similarityCosine`, `$similarityDotProduct` and `$similarityEuclidean` as
 ordinary expression operators. They are pure arithmetic over two arrays of
 numbers - **an afternoon in [src/expression.ts](src/expression.ts)**, no
@@ -2430,7 +2601,37 @@ uses it if the driver has it.
 
 ## 33. The collection and Db surface the manual still lists
 
-**Size: S each.** Small, and mostly missing because nothing has needed them:
+**Size: S each — the S half DONE 2026-07-26.** Cursor methods,
+`find().explain()`, `renameCollection()` and `db.stats()` all landed; document
+validation, views and capped collections remain, and they are M rather than S.
+
+Four things worth carrying forward:
+
+- **`hasNext()` peeks, and holds what it peeked.** There is no count to consult
+  - the question is about THIS cursor's remaining documents - so it reads one
+  and `next()` returns it from a buffer. `tryNext()` is exactly `next()`:
+  `node:sqlite` is synchronous, so there is never a document that exists but has
+  not arrived yet. `map()` returns a plain `Cursor`, not a `FindCursor`, which
+  is what the driver's own `map()` does and for the same reason - the chainable
+  setters no longer mean anything once the documents have been reshaped.
+- **`find().explain()` is async where `aggregate().explain()` is not**, and the
+  asymmetry is the point: the first runs `EXPLAIN QUERY PLAN`, the second
+  reports a split decided at compile time. Neither returns MongoDB's shape,
+  which describes a query planner that is not here; this one answers the
+  question that shape is usually opened for - `{ sql, params, plan, indexes }`.
+- **`rename()` has to recreate the indexes.** `ALTER TABLE ... RENAME TO` moves
+  the data and repoints every index, but the index NAMES embed the old table's
+  and `indexes()` finds them by that prefix. SQLite has already rewritten the
+  table name inside each stored CREATE statement, so recreating them is a
+  substitution rather than a re-derivation. It also evicts BOTH cache entries -
+  the source, whose table is gone, and the target, whose table was replaced.
+- **`collection.stats()` was NOT built**, deliberately: the driver dropped it in
+  v7, so adding it here would be promising an API MongoDB does not have -
+  exactly what [src/filter-types.ts](src/filter-types.ts)'s first rule forbids.
+  `db.stats()` exists, with its counts exact and its byte figures documented as
+  describing a SQLite file. `db.command()` stays unimplemented.
+
+Original analysis follows. Small, and mostly missing because nothing has needed them:
 
 - **Cursor methods** - `hasNext()`, `tryNext()`, `forEach()`, `map()`,
   `rewind()`, `count()`. Ported code reaches for `hasNext()` constantly, and
@@ -2575,3 +2776,193 @@ CEILINGS rather than timings - "this completes", "this stays under N MB", "this
 does not exceed the parser's limits" - so it fails on a regression rather than
 on a busy CI runner. Where a limit is genuinely reached, the answer is a clear
 error naming the limit, which is the same standard the depth cap already meets.
+
+---
+
+## 35. GridFS and binary data: the "needs a server" line was wrong
+
+**Size: S (bytes through `db.sql`) / M (`$binary` in ejson) / M (GridFS itself).
+Raised 2026-07-26** by the observation that GridFS is genuinely useful and
+SQLite handles files well. Both halves of that are correct, and the reason on
+file was not.
+
+### What was actually on file
+
+GridFS appeared exactly twice — once in the README's "Not planned" bullet and
+once in the "Not planned, and worth saying so" paragraph above — in both cases
+as one word in a list ending **"A process that needs those needs a server."**
+There was no investigation, no measurement, and nothing in git history.
+
+By this backlog's own convention that means *not investigated*: `$text` got a
+decision record, change streams got one and then a reversal. GridFS got a list
+entry, and inherited a justification that **does not apply to it**. Replication,
+sharding and the wire protocol need a server. GridFS does not — it is entirely a
+driver-side convention over two ordinary collections (`<bucket>.files`,
+`<bucket>.chunks`), a unique compound index on `{ files_id: 1, n: 1 }`, and a
+chunking loop. `mongod` has no GridFS support to speak of. It was in the wrong
+list.
+
+The *motivating* premise does not survive either, though: GridFS exists to route
+around the 16MB BSON document cap, and this library has no such cap (README
+"Document limits": ~1GB, 40MB documents round-trip). So the feature's reason for
+existing on the server is absent here, and the reason to want it is **API
+compatibility** — the same reason `MongoClient` and `ClientSession` exist.
+
+### The real blocker, which nobody had written down
+
+There is no binary type anywhere in the stack, and it is three closed doors, not
+one:
+
+| Where | What happens |
+| --- | --- |
+| [src/ejson.ts:109](src/ejson.ts) | `ArrayBuffer.isView(value)` throws at write time — a DR-1 option-C consequence |
+| [src/driver.ts:39](src/driver.ts) | `DriverParams` is `Record<string, string \| number \| null> \| unknown[]`; the NAMED form, which everything uses, cannot carry bytes |
+| [src/raw-sql.ts:152](src/raw-sql.ts) | `bindable()` refuses a `Uint8Array` too — so the escape hatch is shut as well |
+
+[src/query.ts:450](src/query.ts) already says it out loud: BinData "cannot be
+stored here at all", and `binData` is in `UNSTORABLE_TYPE_ALIASES`.
+
+**That third row is a gap in [item 20](#20-a-raw-sql-escape-hatch), independent
+of GridFS.** `db.sql` is meant to be the hatch you reach for when the document
+model does not fit, and it cannot reach SQLite's BLOB type — which is the one
+thing SQLite does that the document model genuinely cannot. Widening `Bindable`
+is a handful of lines. Note that `DriverParams` is exported from
+[src/index.ts](src/index.ts), so widening it obliges every future driver to
+accept blobs: additive for callers, a real contract change for backends, and
+[test/driver-seam.spec.ts](test/driver-seam.spec.ts)'s reduced driver has to
+carry them too.
+
+### Measured, 2026-07-26, Node 26.5.0
+
+`node:sqlite` binds and returns `Uint8Array` natively in both directions
+(named *and* positional), and `typeof(x)` reports `blob`.
+
+**Unverified on the `engines` floor.** These numbers are Node 26.5.0 only, which
+was the sole runtime to hand. Blob binding almost certainly works on 22.13 — it
+is a direct `sqlite3_bind_blob` — but `MAX_DOCUMENT_DEPTH` is the standing
+reminder that the floor decides and that CI's Windows/22.13 job is the one that
+finds out. Confirm there before step 1 ships.
+
+Over a 64MB blob in one row:
+
+| operation | time | returns |
+| --- | --- | --- |
+| `length(bytes)` | **0.08ms** | 67108864 |
+| `substr(bytes, 1KB, 4)` | 28.0ms | 4-byte `Uint8Array` |
+| `substr(bytes, 16MB, 4)` | 26.8ms | 4-byte `Uint8Array` |
+| `substr(bytes, 63MB, 4)` | 27.4ms | 4-byte `Uint8Array` |
+| whole blob | 46.7ms | 64MB `Uint8Array` |
+
+Two findings, and the second is the one that decides the design:
+
+**`length()` is free** — SQLite reads it from the record header without touching
+the payload. So metadata reads (`bucket.find()`) never pay for content.
+
+**`substr()` is NOT a seek.** It is flat in offset — 28ms at 1KB, 27ms at 63MB —
+and ~57% of a full read. It bounds **memory** (a 4-byte result instead of a 64MB
+allocation), not I/O; SQLite still walks the overflow-page chain. There is no
+`sqlite3_blob_open` on `DatabaseSync.prototype`, so true incremental blob I/O is
+not available at all.
+
+**Therefore one giant BLOB per file is the wrong shape, and chunking is right —
+for a reason that has nothing to do with the 16MB cap.** Storing 64MB as 256
+rows of 255KB and reading one chunk from the middle:
+
+| shape | write 64MB | on disk | read ONE middle chunk | stream all 64MB |
+| --- | --- | --- | --- | --- |
+| BLOB chunks | 56ms | 64.0MB | **0.12ms** | 28ms |
+| base64-in-JSON chunks | 111ms | 85.1MB | 0.29ms | 33ms |
+| one 64MB BLOB, `substr` | — | 64.0MB | **27ms** | 47ms |
+
+A chunk row beats a ranged read into one big blob by **~200x**. GridFS's
+chunking design is vindicated here on SQLite's own terms.
+
+**And the base64 tax is milder than it looks:** +33% on disk and 2x on write,
+but only **18%** on streaming reads. It is a real cost, not a blocker — which
+means the correct build order puts the format question *after* the feature,
+because both formats work behind the same API.
+
+### The idea worth refusing: invisible blob refs in user documents
+
+The attractive version is a sidecar — `{"$binary": {"$ref": 42}}` in the `data`
+JSON, bytes in a `_sdb_blobs` table, resolved on read, invisible to the caller.
+This is a respectable design in general (it is roughly PostgreSQL's TOAST, or
+SQLite's `sqlar`). **It should not be built here**, for two reasons of very
+different weight.
+
+**The cheap objection: "a row is a whole document" stops being true**, and at
+least four documented mechanisms lean on exactly that.
+`parseDocument`/`stringifyDocument` are exported and PURE, so resolving a ref
+needs database access the contract does not have — and `db.sql` would start
+handing back unresolved refs, a different shape for the same query, which is the
+thing `plainRow` exists to prevent. `distinct()` dedupes values **as JSON text
+before decoding**, so two identical blobs under different refs become two
+distinct values — a silent wrong answer in a mechanism that is deliberately
+built that way. BSON order for BinData is length, then subtype, then bytes, so
+[src/bson-order.ts](src/bson-order.ts) needs resolved payloads and a `$sort`
+resolves every ref. And an equality filter could never use the expression index
+on `json_extract(data, '$.blob')`, because that index holds ref ids, not content.
+
+**The expensive objection, which is structural: nothing in this design knows a
+ref was orphaned.** Update operators compile to ONE SQL expression over `data`
+and never read back what they replaced — that is the whole point of
+[src/update.ts](src/update.ts), and it is what keeps `updateMany` a single
+statement. But `$set` over a binary field, `$unset`, `replaceOne`, `$pull` on an
+array of blobs, and `$push` + `$slice` dropping elements can each orphan bytes,
+and the array rebuilds happen entirely in SQL through `json_each`. Computing
+"refs before minus refs after" means reading both, which is a pre-flight SELECT
+on every update touching a blob field — and driver-seam rule 3 says do not add
+those casually, with item 34's finding (the pre-flights dominate a 200-operation
+`bulkWrite`) as the evidence.
+
+Refcounting does not rescue it: the round trip is lossless by design, so a
+caller can read a document and insert it elsewhere and the ref comes back —
+two documents, one blob, legitimately — and incrementing a count from inside a
+single-statement UPDATE is not expressible. That leaves leaking (a
+`dropDatabase` that never reclaims), or a sweep with no background to run in.
+Deletes are the easy half and would be fine (cascade, and SQLite DML is
+transactional so blob + document are already atomic under `withTransaction`).
+
+### What to do instead, in order
+
+Each step is independently useful and none commits to the next.
+
+1. **Let `db.sql` bind and return `Uint8Array`** — widen `Bindable`,
+   `DriverParams` and `bindable()`, add the `Uint8Array` case, extend the reduced
+   driver in the seam spec. **S.** This alone lets anyone keep files in a BLOB
+   table of their own on the same connection, transactionally, with no document
+   format change and no parity claim. It is the honest answer today, and it fixes
+   an escape-hatch gap that exists on its own merits.
+2. **`$binary` in ejson, INLINE as base64** — the real EJSON spelling
+   (`{"$binary": {"base64": …, "subType": "00"}}`), which is DR-1's option-B step
+   already priced at ~100 lines ([DR-1 consequences](#consequences-of-b-and-in-miniature-c)).
+   Unblocks `$type: 'binData'`, `$binarySize`/`$bsonSize` (both listed in
+   [item 28](#28-the-operator-gap-sweep) as needing BSON types), and removes one
+   more row from `UNSTORABLE_TYPE_ALIASES`. Dual-engine verifiable against the
+   driver's `Binary`, which is what makes it worth doing properly. **M.**
+3. **GridFS on top, for compatibility only** — `GridFSBucket` with
+   `openUploadStream`/`openDownloadStream`/`find`/`delete`/`drop`, `fs.files` and
+   `fs.chunks` as ordinary collections, 255KB chunks kept (the measurement above
+   says keep them), payload inline base64 from step 2. Streams are the one part
+   of this that fits driver-seam rule 2 *better* than the existing API — a
+   `Readable` does not care whether its source is synchronous. **M.**
+4. **Only if measurement demands it: BLOB-backed `fs.chunks`.** The scoped
+   version of the sidecar, and the reason it is safe exactly here is that
+   `fs.chunks` is a **closed system** — the library writes it, reads it and
+   deletes it, `GridFSBucket` owns both collections, and no user document ever
+   holds a ref. So the GC problem does not arise, and `find`/`distinct`/`$sort`/
+   indexes/`db.sql` are untouched because user documents stay pure JSON. The cost
+   is one statable divergence: a BLOB-backed `fs.chunks` is no longer browsable
+   as an ordinary collection. Worth 33% of disk and 18% of read throughput only
+   if someone is actually storing enough to care.
+
+**Verify** steps 2 and 3 dual-engine like everything else — the driver ships
+`GridFSBucket` and `Binary`, so both have an oracle, which is precisely what
+`$text` did not. Step 3's spec should hold the shim and the real driver at one
+structural interface with no cast, the way
+[test/mongo-client.spec.ts](test/mongo-client.spec.ts) does; that harness is
+what caught `session.transaction`.
+
+**What stays refused:** invisible blob refs in ordinary documents (above), and
+`db.command()`-style server surface. Nothing here needs a server; that sentence
+just should never have covered GridFS.

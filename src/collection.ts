@@ -25,13 +25,14 @@ import {
 } from './query.js'
 import type {
   AggregateOptions, AggregationCursor, AnyBulkWriteOperation, AnyFilter, BulkWriteOptions,
-  BulkWriteResult, CountOptions, CreateIndexOptions, DbOptions, DeleteOptions, DeleteResult,
+  BulkWriteResult, CountOptions, CreateIndexOptions, Cursor, DbOptions, DeleteOptions, DeleteResult,
   DistinctOptions, Document, DropCollectionOptions, DropIndexOptions,
   EstimatedDocumentCountOptions, InsertManyOptions, FindCursor, FindOneAndDeleteOptions,
-  FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions, IndexDescription, IndexDirection,
+  FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions, IndexDescription,
+  IndexDescriptionInput, IndexDirection,
   IndexSpecification, InsertManyResult, InsertOneOptions, InsertOneResult, ListIndexesOptions,
-  ReplaceOptions, SessionHost, SessionLike, SessionOption, SortSpecification, UpdateOptions,
-  UpdateResult, WithId, WithoutId
+  QueryExplanation, RenameOptions, ReplaceOptions, SessionHost, SessionLike, SessionOption,
+  SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
 } from './types.js'
 import {
   buildUpdateExpression, buildUpsertDocument, collectEqualities,
@@ -85,6 +86,44 @@ function asJsonText (typeExpr: string, valueExpr: string): string {
  */
 let matchBatchSequence = 0
 
+/**
+ * `cursor.map(fn)` - a cursor over transformed documents.
+ *
+ * It is a plain `Cursor`, not a `FindCursor`, because the sort/limit/skip
+ * setters no longer make sense once the documents have been reshaped. The
+ * driver's `map()` returns its `AbstractCursor` for the same reason.
+ */
+function mapCursor <TSource, TResult>(source: Cursor<TSource>, transform: (doc: TSource) => TResult): Cursor<TResult> {
+  const next = async (): Promise<TResult | null> => {
+    const document = await source.next()
+    return document === null ? null : transform(document)
+  }
+  const mapped: Cursor<TResult> = {
+    next,
+    tryNext: next,
+    hasNext: async () => await source.hasNext(),
+    close: async () => { await source.close() },
+    async toArray () {
+      const documents: TResult[] = []
+      let document: TResult | null
+      while ((document = await next()) !== null) documents.push(document)
+      return documents
+    },
+    async forEach (fn) {
+      for await (const document of mapped) await fn(document)
+    },
+    async * [Symbol.asyncIterator] () {
+      try {
+        let document: TResult | null
+        while ((document = await next()) !== null) yield document
+      } finally {
+        await mapped.close()
+      }
+    }
+  }
+  return mapped
+}
+
 function noSessionsHere (): never {
   throw Error('this collection was not opened by a client, so it has no sessions')
 }
@@ -106,6 +145,42 @@ function detachedSessionHost (dbOptions: DbOptions): SessionHost {
     begin: noSessionsHere,
     commit: noSessionsHere,
     rollback: noSessionsHere
+  }
+}
+
+/**
+ * `sparse` and `partialFilterExpression`, carried in a trailing SQL comment on
+ * the CREATE INDEX statement.
+ *
+ * They cannot be read back out of the compiled predicate - a filter document is
+ * not recoverable from the SQL it became - and there is no metadata table for
+ * indexes (see the registry note above; the one that exists is for collection
+ * NAMES). SQLite stores the text of a CREATE statement verbatim in
+ * `sqlite_master`, comments included, and rewrites the table name in it on
+ * `ALTER TABLE ... RENAME`, so the comment survives everything the index does.
+ *
+ * Every `*` in `JSON.stringify` output is inside a string literal, so escaping
+ * it as `*` keeps a field name containing the comment terminator from
+ * ending the comment early.
+ */
+const INDEX_META = /\/\* sdb-index (.*) \*\/\s*$/
+
+function indexMetaComment (options: { sparse?: boolean, partialFilterExpression?: Document }): string {
+  const meta: Document = {}
+  if (options.sparse === true) meta.sparse = true
+  if (options.partialFilterExpression != null) meta.partialFilterExpression = options.partialFilterExpression
+  if (Object.keys(meta).length === 0) return ''
+  return ` /* sdb-index ${JSON.stringify(meta).replaceAll('*', '\\u002a')} */`
+}
+
+function readIndexMeta (sql: string): Document {
+  const encoded = INDEX_META.exec(sql)?.[1]
+  if (encoded === undefined) return {}
+  try {
+    return JSON.parse(encoded) as Document
+  } catch {
+    // An index created by hand, or by a version that wrote something else.
+    return {}
   }
 }
 
@@ -231,6 +306,13 @@ export class Collection<TSchema extends Document = Document> {
   /** Evicts this collection from its `Db`'s cache. See drop(). */
   private readonly onDrop: () => void
   /**
+   * Opens the collection a `rename()` moved the data to, through the `Db` that
+   * made this one - which is the only thing that can hand back a cached
+   * instance under the new name. A `Collection` built by hand gets a detached
+   * one, matching how it got here.
+   */
+  private readonly onRename: (target: string) => Collection<any>
+  /**
    * Where `{ session }` is checked, and where a session's transaction is
    * opened. Supplied by the `Db` that made this collection; a `Collection`
    * built by hand gets a detached one, which accepts no session at all -
@@ -240,13 +322,15 @@ export class Collection<TSchema extends Document = Document> {
 
   constructor (
     name: string, db: Driver, dbOptions: DbOptions, onDrop: () => void = () => {},
-    sessions: SessionHost = detachedSessionHost(dbOptions)
+    sessions: SessionHost = detachedSessionHost(dbOptions),
+    onRename?: (target: string) => Collection<any>
   ) {
     assertValidCollectionName(name)
 
     this.db = db
     this.dbOptions = dbOptions
     this.onDrop = onDrop
+    this.onRename = onRename ?? (target => new Collection(target, db, dbOptions, () => {}, sessions))
     this.sessions = sessions
     this.collectionName = name
     this.name = tableNameFor(name)
@@ -287,7 +371,9 @@ export class Collection<TSchema extends Document = Document> {
   /** Physical SQLite index name back to the name createIndex() handed out. */
   private mongoIndexName (physicalName: string): string {
     if (physicalName === `ux_${this.name}_doc_id`) return '_id_'
-    for (const prefix of [`ix_${this.name}_`, `ixd_${this.name}_`]) {
+    // ixu_ is the companion that makes the documents MISSING a unique key
+    // collide; a violation of it is a duplicate on the index the caller named.
+    for (const prefix of [`ix_${this.name}_`, `ixd_${this.name}_`, `ixu_${this.name}_`]) {
       if (physicalName.startsWith(prefix)) return physicalName.slice(prefix.length)
     }
     return physicalName
@@ -376,6 +462,8 @@ export class Collection<TSchema extends Document = Document> {
     let projector: CompiledProjection | undefined
     let rows: Iterator<unknown> | undefined
     let done = false
+    /** The document `hasNext()` looked at. See `hasNext`. */
+    let peeked: WithId<TSchema> | null = null
 
     // The SQL is built lazily on first iteration so the chainable
     // sort()/limit()/skip() modifiers can still contribute. One prepared
@@ -394,13 +482,20 @@ export class Collection<TSchema extends Document = Document> {
       // One parameter registry for the filter AND the projection probes, so
       // the two sets of placeholders cannot collide in the same statement.
       const bindings = createBindings()
-      const filter = toSql('data', query, { ...this.compileOptions, bindings })
+      // A hint is SQLite's `INDEXED BY`, and it has to sit on the table
+      // reference the index would actually serve: inside the UNION arms when
+      // the filter compiled to the rowid-union form of implicit array matching,
+      // and on the outer FROM when it did not. Putting it on both would force a
+      // full index scan of the outer table for every union query.
+      const hinted = options.hint === undefined ? undefined : this.hintedTable(options.hint)
+      const filter = toSql('data', query, { ...this.compileOptions, bindings, ...(hinted === undefined ? {} : { table: hinted }) })
       // $elemMatch / $ positional ask which element matched; the answer comes
       // back as extra columns of this same query rather than a second one.
       const probes = (projector?.probes ?? []).map((probe, index) =>
         `, ${firstMatchingElementSql('data', probe.path, probe.criterion, bindings)} AS ${PROBE_COLUMN}${index}`
       ).join('')
-      let sql = `SELECT data${probes} FROM ${this.table} WHERE (${filter.sql}) ORDER BY ${orderBy}`
+      const from = hinted !== undefined && !filter.usesRowidUnion ? hinted : this.table
+      let sql = `SELECT data${probes} FROM ${from} WHERE (${filter.sql}) ORDER BY ${orderBy}`
 
       if (limitCount != null || skipCount != null) {
         // MongoDB: limit(0) means no limit (SQLite spells that -1), and a
@@ -417,6 +512,15 @@ export class Collection<TSchema extends Document = Document> {
     }
 
     const next = async (): Promise<WithId<TSchema> | null> => {
+      if (peeked !== null) {
+        const held = peeked
+        peeked = null
+        return held
+      }
+      return await read()
+    }
+
+    const read = async (): Promise<WithId<TSchema> | null> => {
       if (done) return null
       if (rows === undefined) {
         // Compiling here (not in find()) surfaces invalid projections as a
@@ -443,6 +547,7 @@ export class Collection<TSchema extends Document = Document> {
 
     const close = async (): Promise<void> => {
       done = true
+      peeked = null
       rows?.return?.(undefined) // finalizes the underlying statement early
     }
 
@@ -475,6 +580,62 @@ export class Collection<TSchema extends Document = Document> {
 
       next,
       close,
+
+      // node:sqlite is synchronous, so there is never a document that exists
+      // but has not arrived yet - which is the whole of tryNext's job.
+      tryNext: next,
+
+      async hasNext (): Promise<boolean> {
+        // Peeked rather than counted: the answer has to be about THIS cursor's
+        // remaining documents, and reading one is the only way to know. It is
+        // held back so the next `next()` still returns it.
+        peeked ??= await read()
+        return peeked !== null
+      },
+
+      async forEach (fn: (doc: WithId<TSchema>) => unknown): Promise<void> {
+        for await (const document of cursor) await fn(document)
+      },
+
+      map <T>(transform: (doc: WithId<TSchema>) => T): Cursor<T> {
+        return mapCursor(cursor, transform)
+      },
+
+      rewind (): void {
+        // Finalize the statement and forget everything derived from it, so the
+        // next read compiles again from the current sort/limit/skip - which the
+        // chainable setters are free to change once more.
+        rows?.return?.(undefined)
+        rows = undefined
+        projector = undefined
+        peeked = null
+        done = false
+      },
+
+      // An arrow, so `this` is still the collection: a method shorthand here
+      // would bind it to the cursor object.
+      count: async (): Promise<number> => await this.countDocuments(query, {
+        // The cursor's own window, which is what the driver counts - its
+        // `limit(2).count()` answers 2.
+        ...options,
+        ...(limitCount === undefined ? {} : { limit: limitCount }),
+        ...(skipCount === undefined ? {} : { skip: skipCount })
+      }),
+
+      explain: async (): Promise<QueryExplanation> => {
+        projector ??= projectionSpec == null ? undefined : compileProjection(projectionSpec, query)
+        const { sql, params } = buildStatement()
+        const steps = this.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(params) as Array<{ detail: string }>
+        const plan = steps.map(step => step.detail)
+        return {
+          sql,
+          params,
+          plan,
+          // Deduplicated: both arms of the implicit-array union name the same
+          // index, and "which indexes serve this query" is the question.
+          indexes: [...new Set(plan.flatMap(step => /\bUSING (?:COVERING )?INDEX (\S+)/.exec(step)?.[1] ?? []))]
+        }
+      },
 
       async toArray (): Promise<Array<WithId<TSchema>>> {
         const documents: Array<WithId<TSchema>> = []
@@ -569,8 +730,23 @@ export class Collection<TSchema extends Document = Document> {
       await source.close()
     }
 
+    let peeked: TResult | null = null
+
     const cursor: AggregationCursor<TResult> = {
-      next,
+      next: async () => {
+        if (peeked === null) return await next()
+        const held = peeked
+        peeked = null
+        return held
+      },
+      tryNext: async () => await cursor.next(),
+      hasNext: async () => {
+        peeked ??= await next()
+        return peeked !== null
+      },
+      async forEach (fn) {
+        for await (const document of cursor) await fn(document)
+      },
       close,
 
       explain: () => ({
@@ -582,14 +758,14 @@ export class Collection<TSchema extends Document = Document> {
       async toArray (): Promise<TResult[]> {
         const documents: TResult[] = []
         let document: TResult | null
-        while ((document = await next()) !== null) documents.push(document)
+        while ((document = await cursor.next()) !== null) documents.push(document)
         return documents
       },
 
       async * [Symbol.asyncIterator] (): AsyncIterableIterator<TResult> {
         try {
           let document: TResult | null
-          while ((document = await next()) !== null) yield document
+          while ((document = await cursor.next()) !== null) yield document
         } finally {
           await close()
         }
@@ -657,13 +833,42 @@ export class Collection<TSchema extends Document = Document> {
    * returns its MongoDB-style name (e.g. `qty_1`, `size.uom_1_status_-1`).
    *
    * Index paths are built by the same code that builds query paths, so any
-   * query on an indexed field is index-eligible. For single-field indexes a
-   * non-unique companion index on `<field>.$date` is also created, because
-   * Date values are stored as `{"$date": ...}` (see src/ejson.ts) and date
-   * comparisons therefore query that sub-path.
+   * query on an indexed field is index-eligible. Up to three SQLite indexes
+   * back one MongoDB index:
+   *
+   * - `ix_<table>_<name>` - the index itself.
+   * - `ixd_<table>_<name>` - for a single-field index, a companion on
+   *   `<field>.$date`, because Dates are stored as `{"$date": ...}` (see
+   *   src/ejson.ts) and date comparisons query that sub-path.
+   * - `ixu_<table>_<name>` - for a UNIQUE, non-sparse index, a companion that
+   *   makes the documents MISSING the field collide with each other, which is
+   *   what MongoDB does and what SQLite alone does not: a SQL unique index
+   *   treats every NULL as distinct, so two documents without the field were
+   *   both accepted. It is a partial index over `json_quote(...)`, which
+   *   renders both a missing field and a stored JSON null as the text 'null' -
+   *   the same conflation MongoDB makes.
    */
   async createIndex (spec: IndexSpecification, options: CreateIndexOptions = {}): Promise<string> {
     this.enlist(options)
+    return this.buildIndex(spec, options)
+  }
+
+  /** `createIndex` for several indexes at once, returning the names in order. */
+  async createIndexes (specs: IndexDescriptionInput[], options: CreateIndexOptions = {}): Promise<string[]> {
+    this.enlist(options)
+    if (!Array.isArray(specs) || specs.length === 0) {
+      throw Error('createIndexes requires a non-empty array of index descriptions')
+    }
+    return specs.map(spec => {
+      if (spec === null || typeof spec !== 'object' || spec.key == null) {
+        throw Error("each createIndexes entry must be a document with a 'key'")
+      }
+      const { key, ...rest } = spec
+      return this.buildIndex(key, rest)
+    })
+  }
+
+  private buildIndex (spec: IndexSpecification, options: Omit<CreateIndexOptions, 'session'>): string {
     const key: Record<string, IndexDirection> = typeof spec === 'string' ? { [spec]: 1 } : spec
     const entries = Object.entries(key)
     if (entries.length === 0) throw Error('createIndex requires at least one field')
@@ -673,23 +878,74 @@ export class Collection<TSchema extends Document = Document> {
         throw Error(`unsupported index direction for field ${field}: ${String(direction)} (only 1 and -1 are supported)`)
       }
     }
+    // Options are rejected rather than ignored, as they are on createCollection:
+    // an index that silently is not what was asked for is worse than none.
+    for (const option of Object.keys(options)) {
+      if (['unique', 'name', 'sparse', 'partialFilterExpression', 'session'].includes(option)) continue
+      throw Error(option === 'hidden'
+        ? "createIndex does not support 'hidden': SQLite has no way to keep an index from its own planner, " +
+          'so the option could only ever be ignored'
+        : option === 'expireAfterSeconds'
+          ? "createIndex does not support 'expireAfterSeconds': there is no background reaper here, and a TTL " +
+            'that only expires on access is a different feature wearing the same name'
+          : `createIndex does not support the '${option}' option`)
+    }
+    if (options.sparse === true && options.partialFilterExpression != null) {
+      throw Error('createIndex takes sparse or partialFilterExpression, not both')
+    }
 
     // MongoDB's generated name: `<field>_<direction>` pairs joined with '_'.
     const name = options.name ?? entries.map(([field, direction]) => `${field}_${direction}`).join('_')
     const unique = options.unique === true ? 'UNIQUE ' : ''
+    const where = this.indexPredicate(entries, options)
+    const suffix = `${where === undefined ? '' : ` WHERE ${where}`}${indexMetaComment(options)}`
 
     const columns = entries
       .map(([field, direction]) => `json_extract(data, ${toJson1PathString([field])}) ${direction === 1 ? 'ASC' : 'DESC'}`)
       .join(', ')
-    this.exec(`CREATE ${unique}INDEX IF NOT EXISTS ${quoteIdentifier(`ix_${this.name}_${name}`)} ON ${this.table} (${columns})`)
+    this.exec(`CREATE ${unique}INDEX IF NOT EXISTS ${quoteIdentifier(`ix_${this.name}_${name}`)} ON ${this.table} (${columns})${suffix}`)
 
     if (entries.length === 1) {
       const [field, direction] = entries[0]!
       const dateColumn = `json_extract(data, ${toJson1PathString([`${field}.$date`])}) ${direction === 1 ? 'ASC' : 'DESC'}`
-      this.exec(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`ixd_${this.name}_${name}`)} ON ${this.table} (${dateColumn})`)
+      this.exec(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`ixd_${this.name}_${name}`)} ON ${this.table} (${dateColumn})${suffix}`)
+    }
+
+    if (options.unique === true && options.sparse !== true) {
+      // The documents whose key is entirely absent, made to collide. See the
+      // method comment; `json_quote` of a missing path is the text 'null'.
+      const quoted = entries.map(([field]) => `json_quote(json_extract(data, ${toJson1PathString([field])}))`).join(', ')
+      const anyMissing = entries
+        .map(([field]) => `json_extract(data, ${toJson1PathString([field])}) IS NULL`).join(' OR ')
+      const scope = where === undefined ? `(${anyMissing})` : `(${anyMissing}) AND (${where})`
+      this.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier(`ixu_${this.name}_${name}`)} ` +
+        `ON ${this.table} (${quoted}) WHERE ${scope}`
+      )
     }
 
     return name
+  }
+
+  /** The `WHERE` clause of a sparse or partial index, or undefined for neither. */
+  private indexPredicate (entries: Array<[string, IndexDirection]>, options: Omit<CreateIndexOptions, 'session'>): string | undefined {
+    if (options.sparse === true) {
+      // A compound sparse index covers a document that has ANY of its fields,
+      // which is MongoDB's rule.
+      return entries.map(([field]) => `json_extract(data, ${toJson1PathString([field])}) IS NOT NULL`).join(' OR ')
+    }
+    if (options.partialFilterExpression == null) return undefined
+    const filter = options.partialFilterExpression
+    if (typeof filter !== 'object' || Array.isArray(filter) || Object.keys(filter).length === 0) {
+      throw Error('partialFilterExpression must be a non-empty filter document')
+    }
+    // No `table`, so implicit array matching cannot reach for its rowid-union
+    // form (a subquery); `inline`, because CREATE INDEX has nothing to bind a
+    // parameter to. Anything that would still need a subquery raises - see
+    // INDEX_FILTER_OPS in src/query.ts.
+    return toSql('data', filter, {
+      bindings: createBindings('p', true), strict: this.dbOptions.strict, indexFilter: true
+    }).sql
   }
 
   /** Drops an index by the name createIndex returned. Throws if it does not exist. */
@@ -699,10 +955,35 @@ export class Collection<TSchema extends Document = Document> {
     const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get([physical])
     if (found === undefined) throw Error(`index not found with name [${name}]`)
     this.exec(`DROP INDEX ${quoteIdentifier(physical)}`)
-    this.exec(`DROP INDEX IF EXISTS ${quoteIdentifier(`ixd_${this.name}_${name}`)}`)
+    for (const companion of [`ixd_${this.name}_${name}`, `ixu_${this.name}_${name}`]) {
+      this.exec(`DROP INDEX IF EXISTS ${quoteIdentifier(companion)}`)
+    }
   }
 
-  /** Lists indexes in (a subset of) MongoDB's shape: `{ name, key, unique? }`. */
+  /** Drops every index except `_id_`, which MongoDB also refuses to remove. */
+  async dropIndexes (options: DropIndexOptions = {}): Promise<void> {
+    for (const description of await this.indexes(options)) {
+      if (description.name === '_id_') continue
+      await this.dropIndex(description.name, options)
+    }
+  }
+
+  /** True when every named index exists, as the driver's `indexExists` answers. */
+  async indexExists (names: string | string[], options: ListIndexesOptions = {}): Promise<boolean> {
+    const existing = new Set((await this.indexes(options)).map(description => description.name))
+    return (typeof names === 'string' ? [names] : names).every(name => existing.has(name))
+  }
+
+  /**
+   * Lists indexes in (a subset of) MongoDB's shape:
+   * `{ name, key, unique?, sparse?, partialFilterExpression? }`.
+   *
+   * The key spec is parsed back out of the CREATE INDEX statement in
+   * `sqlite_master` - there is no metadata table for indexes. `sparse` and
+   * `partialFilterExpression` cannot be recovered from the compiled predicate,
+   * so `createIndex` writes them into a trailing SQL COMMENT, which SQLite
+   * stores verbatim and rewrites along with the table name on a rename.
+   */
   async indexes (options: ListIndexesOptions = {}): Promise<IndexDescription[]> {
     this.enlist(options)
     const rows = this.db.prepare(
@@ -726,7 +1007,8 @@ export class Collection<TSchema extends Document = Document> {
       descriptions.push({
         name: row.name.slice(prefix.length),
         key,
-        ...(row.sql.startsWith('CREATE UNIQUE') ? { unique: true } : {})
+        ...(row.sql.startsWith('CREATE UNIQUE') ? { unique: true } : {}),
+        ...readIndexMeta(row.sql)
       })
     }
     return descriptions
@@ -734,6 +1016,30 @@ export class Collection<TSchema extends Document = Document> {
 
   listIndexes (options: ListIndexesOptions = {}): { toArray: () => Promise<IndexDescription[]> } {
     return { toArray: async () => await this.indexes(options) }
+  }
+
+  /**
+   * This collection's table, with `INDEXED BY` attached - SQLite's spelling of
+   * a `hint`, and like MongoDB's it FAILS rather than falling back when the
+   * index cannot serve the query ("no query solution").
+   *
+   * Both of MongoDB's spellings are accepted: the index NAME, or the key
+   * pattern it was created from. An unknown one is an error rather than a
+   * silently unhinted query, which is what a real server does too.
+   */
+  private hintedTable (hint: string | Record<string, IndexDirection>): string {
+    if (hint === null || (typeof hint !== 'string' && typeof hint !== 'object')) {
+      throw Error(`hint must be an index name or a key pattern; but got: ${typeof hint}`)
+    }
+    const name = typeof hint === 'string'
+      ? hint
+      : Object.entries(hint).map(([field, direction]) => `${field}_${direction}`).join('_')
+    const physical = (name === '_id_' || name === '_id_1')
+      ? `ux_${this.name}_doc_id`
+      : `ix_${this.name}_${name}`
+    const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get([physical])
+    if (found === undefined) throw Error(`hint provided does not correspond to an existing index: ${name}`)
+    return `${this.table} INDEXED BY ${quoteIdentifier(physical)}`
   }
 
   /**
@@ -829,6 +1135,56 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /**
+   * Renames the collection, returning a `Collection` bound to the new name.
+   *
+   * `ALTER TABLE ... RENAME TO` moves the data and repoints every index at the
+   * new table - but the index NAMES embed the old table's, and `indexes()`
+   * finds them by that prefix, so each one is recreated under the new name and
+   * the old one dropped. SQLite keeps the text of a CREATE statement verbatim
+   * and rewrites the table name inside it, which is what makes recreating them
+   * a substitution rather than a re-derivation (and is why the `sdb-index`
+   * comment survives too).
+   *
+   * This instance is bound to a table that no longer exists afterwards, so it
+   * is evicted from its `Db`'s cache exactly as `drop()` does.
+   */
+  async rename (target: string, options: RenameOptions = {}): Promise<Collection<TSchema>> {
+    this.enlist(options)
+    assertValidCollectionName(target)
+    if (target === this.collectionName) throw Error('renameCollection cannot rename a collection to itself')
+
+    const targetTable = tableNameFor(target)
+    const exists = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get([targetTable])
+    if (exists !== undefined) {
+      if (options.dropTarget !== true) throw Error('target namespace exists')
+      this.exec(`DROP TABLE ${quoteIdentifier(targetTable)}`)
+      unregisterCollection(this.db, targetTable)
+    }
+
+    const indexes = this.db.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL"
+    ).all([this.name]) as Array<{ name: string, sql: string }>
+
+    this.exec(`ALTER TABLE ${this.table} RENAME TO ${quoteIdentifier(targetTable)}`)
+    unregisterCollection(this.db, this.name)
+    registerCollection(this.db, targetTable, target)
+
+    for (const index of indexes) {
+      const renamed = index.name.replace(this.name, targetTable)
+      if (renamed === index.name) continue
+      // Re-read the SQL: ALTER TABLE has already rewritten the table name in
+      // it, so only the index's own name is left to change.
+      const current = this.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get([index.name]) as { sql: string } | undefined
+      if (current === undefined) continue
+      this.exec(current.sql.replace(index.name, renamed))
+      this.exec(`DROP INDEX ${quoteIdentifier(index.name)}`)
+    }
+
+    this.onDrop()
+    return this.onRename(target) as Collection<TSchema>
+  }
+
+  /**
    * Counts matching documents. `skip` and `limit` apply to the MATCHED set
    * before it is counted, as they do on the server - so `{ limit: 10 }` over
    * 500 matches answers 10, not 500.
@@ -838,14 +1194,18 @@ export class Collection<TSchema extends Document = Document> {
     if (options.limit !== undefined) assertLimit(options.limit)
     if (options.skip !== undefined) assertSkip(options.skip)
 
-    const compiled = toSql('data', filter ?? {}, this.compileOptions)
-    let sql = `SELECT COUNT(*) AS count FROM ${this.table} WHERE (${compiled.sql})`
+    const hinted = options.hint === undefined ? undefined : this.hintedTable(options.hint)
+    const compiled = toSql('data', filter ?? {}, {
+      ...this.compileOptions, ...(hinted === undefined ? {} : { table: hinted })
+    })
+    const from = hinted !== undefined && !compiled.usesRowidUnion ? hinted : this.table
+    let sql = `SELECT COUNT(*) AS count FROM ${from} WHERE (${compiled.sql})`
     if (options.limit !== undefined || options.skip !== undefined) {
       // LIMIT/OFFSET cannot sit next to an aggregate, so the window is taken
       // in a subquery and the rows THAT yields are what get counted.
       const limit = options.limit == null || options.limit === 0 ? -1 : Math.trunc(Math.abs(options.limit))
       const offset = options.skip == null ? '' : ` OFFSET ${Math.trunc(options.skip)}`
-      sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${this.table} WHERE (${compiled.sql}) LIMIT ${limit}${offset})`
+      sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${from} WHERE (${compiled.sql}) LIMIT ${limit}${offset})`
     }
     const result = this.prepare(sql).get(compiled.params) as { count: number }
     return Number(result.count)

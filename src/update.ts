@@ -43,7 +43,7 @@ type AnyUpdate = Record<string, any>
  * upsert INSERTS - but it still takes part in conflict detection.
  */
 export const UPDATE_OPERATORS = [
-  '$rename', '$inc', '$mul', '$min', '$max', '$unset', '$set', '$setOnInsert',
+  '$rename', '$inc', '$mul', '$bit', '$min', '$max', '$unset', '$set', '$currentDate', '$setOnInsert',
   '$push', '$addToSet', '$pop', '$pull', '$pullAll'
 ] as const
 
@@ -192,6 +192,73 @@ function nonNumericAt (source: string, path: string): string {
 }
 
 /**
+ * True where the value at `path` exists but is not a whole number - `$bit`'s
+ * error case. MongoDB refuses a `$bit` on a double as firmly as on a string,
+ * because a double has no bits to speak of.
+ */
+function nonIntegerAt (source: string, path: string): string {
+  return `(json_type(${source}, ${path}) IS NOT NULL AND json_type(${source}, ${path}) != 'integer')`
+}
+
+/**
+ * One `$bit` operand: `{ and: <int>, or: <int>, xor: <int> }`, at least one,
+ * applied in the order they are written.
+ *
+ * The masks bind as decimal STRINGS and are `CAST` to INTEGER on the way in -
+ * the same trick the `$bits*` QUERY operators use, and for the same reason: bit
+ * 62 is already past `Number.MAX_SAFE_INTEGER`, so a bound JS number would
+ * quietly lose precision. `BigInt.asIntN` is what makes bit 63 the sign bit
+ * rather than a value SQLite would clamp.
+ */
+function bitOperations (field: string, operand: unknown): Array<[string, string]> {
+  if (operand === null || typeof operand !== 'object' || Array.isArray(operand) || operand instanceof Date) {
+    throw Error(`The $bit modifier is not compatible with a ${operand === null ? 'null' : typeof operand} (field ${field})`)
+  }
+  const entries = Object.entries(operand as Document)
+  if (entries.length === 0) throw Error(`You must pass in at least one bitwise operation to $bit (field ${field})`)
+  return entries.map(([operation, value]) => {
+    if (!['and', 'or', 'xor'].includes(operation)) {
+      throw Error(`The $bit modifier only supports 'and', 'or', and 'xor', not '${operation}'`)
+    }
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      throw Error(`The $bit modifier field must be an Integer(32/64 bit); a '${typeof value}' is not supported here: {${operation}: ${String(value)}}`)
+    }
+    if (!Number.isSafeInteger(value)) {
+      throw Error(`The $bit modifier's operand cannot be represented exactly: {${operation}: ${String(value)}}`)
+    }
+    return [operation, BigInt.asIntN(64, BigInt(value)).toString()]
+  })
+}
+
+/**
+ * The `$currentDate` type specification: `true` (or any boolean - the server
+ * accepts one) or `{ $type: 'date' }`.
+ *
+ * `{ $type: 'timestamp' }` is refused rather than answered with a Date: a BSON
+ * Timestamp is one of the types this library's storage layer cannot hold (see
+ * src/ejson.ts), and silently substituting a different type is the failure mode
+ * the whole library avoids.
+ */
+function assertCurrentDateSpec (field: string, spec: unknown): void {
+  if (typeof spec === 'boolean') return
+  if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw Error(`${String(spec)} is not valid type for $currentDate. Please use a boolean ('true') or a $type expression ({$type: 'date'}) (field ${field})`)
+  }
+  const entries = Object.entries(spec as Document)
+  if (entries.length !== 1 || entries[0]![0] !== '$type') {
+    throw Error(`Unrecognized $currentDate option: ${Object.keys(spec as Document)[0] ?? ''} (field ${field})`)
+  }
+  const type = entries[0]![1]
+  if (type === 'timestamp') {
+    throw Error(
+      "$currentDate: { $type: 'timestamp' } is not supported: a BSON Timestamp is not one of the types " +
+      "this library can store. Use { $type: 'date' }, which is what almost every caller means"
+    )
+  }
+  if (type !== 'date') throw Error(`The '$type' string field is required to be 'date' or 'timestamp' (field ${field})`)
+}
+
+/**
  * The `.$date` sub-path of an already-quoted JSON path literal.
  *
  * Appending inside the literal rather than rebuilding it from the field name:
@@ -274,7 +341,7 @@ interface PositionalTarget {
 }
 
 /** Field operators that can write through a positional segment. */
-const POSITIONAL_CAPABLE = new Set(['$set', '$unset', '$inc', '$mul', '$min', '$max'])
+const POSITIONAL_CAPABLE = new Set(['$set', '$unset', '$inc', '$mul', '$min', '$max', '$bit', '$currentDate'])
 
 function parsePositional (operator: string, field: string): PositionalTarget | undefined {
   const segments = field.split('.')
@@ -777,6 +844,29 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
     }
   }
 
+  // --- $bit ---------------------------------------------------------------
+  for (const [field, bits] of operand('$bit')) {
+    const operations = bitOperations(field, bits)
+    expr = applyFieldWrite(expr, '$bit', field, (target, source, path) => {
+      // A missing field starts from 0, so `$bit: { x: { or: 4 } }` creates it
+      // as 4 - which is what the server does.
+      let value = `COALESCE(json_extract(${source}, ${path}), 0)`
+      for (const [operation, mask] of operations) {
+        const bound = `CAST(${bindRaw(bindings, mask)} AS INTEGER)`
+        // SQLite has no XOR operator, so it is spelled out of the two it does
+        // have. The identity holds in two's complement and cannot overflow:
+        // every bit of (a & b) is already a bit of (a | b).
+        value = operation === 'and'
+          ? `(${value} & ${bound})`
+          : operation === 'or' ? `(${value} | ${bound})` : `((${value} | ${bound}) & ~(${value} & ${bound}))`
+      }
+      return `json_set(${target}, ${path}, ${value})`
+    }, positional, {
+      test: nonIntegerAt,
+      message: `Cannot apply $bit to a value of non-integral type (field ${field})`
+    })
+  }
+
   // --- $min / $max --------------------------------------------------------
   for (const [operator, takeWhen] of [['$min', '>'], ['$max', '<']] as const) {
     for (const [field, value] of operand(operator)) {
@@ -823,6 +913,19 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
   for (const [field, value] of operand('$set')) {
     const bound = bindJson(bindings, value)
     expr = applyFieldWrite(expr, '$set', field, (target, _source, path) =>
+      `json_set(${target}, ${path}, ${bound})`
+    , positional)
+  }
+
+  // --- $currentDate -------------------------------------------------------
+  // One timestamp for the whole statement, so every document an `updateMany`
+  // touches gets the same instant - which is both cheaper and easier to reason
+  // about than one clock read per row.
+  const now = new Date()
+  for (const [field, spec] of operand('$currentDate')) {
+    assertCurrentDateSpec(field, spec)
+    const bound = bindJson(bindings, now)
+    expr = applyFieldWrite(expr, '$currentDate', field, (target, _source, path) =>
       `json_set(${target}, ${path}, ${bound})`
     , positional)
   }
@@ -1086,6 +1189,20 @@ export function buildUpsertDocument (filter: Record<string, any>, update: AnyUpd
   }
   for (const [field, amount] of Object.entries((update.$inc ?? {}) as Record<string, number>)) {
     setPath(doc, field, amount)
+  }
+  // Every field starts out missing, which $bit reads as 0.
+  for (const [field, operand] of Object.entries((update.$bit ?? {}) as Record<string, unknown>)) {
+    let value = 0n
+    for (const [operation, mask] of bitOperations(field, operand)) {
+      const bits = BigInt(mask)
+      value = operation === 'and' ? value & bits : operation === 'or' ? value | bits : value ^ bits
+    }
+    setPath(doc, field, Number(BigInt.asIntN(64, value)))
+  }
+  const upsertedAt = new Date()
+  for (const [field, spec] of Object.entries((update.$currentDate ?? {}) as Record<string, unknown>)) {
+    assertCurrentDateSpec(field, spec)
+    setPath(doc, field, upsertedAt)
   }
   for (const field of Object.keys((update.$mul ?? {}) as Record<string, number>)) {
     setPath(doc, field, 0)

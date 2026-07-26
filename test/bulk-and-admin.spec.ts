@@ -152,6 +152,103 @@ describe('bulkWrite and the admin surface', () => {
     })
   }
 
+  /** BACKLOG item 33. */
+  describe('renameCollection', () => {
+    for (const dbName of ['Sqlite', 'Mongodb']) {
+      const db = (): Db | Mdb => dbName === 'Sqlite' ? dbs.sqlite() : dbs.mongo()
+
+      describe(dbName, () => {
+        it('should move the documents, and the indexes with them', async () => {
+          const items: any = db().collection('items')
+          await items.createIndex({ qty: 1 })
+          const renamed: any = await items.rename('archive')
+
+          expect(renamed.collectionName).toStrictEqual('archive')
+          expect(await renamed.countDocuments({})).toStrictEqual(5)
+          expect((await renamed.indexes()).map((i: any) => i.name).toSorted())
+            .toStrictEqual(['_id_', 'qty_1'])
+          // The index still WORKS, not just still exists.
+          expect((await renamed.find({ qty: { $gt: 30 } }).toArray()).map((d: any) => d._id))
+            .toStrictEqual([4, 5])
+        })
+
+        it('should be reachable under the new name and empty under the old one', async () => {
+          await (db().collection('items') as any).rename('archive')
+          expect(await (db().collection('archive') as any).countDocuments({})).toStrictEqual(5)
+          // The source is gone: MongoDB creates collections lazily and this
+          // library eagerly, so "empty" is the one answer both give.
+          expect(await (db().collection('items') as any).countDocuments({})).toStrictEqual(0)
+        })
+
+        it('should refuse an existing target unless told to drop it', async () => {
+          const other: any = db().collection('other')
+          await other.insertOne({ _id: 99 })
+          await expect((db().collection('items') as any).rename('other')).rejects.toThrow()
+
+          const renamed: any = await (db().collection('items') as any).rename('other', { dropTarget: true })
+          expect(await renamed.countDocuments({})).toStrictEqual(5)
+        })
+
+        it('should reject a rename onto itself and an invalid name', async () => {
+          await expect((db().collection('items') as any).rename('items')).rejects.toThrow()
+          await expect((db().collection('items') as any).rename('')).rejects.toThrow()
+        })
+
+        it('db.renameCollection should do the same thing from the other end', async () => {
+          const renamed: any = await (db() as any).renameCollection('items', 'archive')
+          expect(await renamed.countDocuments({})).toStrictEqual(5)
+        })
+      })
+    }
+
+    it('Sqlite only - a renamed collection keeps its awkward name and its registry row', async () => {
+      // `tableNameFor` sends an awkward name to collectionx_<slug>_<digest>,
+      // which is not reversible - so the rename has to move the registry row
+      // too or listCollections() loses the collection.
+      const db = dbs.sqlite()
+      await db.collection('Mixed-Case.Name').insertOne({ _id: 'x' } as any)
+      await db.renameCollection('Mixed-Case.Name', 'Another-Awkward.One')
+
+      const names = (await db.listCollections().toArray()).map(c => c.name)
+      expect(names).toContain('Another-Awkward.One')
+      expect(names).not.toContain('Mixed-Case.Name')
+      expect(await db.collection('Another-Awkward.One').countDocuments({})).toStrictEqual(1)
+    })
+
+    it('Sqlite only - the cached Collection under the OLD name must not be reused', async () => {
+      const db = dbs.sqlite()
+      const before = db.collection('items')
+      await before.rename('archive')
+      // `before` is bound to a table that no longer exists; asking the Db for
+      // the name again has to rebuild it rather than hand back the dead one.
+      expect(await db.collection('items').countDocuments({})).toStrictEqual(0)
+      expect(await db.collection('archive').countDocuments({})).toStrictEqual(5)
+    })
+  })
+
+  /** BACKLOG item 33: diagnostics. `db.command()` stays unimplemented. */
+  describe('Sqlite only - db.stats()', () => {
+    it('should report exact counts and SQLite page arithmetic', async () => {
+      const db = dbs.sqlite()
+      await db.collection('extra').insertMany([{ _id: 'a' } as any, { _id: 'b' } as any])
+      const stats = await db.stats()
+
+      // The counts mean what they do on MongoDB.
+      expect(stats.collections).toStrictEqual(2)
+      expect(stats.objects).toStrictEqual(7)
+      expect(stats.dataSize).toBeGreaterThan(0)
+      expect(stats.avgObjSize).toStrictEqual(stats.dataSize / stats.objects)
+      // Each collection has its _id index, and the name registry's own does
+      // not count as one a caller created.
+      expect(stats.indexes).toStrictEqual(2)
+      // The byte figures describe the FILE, and are not MongoDB's.
+      expect(stats.storageSize).toBeGreaterThan(0)
+      expect(stats.totalSize).toStrictEqual(stats.storageSize)
+      expect(stats.indexSize).toBeGreaterThanOrEqual(0)
+      expect(stats.ok).toStrictEqual(1)
+    })
+  })
+
   /**
    * This library only. `listCollections` and `dropDatabase` exist on the driver
    * too, but the interesting behaviour here is the name REGISTRY - MongoDB has

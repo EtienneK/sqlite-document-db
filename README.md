@@ -34,8 +34,8 @@ await users.find({ tags: 'admin' }).toArray()
   than the code. The rules nobody would guess right get copied from the server
   instead of invented — what `$pull` does with a document criterion, whether
   `$addToSet` counts `1` and `true` as equal, what an upsert seeds a new
-  document with, how `$ne` behaves against an array field. That is **1026 tests
-  across 44 spec files**, nearly all of them matched pairs, and it is what turns
+  document with, how `$ne` behaves against an array field. That is **1267 tests
+  across 46 spec files**, nearly all of them matched pairs, and it is what turns
   "MongoDB-like" from a description into something that fails a build. Where the
   two are known to differ, [`strict: true`](#strict-mode) turns the difference
   into an error instead of a surprise.
@@ -186,12 +186,50 @@ queries stop being full-table scans:
 await db.collection('items').createIndex({ qty: 1 })                       // -> 'qty_1'
 await db.collection('items').createIndex({ 'size.uom': 1, status: -1 })    // compound
 await db.collection('users').createIndex({ email: 1 }, { unique: true })   // unique
+await db.collection('users').createIndex({ nickname: 1 }, { sparse: true }) // sparse
+await db.collection('items').createIndexes([{ key: { a: 1 } }, { key: { b: -1 } }])
 await db.collection('items').indexes()                                     // list
+await db.collection('items').indexExists('qty_1')                          // check
 await db.collection('items').dropIndex('qty_1')                            // drop
+await db.collection('items').dropIndexes()                                 // drop all but _id_
 ```
 
 Single-field indexes automatically cover `Date` values too (they are stored in a
 wrapped format — see below — and get a companion index on the wrapped path).
+
+**`sparse: true`** indexes only the documents that *have* the field, which is a
+SQLite partial index. It also changes what `unique` means, exactly as it does on
+MongoDB: a non-sparse unique index treats every document missing the field as
+holding the same (null) key and permits only one of them, while a sparse one
+ignores them entirely. (SQLite alone would allow *all* of them — a SQL unique
+index counts every NULL as distinct — so a second index is created behind the
+scenes to close that gap.)
+
+**`partialFilterExpression`** exists but is **narrower here than on MongoDB**,
+and the error message says why. SQLite forbids subqueries in a partial index's
+`WHERE`, and every comparison this library compiles carries one, because
+`{ status: 'A' }` also has to match `{ status: ['A'] }`. What is left is
+`$exists`, `$and` and `$or`:
+
+```javascript
+await db.collection('users').createIndex(
+  { email: 1 },
+  { unique: true, partialFilterExpression: { email: { $exists: true } } }
+)
+```
+
+**`hint`** forces a particular index, by name or by key pattern. SQLite spells it
+`INDEXED BY`, and like MongoDB's it *fails* rather than falling back when the
+index cannot serve the query:
+
+```javascript
+await db.collection('items').find({ qty: { $gt: 10 } }, { hint: 'qty_1' }).toArray()
+await db.collection('items').countDocuments({ qty: { $gt: 10 } }, { hint: { qty: 1 } })
+```
+
+`hidden` and `expireAfterSeconds` (TTL) are **rejected** rather than ignored:
+SQLite has no way to keep an index from its own planner, and there is no
+background reaper here.
 
 ### Iterate a cursor
 
@@ -204,11 +242,39 @@ for await (const item of db.collection('items').find({ status: 'A' })) {
 }
 ```
 
+The rest of the cursor surface is there too — `hasNext()`, `tryNext()`,
+`forEach()`, `map()`, `rewind()`, `count()`, `close()`:
+
+```javascript
+const cursor = db.collection('items').find({ status: 'A' })
+while (await cursor.hasNext()) console.log(await cursor.next())
+
+const names = await db.collection('items').find({}).map(item => item.name).toArray()
+```
+
 One divergence worth knowing: after `cursor.close()`, this library yields nothing
 more, because the cursor streams straight off a SQLite statement and closing
 finalises it. The MongoDB driver has already buffered a batch client-side and
 keeps draining it, so `next()` there can still return a document. If you close
 a cursor early, do not rely on either behaviour.
+
+### See what a query does
+
+`find().explain()` reports the SQL a cursor runs and the plan SQLite chose for
+it — which answers the question MongoDB's much larger `explain` is usually
+opened for. The shape is this library's own, because MongoDB's describes a query
+planner that is not here:
+
+```javascript
+const { sql, params, plan, indexes } = await db.collection('items')
+  .find({ qty: { $gt: 100 } })
+  .explain()
+
+console.log(indexes)   // [ 'ix_collection_items_qty_1' ] — or [] for a scan
+```
+
+`aggregate().explain()` answers a different question: where the SQL/JavaScript
+boundary of a pipeline falls. See [Aggregate](#aggregate).
 
 ### Transactions
 
@@ -256,6 +322,7 @@ a rollback — materialise with `toArray()` first.
 ```javascript
 await db.collection('items').distinct('status')                  // ['A', 'D', 'P']
 await db.collection('items').distinct('status', { qty: { $gt: 50 } })
+await db.collection('items').rename('archived_items')            // -> the renamed Collection
 await db.collection('items').drop()
 ```
 
@@ -263,6 +330,8 @@ await db.collection('items').drop()
 await db.collection('items').estimatedDocumentCount()             // 5
 await db.collection('items').countDocuments({ status: 'A' }, { skip: 1, limit: 2 })
 await db.listCollections().toArray()   // [{ name: 'items', type: 'collection' }]
+await db.renameCollection('items', 'archived_items')
+await db.stats()                       // { collections, objects, dataSize, ... }
 await db.dropDatabase()
 ```
 
@@ -415,7 +484,15 @@ await db.collection('items').updateMany({ qty: { $lt: 50 } }, { $set: { status: 
 await db.collection('items').updateOne({ item: 'paper' }, { $unset: { status: '' } })
 await db.collection('items').updateOne({ item: 'paper' }, { $mul: { qty: 2 }, $max: { seen: new Date() } })
 await db.collection('items').updateOne({ item: 'paper' }, { $rename: { status: 'state' } })
+await db.collection('items').updateOne({ item: 'paper' }, { $currentDate: { seen: true } })
+await db.collection('items').updateOne({ item: 'paper' }, { $bit: { flags: { or: 0b100 } } })
 ```
+
+`$currentDate` writes a real `Date` (`{ $type: 'date' }` is the long spelling;
+`{ $type: 'timestamp' }` is refused, because a BSON Timestamp is not one of the
+types this library can store). `$bit` applies `and`/`or`/`xor` in the order they
+are written, treats a missing field as 0, and refuses a target that is not a
+whole number rather than coercing it.
 
 Updates are validated the way MongoDB validates them, rather than being applied
 loosely: `_id` is immutable, a field cannot be targeted by two operators in one
@@ -913,50 +990,75 @@ the call site instead of in a wrong result.
 Query operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 `$not` `$nor` `$exists` `$type` `$regex` (with `$options`) `$mod` `$all`
 `$elemMatch` `$size` `$expr` `$bitsAllSet` `$bitsAnySet` `$bitsAllClear`
-`$bitsAnyClear`.
+`$bitsAnyClear` `$comment` `$sampleRate`.
 
 Update operators: `$set` `$unset` `$inc` `$mul` `$min` `$max` `$rename`
-`$setOnInsert` `$push` (with `$each`, `$slice`, `$sort`, `$position`)
-`$addToSet` (with `$each`) `$pop` `$pull` `$pullAll`, the positional operators
-`$` / `$[]` / `$[<identifier>]` (with `arrayFilters`), plus the `upsert` option
-on `updateOne`/`updateMany`/`replaceOne`.
+`$setOnInsert` `$currentDate` `$bit` `$push` (with `$each`, `$slice`, `$sort`,
+`$position`) `$addToSet` (with `$each`) `$pop` `$pull` `$pullAll`, the positional
+operators `$` / `$[]` / `$[<identifier>]` (with `arrayFilters`), plus the
+`upsert` option on `updateOne`/`updateMany`/`replaceOne`.
 
 Accumulators: `$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
-`$count`.
+`$count` `$stdDevPop` `$stdDevSamp` `$mergeObjects` `$firstN` `$lastN` `$maxN`
+`$minN` `$top` `$topN` `$bottom` `$bottomN`.
 
 Aggregation stages: `$match` `$sort` `$limit` `$skip` `$count` `$group`
-`$project` `$addFields`/`$set` `$unwind` `$lookup`.
+`$project` `$addFields`/`$set` `$unset` `$sortByCount` `$unwind` `$lookup`.
 
 Expression operators, for `$project`, `$addFields`, `$group._id` and
 accumulator arguments:
 
 | Family | Operators |
 | --- | --- |
-| Arithmetic | `$add` `$subtract` `$multiply` `$divide` `$mod` `$abs` `$ceil` `$floor` `$round` `$trunc` `$pow` `$sqrt` |
+| Arithmetic | `$add` `$subtract` `$multiply` `$divide` `$mod` `$abs` `$ceil` `$floor` `$round` `$trunc` `$pow` `$sqrt` `$exp` `$ln` `$log` `$log10` |
+| Trigonometry | `$sin` `$cos` `$tan` `$asin` `$acos` `$atan` `$atan2` `$sinh` `$cosh` `$tanh` `$asinh` `$acosh` `$atanh` `$degreesToRadians` `$radiansToDegrees` |
 | Comparison | `$cmp` `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` |
 | Boolean | `$and` `$or` `$not` |
 | Conditional | `$cond` `$ifNull` `$switch` |
-| String | `$concat` `$toLower` `$toUpper` `$split` `$strLenCP` `$substrCP` `$indexOfCP` `$trim` `$ltrim` `$rtrim` `$replaceOne` `$replaceAll` `$strcasecmp` |
-| Array | `$size` `$isArray` `$arrayElemAt` `$first` `$last` `$slice` `$concatArrays` `$in` `$reverseArray` `$range` `$map` `$filter` `$reduce` `$sum` `$avg` `$min` `$max` |
+| String | `$concat` `$toLower` `$toUpper` `$split` `$strLenCP` `$strLenBytes` `$substrCP` `$substrBytes` `$substr` `$indexOfCP` `$indexOfBytes` `$trim` `$ltrim` `$rtrim` `$replaceOne` `$replaceAll` `$strcasecmp` |
+| Regex | `$regexMatch` `$regexFind` `$regexFindAll` |
+| Array | `$size` `$isArray` `$arrayElemAt` `$first` `$last` `$slice` `$concatArrays` `$in` `$reverseArray` `$range` `$map` `$filter` `$reduce` `$indexOfArray` `$sortArray` `$zip` `$firstN` `$lastN` `$maxN` `$minN` `$sum` `$avg` `$min` `$max` |
+| Set | `$setUnion` `$setIntersection` `$setDifference` `$setEquals` `$setIsSubset` `$allElementsTrue` `$anyElementTrue` |
+| Object | `$mergeObjects` `$objectToArray` `$arrayToObject` `$getField` `$setField` `$unsetField` |
 | Date | `$year` `$month` `$dayOfMonth` `$hour` `$minute` `$second` `$millisecond` `$dayOfWeek` `$dayOfYear` `$dateToString` |
-| Type | `$type` `$isNumber` `$toString` `$toBool` `$toInt` `$toDouble` `$toDate` |
-| Other | `$literal` `$let`, and the variables `$$ROOT` `$$CURRENT` `$$REMOVE` |
+| Type | `$type` `$isNumber` `$toString` `$toBool` `$toInt` `$toDouble` `$toDate` `$convert` |
+| Vector | `$similarityCosine` `$similarityDotProduct` `$similarityEuclidean` |
+| Other | `$literal` `$let` `$rand`, and the variables `$$ROOT` `$$CURRENT` `$$REMOVE` |
 
 Dates are handled in **UTC**: a `timezone` option throws rather than being
 ignored, because answering a timezone question in UTC is a wrong answer that
 looks right.
 
+The three `$similarity*` operators make brute-force k-nearest-neighbour search
+expressible with no extension and no dependency — `$addFields` the score,
+`$sort`, `$limit`. Every document is scored, so it is for modest collections;
+`$vectorSearch` is Atlas-only and is not implemented.
+
+`$convert` produces only the types this library can store (`double`, `int`,
+`long`, `bool`, `string`, `date`); `decimal` and `objectId` are valid MongoDB
+type names that raise here — or answer with `onError` — rather than quietly
+producing something else.
+
 Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
 `distinct()` `aggregate()` `insertOne()` `insertMany()` `updateOne()`
 `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
 `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()` `createIndex()`
-`dropIndex()` `indexes()` `listIndexes()` `drop()`, each taking `{ session }`;
-on `Db`, `withTransaction()` `listCollections()` `createCollection()`
-`dropDatabase()` `databaseName`, and [`sql`](#raw-sql) / `table()` for SQL this
-library does not compile; plus a
-[`MongoClient` shim](#a-mongoclient-shaped-entry-point) with
+`createIndexes()` `dropIndex()` `dropIndexes()` `indexes()` `listIndexes()`
+`indexExists()` `rename()` `drop()`, each taking `{ session }`; on cursors,
+`next()` `tryNext()` `hasNext()` `toArray()` `forEach()` `map()` `rewind()`
+`count()` `close()` `explain()` and the chainable `sort()` `limit()` `skip()`
+`project()`; on `Db`, `withTransaction()` `listCollections()`
+`createCollection()` `renameCollection()` `dropDatabase()` `stats()`
+`databaseName`, and [`sql`](#raw-sql) / `table()` for SQL this library does not
+compile; plus a [`MongoClient` shim](#a-mongoclient-shaped-entry-point) with
 [`startSession()`](#sessions-and-the-one-thing-they-cannot-do) and
 `withSession()`.
+
+`db.stats()`'s COUNTS (`collections`, `objects`, `dataSize`) mean what they do
+on MongoDB; the byte figures under them describe a SQLite file —
+`storageSize` is `page_count * page_size`, free list and indexes included — and
+are not comparable with a server's. `db.command()` is not implemented and will
+not be: it is the whole wire protocol behind one method.
 
 Result objects match the official driver's shapes (`acknowledged`,
 `matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes
@@ -1051,30 +1153,29 @@ how each piece would be implemented. The headlines:
 
 **Updating**
 
-- `$currentDate` and `$bit`, and updates expressed as an aggregation pipeline
+- Updates expressed as an aggregation pipeline
   (`updateOne(filter, [{ $set: … }])`).
 
 **Collection / Db API**
 
-- `renameCollection()`, document validation (`$jsonSchema`), views, capped
-  collections, and the cursor conveniences (`hasNext()`, `forEach()`, `map()`)
-- Index properties beyond `unique`/`name`: `partialFilterExpression`, `sparse`,
-  TTL and `hint`. The first two map onto SQLite partial indexes and are the
-  cheapest real capability outstanding.
+- Document validation (`$jsonSchema`), views, capped collections
+- TTL indexes (`expireAfterSeconds`) and `hidden` — both rejected rather than
+  ignored; there is no background reaper here, and SQLite has no way to keep an
+  index from its own planner. `partialFilterExpression` exists but is narrower
+  than MongoDB's (see [Indexes](#indexes))
 
 **Aggregation** — the pipeline is a common-shapes subset, not the whole thing:
 
-- Stages: `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`,
-  `$graphLookup`, `$unionWith`, `$sortByCount`; and `$lookup`'s `let`+`pipeline`
-  form
-- Expression operators outside the table above: the regex family
-  (`$regexMatch`, …), the set family (`$setUnion`, …), the object family
-  (`$mergeObjects`, `$objectToArray`, …), trigonometry, `$dateFromString` and
-  the rest of the date arithmetic (`$dateAdd`, `$dateDiff`, `$dateTrunc`), and
-  timezone support on the date operators. `$function` and `$accumulator` will
-  **not** be supported, for the same reason as `$where`
-- `$group` accumulators beyond the nine listed above — `$stdDevPop`,
-  `$mergeObjects`, and the `N`-family (`$firstN`, `$topN`, …)
+- Stages: `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`,
+  `$sample`, `$graphLookup`, `$unionWith`, `$documents`, `$setWindowFields`; and
+  `$lookup`'s `let`+`pipeline` form
+- Expression operators outside the table above: `$dateFromString` and the rest
+  of the date arithmetic (`$dateAdd`, `$dateDiff`, `$dateTrunc`,
+  `$dateFromParts`, …), timezone support on the date operators, and `$meta`
+  (which needs `$text`). `$function` and `$accumulator` will **not** be
+  supported, for the same reason as `$where`
+- `$group` accumulators beyond those listed above — `$median` and `$percentile`,
+  whose interpolation rule has to be taken from the server rather than guessed
 
 **Change streams** — `watch()` throws today. The first attempt to build them
 asked SQLite what had changed and got nothing back (no update hook; the session
@@ -1086,11 +1187,26 @@ silence. BACKLOG.md items 26 and 27 have the measurements and the design.
 
 **Not planned**
 
-- Replication, sharding, `$where`, server-side JavaScript, GridFS, the wire
+- Replication, sharding, `$where`, server-side JavaScript, the wire
   protocol, `db.command()`. A process that needs those needs a server.
   (Multi-document atomicity within one connection *is* supported — see
   [Transactions](#transactions) and
   [Sessions](#sessions-and-the-one-thing-they-cannot-do).)
+
+**Binary data and GridFS** — not implemented, and the two are one gap. Every
+non-JSON type except `Date` is rejected at write time, `Uint8Array` included, so
+there is currently no way to store bytes through this library at all — not as a
+document field and not through `db.sql`, whose `${}` interpolation binds strings,
+numbers, booleans, `null`, `Date`s and objects but not blobs.
+
+GridFS itself needs nothing from a server — it is a convention over two ordinary
+collections — so it is a plausible feature rather than a refused one, gated on
+binary support landing first. Note that the problem it solves is not one this
+library has: there is **no 16MB document cap** here (see
+[Document limits](#document-limits) above), so its value would be compatibility
+for code already written against `GridFSBucket`. BACKLOG.md item 35 has the
+measurements and the build order. Until then, large binary payloads want a
+separate SQLite connection of your own.
 
 ## Thanks
 

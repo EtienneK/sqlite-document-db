@@ -304,6 +304,53 @@ describe('Comparison Query Operators - https://www.mongodb.com/docs/manual/refer
         expect(await col.find({ a: { $exists: true } }).toArray()).toStrictEqual([i[0], i[1], i[2], i[3], i[4], i[5], i[6]])
         expect(await col.find({ b: { $exists: false } }).toArray()).toStrictEqual([i[4], i[6], i[9]])
       })
+
+      /**
+       * The two "miscellaneous" query operators (BACKLOG item 28): neither says
+       * anything about a FIELD, which is why both are filter-document keys
+       * rather than criteria.
+       */
+      describe('$comment and $sampleRate', () => {
+        const seed = async (): Promise<any> => {
+          const col = db().collection('misc')
+          await col.insertMany(Array.from({ length: 20 }, (_unused, n) => ({ _id: n as any, n })))
+          return col
+        }
+
+        it('$comment selects nothing and changes nothing', async () => {
+          const col = await seed()
+          expect(await col.countDocuments({ $comment: 'a note for the log' })).toStrictEqual(20)
+          expect(await col.countDocuments({ $comment: 'a note', n: { $lt: 5 } })).toStrictEqual(5)
+          expect(await col.countDocuments({ $and: [{ $comment: 'nested' }, { n: 0 }] })).toStrictEqual(1)
+          // The server accepts any value at all here, not only a string.
+          expect(await col.countDocuments({ $comment: 5 })).toStrictEqual(20)
+        })
+
+        it('$sampleRate takes everything at 1 and nothing at 0', async () => {
+          const col = await seed()
+          expect(await col.countDocuments({ $sampleRate: 1 })).toStrictEqual(20)
+          expect(await col.countDocuments({ $sampleRate: 0 })).toStrictEqual(0)
+          // It is a per-document decision, so it composes with an ordinary
+          // criterion rather than replacing it.
+          expect(await col.countDocuments({ $sampleRate: 1, n: { $lt: 5 } })).toStrictEqual(5)
+          expect(await col.countDocuments({ $sampleRate: 0, n: { $lt: 5 } })).toStrictEqual(0)
+        })
+
+        it('$sampleRate takes roughly the fraction it was asked for', async () => {
+          const col = await seed()
+          const taken = await col.countDocuments({ $sampleRate: 0.5 })
+          // Twenty coin flips: the bound is loose enough that a fair one cannot
+          // fail it in practice, and a broken one (always/never) does.
+          expect(taken).toBeGreaterThan(0)
+          expect(taken).toBeLessThan(20)
+        })
+
+        it('$sampleRate rejects a rate outside [0, 1]', async () => {
+          const col = await seed()
+          await expect(col.countDocuments({ $sampleRate: 2 })).rejects.toThrow()
+          await expect(col.countDocuments({ $sampleRate: -1 })).rejects.toThrow()
+        })
+      })
     })
   }
 })
