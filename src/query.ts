@@ -239,7 +239,8 @@ const REFUSED_TOP_LEVEL_OPS: Record<string, string> = {
   $text: '$text is not supported: it needs a stemming full-text index, and SQLite\'s FTS5 stemmer ' +
     'does not agree with MongoDB\'s, so the two would return different documents for the same query ' +
     '- which is the one thing this library will not do quietly. Use $regex for substring matching, ' +
-    'or build an FTS5 table of your own through db.sql, where the tokenizer is your choice',
+    'or this library\'s own full-text search - createSearchIndex({ fields, tokenizer }) and ' +
+    'searchText(query) - where the tokenizer is your choice',
   $where: '$where is not supported, and will not be: it executes arbitrary JavaScript against every ' +
     'document. Use $expr, which covers the same comparisons without running code'
 }

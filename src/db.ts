@@ -11,7 +11,7 @@ import { ChangeHub, ChangeStream, changeEvent } from './change-stream.js'
 import { ClientSession } from './client-session.js'
 import {
   assertValidCollectionName, changeHubHost, Collection, collectionNames, collectionTables, dropRegistry,
-  tableNameFor
+  searchIndexRows, tableNameFor
 } from './collection.js'
 import type { Driver } from './driver.js'
 import { nodeSqliteDriver } from './drivers/node-sqlite.js'
@@ -460,6 +460,11 @@ export class Db {
     const dropped = this.changes.watching ? collectionNames(this.db) : []
     for (const table of collectionTables(this.db)) {
       this.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(table)}`)
+    }
+    // Search-index tables are separate objects (their triggers died with the
+    // collection tables above), and "drops everything" has to mean them too.
+    for (const row of searchIndexRows(this.db)) {
+      this.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(row.name)}`)
     }
     dropRegistry(this.db)
     this.collections.clear()

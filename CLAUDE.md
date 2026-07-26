@@ -645,6 +645,46 @@ instance for the new name: it evicts BOTH cache entries, because the source
 instance is bound to a table that is gone and any instance already opened under
 the target name was bound to the table the rename replaced.
 
+### Full-text search (item 31)
+
+`createSearchIndex({ fields, tokenizer })` / `searchText(query)` /
+`dropSearchIndex` / `listSearchIndexes` — this library's OWN feature, and the
+name is the point: `$text` cannot be honest (FTS5's stemmer disagrees with
+MongoDB's, so answers would differ) and `$search` is Atlas-only (no oracle even
+in principle), so both stay REFUSED and their error names this API instead.
+[test/search.spec.ts](test/search.spec.ts) is single-engine for that reason.
+
+A search index is an FTS5 table `fts_<table>_<name>` plus three triggers
+`ftg_<fts>_ai/au/ad` on the collection table. **Triggers, not the write path**,
+keep it in step — the one kind of write no library hook sees is `db.sql`, and
+triggers cover it. Trigger sub-changes do not inflate a statement's reported
+`changes` (measured), so result counts are untouched.
+
+**Non-obvious detail — the `sdb-index` comment trick does NOT work on a
+virtual table.** `sqlite_master` stores a RECONSTRUCTION of a
+`CREATE VIRTUAL TABLE` statement (measured: a trailing comment is dropped), not
+the caller's text. What it keeps verbatim is the fts5 ARGUMENT list, so
+`listSearchIndexes()` parses fields and tokenizer back out of the schema itself
+(`parseSearchIndexSql`) and the index NAME lives in the table-name suffix —
+which is why search index names are restricted to `[A-Za-z0-9_-]`, the set that
+round-trips through an identifier on a case-folding engine.
+
+**Non-obvious detail — a field contributes text only when it is a string** (or
+the string elements of an array, joined with spaces) — MongoDB's own text-index
+rule. The `CASE json_type(...)` in `searchColumnSql` is also what keeps a
+stored Date's `{"$date": ...}` wrapper from leaking the token `date` into every
+index.
+
+**Non-obvious detail — `rename()` renames the FTS tables and RECREATES the
+triggers.** SQLite rewrites references to a renamed table inside stored trigger
+bodies (for the fts rename exactly as for the collection rename), but never an
+object's own NAME — so the triggers are recreated from their already-rewritten
+SQL by name substitution, the same trick the index-recreation loop uses.
+`drop()` and `dropDatabase()` must drop the FTS tables explicitly: the triggers
+die with the collection table, the FTS tables do not — and FTS5's shadow tables
+(`<fts>_data`, ...) drop WITH their virtual table, which is why
+`searchIndexRows` filters on `CREATE VIRTUAL TABLE` and never names them.
+
 ### Transactions
 
 `db.withTransaction(work)` is a CALLBACK, not a session object: `node:sqlite` is

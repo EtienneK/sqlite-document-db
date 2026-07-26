@@ -29,13 +29,15 @@ import {
 import type {
   AggregateOptions, AggregationCursor, AnyFilter, BulkWriteOptions,
   BulkWriteResult, ChangeStreamNamespace, ChangeStreamOptions, CountOptions, CreateIndexOptions,
-  Cursor, DbOptions, DeleteOptions, DeleteResult,
-  DistinctOptions, Document, DropCollectionOptions, DropIndexOptions,
+  CreateSearchIndexOptions, Cursor, DbOptions, DeleteOptions, DeleteResult,
+  DistinctOptions, Document, DropCollectionOptions, DropIndexOptions, DropSearchIndexOptions,
   EstimatedDocumentCountOptions, InsertManyOptions, FindCursor, FindOneAndDeleteOptions,
   FindOneAndReplaceOptions, FindOneAndUpdateOptions, FindOptions, IndexDescription,
   IndexDescriptionInput, IndexDirection,
   IndexSpecification, InsertManyResult, InsertOneOptions, InsertOneResult, ListIndexesOptions,
-  QueryExplanation, RenameOptions, ReplaceOptions, SessionHost, SessionLike, SessionOption,
+  ListSearchIndexesOptions, QueryExplanation, RenameOptions, ReplaceOptions,
+  SearchHit, SearchIndexDescription, SearchIndexInfo, SearchTextOptions,
+  SessionHost, SessionLike, SessionOption,
   SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
 } from './types.js'
 import {
@@ -380,6 +382,65 @@ export function collectionNames (db: Driver): string[] {
 /** Removes the registry itself - for dropDatabase, which leaves nothing behind. */
 export function dropRegistry (db: Driver): void {
   db.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(REGISTRY_TABLE)}`)
+}
+
+/**
+ * The FTS5 tables backing search indexes (BACKLOG item 31) - for one
+ * collection's physical table, or (for dropDatabase) every collection's.
+ *
+ * Matched by prefix AND by `CREATE VIRTUAL TABLE`: FTS5 maintains shadow
+ * tables (`<fts>_data`, `<fts>_idx`, ...) that share the prefix but are
+ * ordinary tables, and they drop WITH their virtual table rather than by hand.
+ */
+export function searchIndexRows (db: Driver, collectionTable?: string): Array<{ name: string, sql: string }> {
+  const prefixes = collectionTable === undefined
+    ? COLLECTION_TABLE_PREFIXES.map(prefix => `fts_${prefix}`)
+    : [`fts_${collectionTable}_`]
+  const rows = db.prepare(
+    "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+  ).all() as Array<{ name: string, sql: string }>
+  return rows.filter(row => prefixes.some(prefix => row.name.startsWith(prefix)) && /USING fts5\(/i.test(row.sql))
+}
+
+/**
+ * A search index's fields and tokenizer, back out of its stored CREATE
+ * statement.
+ *
+ * The `sdb-index` comment trick does NOT work here: `sqlite_master` stores a
+ * RECONSTRUCTION of a `CREATE VIRTUAL TABLE` statement (measured - a trailing
+ * comment is dropped), not the caller's text. What the reconstruction keeps
+ * verbatim is the fts5 ARGUMENT list, so the metadata is parsed back from the
+ * schema itself - and the index NAME lives in the table-name suffix, which is
+ * why `assertValidSearchIndexName` only admits characters that round-trip.
+ *
+ * The scan runs left to right: a double-quoted region is a column, a
+ * `tokenize = '...'` a tokenizer - and the ORDER is what keeps a double quote
+ * inside a tokenizer spec (`tokenchars '"'`) from being misread as a column.
+ */
+function parseSearchIndexSql (sql: string): { fields: string[], tokenizer?: string } {
+  const args = /USING fts5\((.*)\)\s*$/is.exec(sql)?.[1] ?? ''
+  const fields: string[] = []
+  let tokenizer: string | undefined
+  for (const match of args.matchAll(/"((?:[^"]|"")*)"|tokenize\s*=\s*'((?:[^']|'')*)'/gi)) {
+    if (match[1] !== undefined) fields.push(match[1].replaceAll('""', '"'))
+    else tokenizer = match[2]!.replaceAll("''", "'")
+  }
+  return { fields, ...(tokenizer === undefined ? {} : { tokenizer }) }
+}
+
+/**
+ * Search index names become the suffix of a physical table name, and
+ * `listSearchIndexes()` recovers them from it - so unlike a collection name
+ * (digested, registered) or an ordinary index name (free-form, prefixed), a
+ * search index name has to survive the round trip on its own. [A-Za-z0-9_-]
+ * is what does, on an engine that folds identifier case.
+ */
+function assertValidSearchIndexName (name: string): void {
+  if (typeof name !== 'string' || name === '') throw Error('search index name must be a non-empty string')
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    throw Error(`search index name must contain only letters, digits, '_' and '-': ${name}`)
+  }
+  if (name.length > 120) throw Error('search index name must be at most 120 characters')
 }
 
 export class Collection<TSchema extends Document = Document> {
@@ -1180,6 +1241,203 @@ export class Collection<TSchema extends Document = Document> {
   }
 
   /**
+   * Creates a full-text search index over `fields` (BACKLOG item 31),
+   * returning its name.
+   *
+   * This is this library's OWN feature, deliberately not `$text` (FTS5's
+   * stemmer disagrees with MongoDB's, so the same query would return different
+   * documents) and not `$search` (Atlas-only, so there is no oracle even in
+   * principle). It is an FTS5 table shadowing the collection, kept in step by
+   * TRIGGERS rather than by the write path - which is what keeps a raw
+   * `db.sql` write searchable too, the one kind of write no library hook sees.
+   *
+   * The tokenizer is the caller's, verbatim, because it is the thing that
+   * cannot be made to agree with anybody; omitted, FTS5's default (unicode61,
+   * no stemming) applies. A field contributes its value when it is a string
+   * and its string elements when it is an array - MongoDB's own text-index
+   * rule - so numbers, objects and Dates are never searchable text.
+   */
+  async createSearchIndex (description: SearchIndexDescription, options: CreateSearchIndexOptions = {}): Promise<string> {
+    this.enlist(options)
+    if (description === null || typeof description !== 'object' || Array.isArray(description)) {
+      throw Error("createSearchIndex requires a description document with a 'fields' array")
+    }
+    for (const key of Object.keys(description)) {
+      if (!['name', 'fields', 'tokenizer'].includes(key)) {
+        throw Error(`createSearchIndex does not support the '${key}' option`)
+      }
+    }
+    const name = description.name ?? 'default'
+    assertValidSearchIndexName(name)
+
+    const fields = description.fields
+    if (!Array.isArray(fields) || fields.length === 0) {
+      throw Error("createSearchIndex requires a non-empty 'fields' array of document paths")
+    }
+    const seen = new Set<string>()
+    for (const field of fields) {
+      if (typeof field !== 'string' || field === '') throw Error('createSearchIndex field names must be non-empty strings')
+      if (field.includes('\0')) throw Error('createSearchIndex field names must not contain a null character')
+      const folded = field.toLowerCase()
+      if (folded === 'rank' || folded === 'rowid') {
+        throw Error(`createSearchIndex cannot index a field named '${field}': FTS5 reserves that column name`)
+      }
+      if (seen.has(folded)) {
+        throw Error(`createSearchIndex fields repeat '${field}' (FTS5 column names compare case-insensitively)`)
+      }
+      seen.add(folded)
+    }
+    const tokenizer = description.tokenizer
+    if (tokenizer !== undefined && (typeof tokenizer !== 'string' || tokenizer === '' || tokenizer.includes('\0'))) {
+      throw Error("tokenizer must be a non-empty string, e.g. 'porter' or 'unicode61 remove_diacritics 2'")
+    }
+
+    const physical = `fts_${this.name}_${name}`
+    // COLLATE NOCASE: SQLite folds identifier case, so 'Default' and 'default'
+    // would otherwise collide downstream with a far worse error.
+    const exists = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? COLLATE NOCASE"
+    ).get([physical])
+    if (exists !== undefined) throw Error(`search index already exists: ${name}`)
+
+    const columns = fields.map(field => quoteIdentifier(field)).join(', ')
+    const tokenize = tokenizer === undefined ? '' : `, tokenize = '${tokenizer.replaceAll("'", "''")}'`
+    // An unknown tokenizer fails HERE, before anything needs cleaning up.
+    this.exec(`CREATE VIRTUAL TABLE ${quoteIdentifier(physical)} USING fts5(${columns}${tokenize})`)
+    try {
+      const values = (source: string): string => fields.map(field => this.searchColumnSql(source, field)).join(', ')
+      this.exec(
+        `INSERT INTO ${quoteIdentifier(physical)}(rowid, ${columns}) SELECT rowid, ${values('data')} FROM ${this.table}`
+      )
+      this.exec(this.searchTriggersSql(physical, columns, values('NEW.data')))
+    } catch (error) {
+      // An index without its triggers would drift silently, which is worse
+      // than no index; take the half-built table down with the failure.
+      this.dropSearchArtifacts(physical)
+      throw error
+    }
+    return name
+  }
+
+  /**
+   * Runs an FTS5 MATCH query against a search index, best hit first.
+   *
+   * `query` is FTS5 query syntax, verbatim: bare terms, `"a phrase"`,
+   * `prefix*`, AND/OR/NOT, and `field: term` column filters all pass through,
+   * and a syntax error surfaces as SQLite reports it. The score is BM25
+   * (negated, so higher = more relevant); ties break by natural order so the
+   * answer is stable.
+   */
+  async searchText (query: string, options: SearchTextOptions = {}): Promise<Array<SearchHit<TSchema>>> {
+    this.enlist(options)
+    if (typeof query !== 'string' || query === '') throw Error('searchText requires a non-empty FTS5 query string')
+    if (options.limit !== undefined) assertLimit(options.limit)
+    if (options.skip !== undefined) assertSkip(options.skip)
+
+    const fts = quoteIdentifier(this.resolveSearchIndex(options.index))
+    let sql = `SELECT c.data AS data, -(${fts}.rank) AS score FROM ${fts} ` +
+      `JOIN ${this.table} AS c ON c.rowid = ${fts}.rowid ` +
+      `WHERE ${fts} MATCH :q ORDER BY ${fts}.rank, c.rowid`
+    if (options.limit != null || options.skip != null) {
+      // find()'s conventions: 0 is "no limit" (SQLite's -1), negative its
+      // absolute value - validated above, interpolated like find() does.
+      const limit = options.limit == null || options.limit === 0 ? -1 : Math.trunc(Math.abs(options.limit))
+      sql += ` LIMIT ${limit}`
+      if (options.skip != null && options.skip > 0) sql += ` OFFSET ${Math.trunc(options.skip)}`
+    }
+    const rows = this.allRows(sql, { q: query }) as unknown as Array<{ data: string, score: number }>
+    return rows.map(row => ({ score: row.score, document: parseDocument(row.data) as WithId<TSchema> }))
+  }
+
+  /** Drops a search index by name: its triggers first, then the FTS5 table. */
+  async dropSearchIndex (name: string, options: DropSearchIndexOptions = {}): Promise<void> {
+    this.enlist(options)
+    const physical = `fts_${this.name}_${name}`
+    const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get([physical])
+    if (found === undefined) throw Error(`search index not found with name [${name}]`)
+    this.dropSearchArtifacts(physical)
+  }
+
+  /** Lists search indexes, their descriptions recovered from the schema itself. */
+  listSearchIndexes (options: ListSearchIndexesOptions = {}): { toArray: () => Promise<SearchIndexInfo[]> } {
+    return {
+      toArray: async () => {
+        this.enlist(options)
+        const prefix = `fts_${this.name}_`
+        return searchIndexRows(this.db, this.name).map(row =>
+          Object.assign({ name: row.name.slice(prefix.length) }, parseSearchIndexSql(row.sql))
+        )
+      }
+    }
+  }
+
+  /** The physical FTS5 table `searchText` should query. */
+  private resolveSearchIndex (name?: string): string {
+    if (name !== undefined) {
+      const physical = `fts_${this.name}_${name}`
+      const found = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get([physical])
+      if (found === undefined) {
+        throw Error(`no search index named '${name}' on ${this.collectionName}; listSearchIndexes() names the ones that exist`)
+      }
+      return physical
+    }
+    const rows = searchIndexRows(this.db, this.name)
+    if (rows.length === 0) {
+      throw Error(`no search index on ${this.collectionName}: create one with createSearchIndex({ fields: [...] })`)
+    }
+    if (rows.length > 1) {
+      const prefix = `fts_${this.name}_`
+      const names = rows.map(row => row.name.slice(prefix.length)).join(', ')
+      throw Error(`${this.collectionName} has ${rows.length} search indexes (${names}); name one with { index }`)
+    }
+    return rows[0]!.name
+  }
+
+  /**
+   * The text one document contributes to one FTS5 column. A string
+   * contributes itself, an array its string elements joined by spaces,
+   * anything else nothing - so a number is never findable as its digits and a
+   * stored Date's wrapper object never leaks `$date` into the index.
+   */
+  private searchColumnSql (source: string, field: string): string {
+    const path = toJson1PathString([field])
+    return `CASE json_type(${source}, ${path}) ` +
+      `WHEN 'text' THEN json_extract(${source}, ${path}) ` +
+      `WHEN 'array' THEN (SELECT group_concat(je.value, ' ') FROM json_each(${source}, ${path}) AS je WHERE je.type = 'text') ` +
+      'ELSE NULL END'
+  }
+
+  /**
+   * The three triggers that keep a search index in step with its collection.
+   *
+   * The update trigger is DELETE + INSERT rather than an UPDATE so the column
+   * expressions exist once, and it fires on every UPDATE (not `OF data`) so a
+   * raw `db.sql` write that moves a rowid cannot strand an FTS row. Trigger
+   * sub-changes never inflate a statement's reported `changes` (measured), so
+   * result counts stay what they were.
+   */
+  private searchTriggersSql (physical: string, columns: string, newValues: string): string {
+    const fts = quoteIdentifier(physical)
+    return (
+      `CREATE TRIGGER ${quoteIdentifier(`ftg_${physical}_ai`)} AFTER INSERT ON ${this.table} BEGIN ` +
+      `INSERT INTO ${fts}(rowid, ${columns}) VALUES (NEW.rowid, ${newValues}); END; ` +
+      `CREATE TRIGGER ${quoteIdentifier(`ftg_${physical}_au`)} AFTER UPDATE ON ${this.table} BEGIN ` +
+      `DELETE FROM ${fts} WHERE rowid = OLD.rowid; ` +
+      `INSERT INTO ${fts}(rowid, ${columns}) VALUES (NEW.rowid, ${newValues}); END; ` +
+      `CREATE TRIGGER ${quoteIdentifier(`ftg_${physical}_ad`)} AFTER DELETE ON ${this.table} BEGIN ` +
+      `DELETE FROM ${fts} WHERE rowid = OLD.rowid; END;`
+    )
+  }
+
+  /** Removes a search index's triggers and table, tolerating half-built state. */
+  private dropSearchArtifacts (physical: string): void {
+    for (const suffix of ['ai', 'au', 'ad']) {
+      this.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(`ftg_${physical}_${suffix}`)}`)
+    }
+    this.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(physical)}`)
+  }
+
+  /**
    * This collection's table, with `INDEXED BY` attached - SQLite's spelling of
    * a `hint`, and like MongoDB's it FAILS rather than falling back when the
    * index cannot serve the query ("no query solution").
@@ -1290,6 +1548,12 @@ export class Collection<TSchema extends Document = Document> {
   async drop (options: DropCollectionOptions = {}): Promise<boolean> {
     this.enlist(options)
     this.exec(`DROP TABLE IF EXISTS ${this.table}`)
+    // The search-index triggers died with the table; the FTS5 tables are
+    // separate objects and would otherwise outlive the collection, colliding
+    // with the next createSearchIndex under the same name.
+    for (const row of searchIndexRows(this.db, this.name)) {
+      this.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(row.name)}`)
+    }
     unregisterCollection(this.db, this.name)
     this.onDrop()
     if (this.changes.watching) {
@@ -1326,12 +1590,21 @@ export class Collection<TSchema extends Document = Document> {
     if (exists !== undefined) {
       if (options.dropTarget !== true) throw Error('target namespace exists')
       this.exec(`DROP TABLE ${quoteIdentifier(targetTable)}`)
+      // The target's search-index tables, exactly as drop() removes them.
+      for (const row of searchIndexRows(this.db, targetTable)) {
+        this.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(row.name)}`)
+      }
       unregisterCollection(this.db, targetTable)
     }
 
     const indexes = this.db.prepare(
       "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL"
     ).all([this.name]) as Array<{ name: string, sql: string }>
+    const searchTables = searchIndexRows(this.db, this.name)
+    const triggers = (this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?"
+    ).all([this.name]) as Array<{ name: string }>)
+      .filter(trigger => trigger.name.startsWith(`ftg_fts_${this.name}_`))
 
     this.exec(`ALTER TABLE ${this.table} RENAME TO ${quoteIdentifier(targetTable)}`)
     unregisterCollection(this.db, this.name)
@@ -1346,6 +1619,26 @@ export class Collection<TSchema extends Document = Document> {
       if (current === undefined) continue
       this.exec(current.sql.replace(index.name, renamed))
       this.exec(`DROP INDEX ${quoteIdentifier(index.name)}`)
+    }
+
+    // A search index is an FTS5 table plus three triggers, and renaming the
+    // tables is what fixes the trigger BODIES: SQLite rewrites references to a
+    // renamed table inside stored trigger programs (measured), for the fts
+    // rename here exactly as it just did for the collection rename above. What
+    // it cannot rewrite is the objects' own NAMES, so the triggers are then
+    // recreated under new names from their already-rewritten SQL - the same
+    // substitution-not-re-derivation the index loop above does.
+    for (const table of searchTables) {
+      const renamed = table.name.replace(this.name, targetTable)
+      this.exec(`ALTER TABLE ${quoteIdentifier(table.name)} RENAME TO ${quoteIdentifier(renamed)}`)
+    }
+    for (const trigger of triggers) {
+      const renamed = trigger.name.replace(this.name, targetTable)
+      if (renamed === trigger.name) continue
+      const current = this.db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get([trigger.name]) as { sql: string } | undefined
+      if (current === undefined) continue
+      this.exec(`DROP TRIGGER ${quoteIdentifier(trigger.name)}`)
+      this.exec(current.sql.replace(trigger.name, renamed))
     }
 
     this.onDrop()

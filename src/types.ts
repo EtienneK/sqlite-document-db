@@ -277,6 +277,66 @@ export interface IndexDescriptionInput extends Omit<CreateIndexOptions, 'session
   key: Record<string, IndexDirection>
 }
 
+/**
+ * A full-text search index (BACKLOG item 31) - this library's OWN feature,
+ * with no MongoDB parity claim. `$text` cannot be honest here (FTS5's stemmer
+ * disagrees with MongoDB's, so the same query would return different
+ * documents) and `$search` is Atlas-only, so neither can be oracle-verified;
+ * this API promises only what it can keep, and the tokenizer - the thing that
+ * cannot be made to agree with anybody - is named by the caller.
+ */
+export interface SearchIndexDescription {
+  /**
+   * Defaults to 'default'. Letters, digits, '_' and '-' only: the name is the
+   * suffix of a physical table and has to round-trip back out of it.
+   */
+  name?: string
+  /**
+   * The document paths to index (dot notation). A path contributes its value
+   * when it is a string, and its STRING elements (joined by spaces) when it is
+   * an array - anything else contributes nothing, which is the rule MongoDB's
+   * own text indexes follow.
+   */
+  fields: string[]
+  /**
+   * The FTS5 tokenizer spec, verbatim - e.g. 'porter', 'trigram', or
+   * 'unicode61 remove_diacritics 2'. FTS5's default (unicode61) when omitted.
+   */
+  tokenizer?: string
+}
+
+/** What `listSearchIndexes()` reports: the description, recovered from the schema. */
+export interface SearchIndexInfo {
+  name: string
+  fields: string[]
+  tokenizer?: string
+}
+
+export interface CreateSearchIndexOptions extends SessionOption {}
+
+export interface DropSearchIndexOptions extends SessionOption {}
+
+export interface ListSearchIndexesOptions extends SessionOption {}
+
+export interface SearchTextOptions extends SessionOption {
+  /** Which search index to query. Only needed when the collection has more than one. */
+  index?: string
+  /** As on `find()`: 0 means no limit, a negative limit its absolute value. */
+  limit?: number
+  skip?: number
+}
+
+/** One `searchText()` hit. */
+export interface SearchHit<TSchema extends Document = Document> {
+  /**
+   * BM25 relevance, higher is more relevant. The ORDERING is the contract;
+   * the magnitude is FTS5's and can sit near zero for terms most documents
+   * contain.
+   */
+  score: number
+  document: WithId<TSchema>
+}
+
 export type SortSpecification = string | Record<string, 1 | -1>
 
 /**

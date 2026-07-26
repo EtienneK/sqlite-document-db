@@ -258,7 +258,7 @@ describe('$expr and the bitwise operators', () => {
 
     it('explains why $text is refused, and what to use instead', async () => {
       await expect(db.collection('t').find({ $text: { $search: 'coffee' } } as any).toArray())
-        .rejects.toThrow(/\$text is not supported.*FTS5 stemmer.*\$regex.*db\.sql/s)
+        .rejects.toThrow(/\$text is not supported.*FTS5 stemmer.*\$regex.*createSearchIndex/s)
       // The alternative it points at does work.
       expect((await db.collection('t').find({ body: { $regex: 'coffee' } }).toArray()).map(d => d._id))
         .toStrictEqual([1])

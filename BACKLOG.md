@@ -187,8 +187,7 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 1= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | ~~S~~, then M+M | **Step 1 DONE 2026-07-26**: `db.sql` binds and returns `Uint8Array`, and `DriverParams` obliges every driver to carry blobs (seam spec included). Steps 2–3 remain: `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 1 | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | ~~S~~, then M+M | **Step 1 DONE 2026-07-26**: `db.sql` binds and returns `Uint8Array`, and `DriverParams` obliges every driver to carry blobs (seam spec included). Steps 2–3 remain: `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
 | 2 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
 | 3 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
 | 4 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
@@ -196,6 +195,7 @@ the closed items are listed after it for provenance.
 | 6 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
 | 7 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | 8 | [Optimistic concurrency](#21-optimistic-concurrency) | S | **DECIDED, and deliberately last.** Was position 1 as a gating decision; the decision is made (no `_version`), so what is left is a README section for a pattern that already works. It is documentation of DRIVER usage, not parity, and everything above it is parity. Do it when the list above is shorter. |
+| — | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | **DONE 2026-07-26.** `createSearchIndex({ fields, tokenizer })`/`searchText()`/`dropSearchIndex`/`listSearchIndexes`: an FTS5 table shadowing the collection, kept in step by TRIGGERS (so `db.sql` writes stay searchable — the one write no library hook sees), tokenizer named by the caller. `$text`/`$search` stay refused and the error now names this API. The comment trick does NOT survive `CREATE VIRTUAL TABLE` (sqlite_master stores a reconstruction), so the description is parsed back from the fts5 argument list and the name from the table suffix. |
 | — | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | **DONE 2026-07-26.** A `Driver` wrapping another `Driver` (src/statement-cache.ts), applied by `Db.open` to every engine. The lifetime problem the re-size predicted was real and had three answers: resolve the statement per CALL (never per prepare), mark it BUSY across `iterate()`, hand a busy hit a transient statement. Measured file-backed: `findOne` by id 3.4x, `updateOne` in a transaction 4.3x, indexed `find` 2.1x. |
 | — | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | **DONE 2026-07-26.** Substitute, then delegate: per input document the `let` variables are evaluated and every `$$var` in the sub-pipeline becomes a `$literal` (scope-aware - inner bindings shadow), and the result runs as an ORDINARY aggregate() on the foreign collection - so the `$match` pushdown, `mdb_expr` and nested `$lookup`s came free. Executions memoize on the variable VALUES: an uncorrelated pipeline is one query total. The classic form now reads through the same hook as `[{ $match: { field: { $in: keys } } }]`. Combining localField/foreignField WITH a pipeline (4.4+) is refused as unimplemented. |
 | — | [Pipeline updates](#28-the-operator-gap-sweep) | M | **DONE 2026-07-26.** `updateOne(filter, [{ $set: … }])` on the three update methods and `bulkWrite`. Evaluates in JS through the SAME stages `aggregate()` runs (the `$expr` precedent, followed); `updateMany` reads the matched rows and writes every result back in ONE `json_each` statement. The change event's `updateDescription` is DIFFED from the images - which is what the server does for a pipeline write, granularly - and the one divergence (MongoDB's oplog size heuristic flips small-document events to `replace`) is refused under strict, like the positional one. The oracle also caught `$set`-to-missing keeping the old value in `aggregate()` - it must REMOVE the field. |
@@ -326,7 +326,7 @@ priority table above.
 | 28 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **The S half DONE 2026-07-26**, and **pipeline updates the same day** — `$currentDate`, `$bit`, `$comment`, `$sampleRate`, seven expression families, eleven accumulators, `$unset`, `$sortByCount`, `updateOne(filter, [{ $set: … }])`. Date arithmetic (M) remains |
 | 29 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | **DONE 2026-07-26** except TTL — `sparse`, `partialFilterExpression` (narrower than MongoDB's, and it says why), `hint`, `createIndexes`, `dropIndexes`, `indexExists` |
 | 30 | [Geospatial queries](#30-geospatial-queries) | M | Open — R-Tree and geopoly are compiled in; spherical-vs-planar is the real work |
-| 31 | [Search under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | Open — FTS5 with a caller-chosen tokenizer; `$text`/`$search` stay refused |
+| 31 | ~~[Search under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature)~~ | M | **DONE 2026-07-26** — `createSearchIndex`/`searchText`, FTS5 with a caller-chosen tokenizer, kept in step by triggers; `$text`/`$search` stay refused, naming it |
 | 32 | [Vector similarity](#32-vector-similarity-without-an-extension) | S / L | **The S half DONE 2026-07-26** — `$similarityCosine`/`$similarityDotProduct`/`$similarityEuclidean`; indexed ANN needs an extension and is not scheduled |
 | 33 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | **The S half DONE 2026-07-26** — cursor methods, `find().explain()`, `renameCollection`, `db.stats()`. Validation, views and capped collections remain, and are M |
 | 34 | ~~[The stress test](#34-the-stress-test-complex-documents-every-feature)~~ | M | **DONE 2026-07-26** — `npm run stress`; found a quadratic `$slice` (fixed, 1000x) and an O(depth²) dotted path (pinned) |
@@ -2802,7 +2802,35 @@ refinement, then GeoJSON `$geometry` and `$geoIntersects` on top of geopoly.
 
 ## 31. Search: `$search` cannot be the API, but search can be the feature
 
-**Size: M.** [`$text` was decided against](#text-decided-2026-07-26--not-implemented-and-it-says-why)
+**Size: M — DONE 2026-07-26**, as designed below: `createSearchIndex({ name?,
+fields, tokenizer? })`, `searchText(query, { index?, limit?, skip? })` (hits are
+`{ score, document }`, BM25 best-first, FTS5 query syntax verbatim),
+`dropSearchIndex()` and `listSearchIndexes()`, single-engine in
+[test/search.spec.ts](test/search.spec.ts) because that is the feature's whole
+premise. The triggers-vs-write-path question the design left open settled
+itself: **triggers**, because `db.sql` is the one write path no library hook
+sees, and a search index that silently missed raw writes would be the kind of
+quiet wrongness this library exists to refuse. Three things worth carrying
+forward:
+
+- **`sqlite_master` stores a RECONSTRUCTION of `CREATE VIRTUAL TABLE`** — a
+  trailing comment is dropped (measured), so the `sdb-index` metadata-comment
+  trick does not work on an FTS5 table. The reconstruction keeps the fts5
+  argument list verbatim, so the description is parsed back from the schema
+  itself and the index NAME lives in the table-name suffix — which is why
+  search index names are restricted to `[A-Za-z0-9_-]`.
+- **A field contributes text only when it is a string** (or an array's string
+  elements, joined) — MongoDB's own text-index rule, and the same `CASE` keeps
+  the stored-Date wrapper from leaking the token `date` into every index.
+- **`rename()` renames the FTS tables and recreates the triggers**: SQLite
+  rewrites table references inside stored trigger bodies but never an object's
+  own name. `drop()`/`dropDatabase()` drop the FTS tables explicitly — the
+  triggers die with the collection table, the FTS tables do not.
+
+`$text` and `$search` still throw, and the `$text` error now names
+`createSearchIndex`/`searchText` as the alternative. Original analysis follows.
+
+[`$text` was decided against](#text-decided-2026-07-26--not-implemented-and-it-says-why)
 because FTS5's stemmer disagrees with MongoDB's Snowball one, so the same query
 returns different documents. Reviewing
 [MongoDB Search](https://www.mongodb.com/docs/search/) does not change that

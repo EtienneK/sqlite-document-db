@@ -493,6 +493,47 @@ Only whole numbers are tested — a value with a fractional part, a string or a
 missing field never matches — and the implicit-array rule applies, so a field
 holding `[1, 8]` matches when one of its elements does.
 
+### Full-text search
+
+Search is this library's **own feature**, under its own name — deliberately not
+`$text` (SQLite's FTS5 stemmer does not agree with MongoDB's, so the same query
+would return different documents, which is the one thing this library will not
+do quietly) and not `$search` (Atlas-only, so there is no server to check it
+against even in principle). What it promises, it can keep: SQLite's FTS5, with
+the tokenizer named by you.
+
+```javascript
+const articles = db.collection('articles')
+await articles.createSearchIndex({ fields: ['title', 'body'], tokenizer: 'porter' })
+
+const hits = await articles.searchText('running shoes', { limit: 10 })
+// → [ { score: 1.94, document: { _id: …, title: 'Trail running shoes', … } }, … ]
+
+await articles.searchText('"walking boots"') // FTS5 query syntax passes through:
+await articles.searchText('walk* NOT city')  // phrases, prefixes, NOT/AND/OR,
+await articles.searchText('title : cycling') // per-field filters
+
+await articles.listSearchIndexes().toArray() // → [{ name, fields, tokenizer? }]
+await articles.dropSearchIndex('default')
+```
+
+- **The index is kept in step by SQLite triggers**, not by this library's write
+  path — so documents inserted, updated or deleted through [`db.sql`](#raw-sql)
+  stay searchable too, which no library-side hook could promise.
+- **The tokenizer is yours, verbatim** (`'porter'`, `'trigram'`,
+  `'unicode61 remove_diacritics 2'`, …). Omitted, FTS5's default applies:
+  `unicode61`, which does **not** stem — `run` will not match `running` unless
+  you choose a stemmer.
+- **A field contributes its value when it is a string**, and its string
+  elements when it is an array — the rule MongoDB's own text indexes follow.
+  Numbers, objects and `Date`s are never searchable text.
+- **`score` is BM25** (negated, so higher is more relevant), and hits arrive
+  best-first. The ordering is the contract; the magnitude is FTS5's.
+- The index follows `rename()`, disappears with `drop()`, and rolls back with a
+  transaction like everything else. Names accept letters, digits, `_` and `-`;
+  the default name is `default`, and `searchText` only needs `{ index }` when a
+  collection has more than one.
+
 ### Update documents
 
 ```javascript
@@ -1305,9 +1346,10 @@ how each piece would be implemented. The headlines:
   FTS5 stemmer does not agree with MongoDB's — the same query would return
   different documents on the two, which is the one thing this library will not
   do quietly. `$search` is Atlas-only, so it cannot be checked against a real
-  server even in principle. Use `$regex`, or build an FTS5 table of your own
-  through [`db.sql`](#raw-sql), where the tokenizer is your choice. The error
-  says so, and a supported search API under its own name is planned.
+  server even in principle. Both stay refused, and the error names the
+  alternative: [full-text search under this library's own
+  name](#full-text-search) (`createSearchIndex`/`searchText`), where the
+  tokenizer is your choice — or `$regex` for substring matching.
 - `$where` will **not** be supported (it executes arbitrary JavaScript). `$expr`
   covers the same comparisons without running code.
 

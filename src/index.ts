@@ -47,7 +47,9 @@ export type {
   InsertManyOptions, InsertManyResult, InsertOneOptions, InsertOneResult, InvalidateReason,
   ListCollectionsOptions,
   ListIndexesOptions, PipelineExplanation, QueryExplanation, RenameOptions, ReplaceOptions,
-  ResumeToken, SessionOption, SortSpecification, UpdateDescription, UpdateOptions, UpdateResult,
+  ResumeToken, SearchHit, SearchIndexDescription, SearchIndexInfo, SearchTextOptions,
+  CreateSearchIndexOptions, DropSearchIndexOptions, ListSearchIndexesOptions,
+  SessionOption, SortSpecification, UpdateDescription, UpdateOptions, UpdateResult,
   WithId, WithoutId
 } from './types.js'
 
