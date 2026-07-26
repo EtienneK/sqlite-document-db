@@ -181,17 +181,16 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | "You are on SQLite" is the pitch, and there is no way to use SQLite. The moment a caller needs a CTE or a window function their only option is a second connection to the same file. |
-| 2 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
-| 3 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 4 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 5 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 6 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 2-3 first, or the promise is embarrassing. |
-| 7 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 8 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 2 first, since its point is running an expression per input document. |
-| 9 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 10 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 11 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
+| 2 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 3 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 4 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 5 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 1-2 first, or the promise is embarrassing. |
+| 6 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 7 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 1 first, since its point is running an expression per input document. |
+| 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 9 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 10 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
 Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
@@ -253,7 +252,7 @@ priority table above.
 | 17 | [Smaller items](#17-smaller-items-and-nice-to-haves) | S each | Benchmarks, `_id` types, depth limits, concurrency docs **DONE**; statement cache and TypeDoc open |
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
 | 19 | ~~[Unicode round-trips](#19-unicode-and-special-character-round-trips)~~ | S | **DONE 2026-07-26** — [test/unicode.spec.ts](test/unicode.spec.ts); found and fixed a real string-ordering bug |
-| 20 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | Open — decide decoded vs raw rows, and read-only vs writable |
+| 20 | ~~[Raw SQL escape hatch](#20-a-raw-sql-escape-hatch)~~ | S-M | **DONE 2026-07-26** — `db.sql.all/get/run` + `db.table()`; raw rows, writable |
 | 21 | [Optimistic concurrency](#21-optimistic-concurrency) | L | Open — **decide first**; option 2 (document the pure-MongoDB pattern) is likely |
 | 22 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Open — wants a wider subset first |
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
@@ -1350,7 +1349,50 @@ Dual-engine, so MongoDB decides what "unchanged" means.
 
 ## 20. A raw SQL escape hatch
 
-**Size: S-M.** Pongo exposes `collection.sql.query` / `sql.command`. There is no
+**Size: S-M — DONE 2026-07-26.** `db.sql.all` / `.get` / `.run`, three tagged
+templates in [src/raw-sql.ts](src/raw-sql.ts), named after the driver methods a
+SQLite user already knows. Verified in
+[test/raw-sql.spec.ts](test/raw-sql.spec.ts) (this library alone — MongoDB has
+no SQL to arbitrate, though every test that writes goes back through `find` to
+prove the document API sees it) and through the reduced driver in
+[test/driver-seam.spec.ts](test/driver-seam.spec.ts). Example:
+[examples/15-raw-sql.mjs](examples/15-raw-sql.mjs).
+
+**The decisions the item asked for:**
+
+- **Raw rows, not decoded** — as recommended. A document arrives as the `data`
+  column's JSON text; `parseDocument` and `stringifyDocument` are now exported
+  so decoding and encoding are one visible call. Decoded rows would have made
+  the `{"$date"}` wrapper an implementation detail that leaks in some places and
+  not others.
+- **Writable, not read-only.** A read-only hatch cannot `PRAGMA`, `ANALYZE`,
+  `VACUUM` or fix up rows in bulk, which is much of the point. `run` is a
+  separate method from `all`/`get`, so a read still reads.
+- **Inside `withTransaction` it just works** — same connection, nothing to
+  thread through. Pinned by a rollback test.
+- **Errors are not translated.** A constraint violation surfaces as SQLite
+  reports it. You wrote SQL, not `insertOne`.
+
+**Two things the implementation had to solve that the item did not anticipate:**
+
+- **A table name cannot be bound**, and `tableNameFor()` is deliberately not
+  guessable (`Users` and `users` differ by a digest). So there is
+  `db.table(name)`, which returns the quoted physical name as a `SqlFragment` —
+  the ONE interpolation that is spliced rather than bound, and one this library
+  produces rather than the caller. Without it the hatch could not reach a
+  collection at all.
+- **`DatabaseSync.prepare()` silently discards everything after the first
+  statement** (measured: `INSERT …; INSERT …` inserts one row and reports
+  success). A second statement is rejected, by a scan that skips string
+  literals, quoted identifiers and comments so a `;` inside `'a;b'` stays data.
+
+Also, `node:sqlite` returns NULL-prototype rows; they are copied onto ordinary
+objects, because otherwise a different `Driver` would hand callers a different
+shape for the same query — a leak straight through the DR-3 seam.
+
+### Original analysis
+
+Pongo exposes `collection.sql.query` / `sql.command`. There is no
 way out of the document API here, and for a library whose whole pitch is "you
 are on SQLite" that is a strange omission: the moment someone needs a window
 function, a recursive CTE or a join this library will not compile, their only

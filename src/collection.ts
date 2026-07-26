@@ -80,7 +80,7 @@ const UNAMBIGUOUS_NAME = /^[a-z0-9_]+$/
  * (and any other character SQLite folds) apart. The slug is decoration - the
  * digest is what makes the name unique.
  */
-function tableNameFor (name: string): string {
+export function tableNameFor (name: string): string {
   if (UNAMBIGUOUS_NAME.test(name)) return `collection_${name}`
   const slug = name.toLowerCase().replace(/[^a-z0-9_]/g, '_')
   return `collectionx_${slug}_${createHash('sha256').update(name).digest('hex').slice(0, 16)}`
@@ -96,7 +96,7 @@ function tableNameFor (name: string): string {
  * tableNameFor), so only MongoDB's own restrictions remain, plus SQLite's
  * reserved table prefix.
  */
-function assertValidCollectionName (name: string): void {
+export function assertValidCollectionName (name: string): void {
   if (typeof name !== 'string' || name === '') throw Error('collection name must be a non-empty string')
   if (name.includes('\0')) throw Error('collection name must not contain a null character')
   if (name.includes('$')) throw Error(`collection name must not contain '$': ${name}`)

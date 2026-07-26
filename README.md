@@ -557,6 +557,60 @@ db.collection('Users')  // a different collection from...
 db.collection('users')  // ...this one
 ```
 
+### Raw SQL
+
+Your documents are in SQLite, so you should be able to use SQLite. `db.sql` is
+three tagged templates — named after the methods a SQLite user already knows —
+for the query this library cannot compile: a recursive CTE, a window function, a
+join, a `PRAGMA`.
+
+```javascript
+const busiest = await db.sql.all`
+  SELECT json_extract(data, '$.city') AS city, COUNT(*) AS n
+  FROM ${db.table('places')}
+  GROUP BY city
+  HAVING n > ${threshold}
+  ORDER BY n DESC`
+// → [ { city: 'Cape Town', n: 2 }, ... ]
+
+const row = await db.sql.get`SELECT COUNT(*) AS n FROM ${db.table('places')}`
+const { changes } = await db.sql.run`DELETE FROM ${db.table('places')} WHERE rowid = ${id}`
+```
+
+It runs on the **same connection** as everything else, so it sees uncommitted
+writes and joins in on [`withTransaction`](#transactions) with nothing to thread
+through — which is the thing a second connection to the same file cannot do.
+
+Four things to know:
+
+- **Interpolations are bound, not spliced.** Every `${}` becomes a `?`
+  parameter, so a value can never become SQL. Strings, numbers, booleans
+  (as 1/0), `null`, `Date` (as its ISO string, which is what is stored at
+  `<field>.$date`) and objects/arrays (as their storage JSON, ready for
+  `json(?)`) are all bindable; anything else throws.
+- **`db.table(name)` is the exception**, and the only one. A table name cannot
+  be a parameter, and the physical name is not guessable — `Users` and `users`
+  are two collections on an engine that compares identifiers
+  case-insensitively, so awkward names carry a digest. It returns the quoted
+  name, produced by this library rather than by you.
+- **Rows come back raw.** A document is the `data` column's JSON *text*.
+  `parseDocument` decodes it (and revives Dates); `stringifyDocument` is the
+  encoder to use if you write a document row by hand.
+
+  ```javascript
+  import { parseDocument } from 'sqlite-document-db'
+
+  const rows = await db.sql.all`SELECT data FROM ${db.table('places')} LIMIT 10`
+  const docs = rows.map(row => parseDocument(row.data))
+  ```
+- **One statement per call.** `node:sqlite` compiles the first statement and
+  silently ignores the rest, so a two-statement string would half-execute and
+  report success. That is refused rather than allowed; send them one at a time,
+  inside `withTransaction()` if they must be atomic.
+
+Errors are not translated: a constraint violation here surfaces the way SQLite
+reports it, because you are writing SQL rather than calling `insertOne`.
+
 ## Development
 
 ```
@@ -627,7 +681,8 @@ Methods: `find()` `findOne()` `countDocuments()` `estimatedDocumentCount()`
 `updateMany()` `deleteOne()` `deleteMany()` `replaceOne()` `bulkWrite()`
 `findOneAndUpdate()` `findOneAndReplace()` `findOneAndDelete()` `createIndex()`
 `dropIndex()` `indexes()` `listIndexes()` `drop()`; on `Db`,
-`withTransaction()` `listCollections()` `dropDatabase()`.
+`withTransaction()` `listCollections()` `dropDatabase()`, and
+[`sql`](#raw-sql) / `table()` for SQL this library does not compile.
 
 Result objects match the official driver's shapes (`acknowledged`,
 `matchedCount`, `modifiedCount`, `upsertedId`, ...), and errors match its codes
@@ -714,7 +769,6 @@ how each piece would be implemented. The headlines:
 **Updating**
 
 - `$position` inside `$push`, and the positional operators `$` / `$[]` / `$[<id>]`
-- Bulk writes (`bulkWrite`)
 
 **Collection / Db API**
 

@@ -75,6 +75,7 @@ belongs in types.ts.**
 - [src/filter-types.ts](src/filter-types.ts) — `Filter<TSchema>` / `UpdateFilter<TSchema>`
   and the dot-notation path algebra behind them. Types only; no runtime code.
 - [src/object-id.ts](src/object-id.ts) — generates MongoDB-compatible ObjectId hex strings.
+- [src/raw-sql.ts](src/raw-sql.ts) — the `db.sql` escape hatch (see below).
 
 ### Storage model
 
@@ -308,6 +309,35 @@ Opening a collection for the FIRST time inside a transaction runs its
 cached `Collection` points at nothing ("no such table" on the next call).
 `withTransaction` therefore CLEARS the collection cache on rollback. The same
 hazard is why `drop()` and `dropDatabase()` evict the cache.
+
+### The raw SQL escape hatch
+
+`db.sql.all` / `.get` / `.run` are tagged templates over the same connection
+(src/raw-sql.ts). Four decisions are load-bearing:
+
+**Values are bound; `db.table()` is the only splice.** Every `${}` becomes a `?`
+parameter. A table name cannot be a parameter and `tableNameFor()` is not
+guessable, so `db.table(name)` returns the quoted physical name wrapped in a
+`SqlFragment` — the one interpolation spliced rather than bound, and the library
+produces it, not the caller. **Do not add a general "raw fragment" escape**; it
+would turn the escape hatch into an injection hatch.
+
+**Rows come back RAW, and normalised.** A document is the `data` column's JSON
+text — `parseDocument`/`stringifyDocument` are exported for it. But the row
+OBJECT is copied onto an ordinary prototype: `node:sqlite` returns
+null-prototype rows, and letting that through would mean a different `Driver`
+handing callers a different shape for the same query. The copy is a spread, so
+a column aliased `__proto__` stays an own property.
+
+**Non-obvious detail — one statement per call, enforced.**
+`DatabaseSync.prepare()` compiles the FIRST statement and **silently discards
+the rest** (measured), so `run\`INSERT …; INSERT …\`` would insert one row and
+report success. `assertSingleStatement` scans past string literals, quoted
+identifiers and comments and rejects a second statement. A trailing `;` is fine.
+
+**Errors are NOT translated here.** A unique-index violation surfaces as SQLite
+reports it, not as `MongoServerError` 11000 — the caller wrote SQL, not
+`insertOne`. That asymmetry is deliberate; don't "fix" it.
 
 ### The collection-name registry
 

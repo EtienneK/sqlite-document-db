@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A raw SQL escape hatch.** `db.sql.all`, `db.sql.get` and `db.sql.run` are
+  tagged templates on the same connection, for the SQL this library does not
+  compile — a recursive CTE, a window function, a join, a `PRAGMA`. Every `${}`
+  is a bound parameter, so a value can never become SQL; `db.table(name)` gives
+  the quoted physical table name, which cannot be bound and is not guessable.
+  Rows come back raw, and the exported `parseDocument`/`stringifyDocument` are
+  the codec for the `data` column. Refuses more than one statement per call,
+  because `node:sqlite` compiles the first and silently ignores the rest.
+
 - **The array update operators.** `$push` (with `$each`, `$slice` and `$sort`),
   `$addToSet` (with `$each`), `$pop`, `$pull` and `$pullAll`. Previously the
   only way to change one element of an array was to read the document, edit it

@@ -113,6 +113,16 @@ describe('driver seam', () => {
       await db.collection('items').deleteMany({ even: false })
       expect(await db.collection('items').countDocuments({})).toStrictEqual(25)
     })
+
+    it('should still run raw SQL, in the shape the escape hatch promises', async () => {
+      // db.sql goes through the driver like everything else, and its rows are
+      // normalised here rather than being whatever the engine returns.
+      const rows = await db.sql.all<{ n: number }>`
+        SELECT COUNT(*) AS n FROM ${db.table('items')} WHERE json_extract(data, '$.even')`
+      expect(rows).toStrictEqual([{ n: 25 }])
+      expect((await db.sql.run`DELETE FROM ${db.table('items')} WHERE json_extract(data, '$.n') < ${10}`).changes)
+        .toStrictEqual(10)
+    })
   })
 
   describe('a driver without user-defined functions', () => {

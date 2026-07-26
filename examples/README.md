@@ -29,6 +29,7 @@ code the import is just `import Db from 'sqlite-document-db'`.
 | [12-array-updates.mjs](12-array-updates.mjs) | `$push`/`$pull`/`$addToSet`/`$pop`, and the `$each`+`$sort`+`$slice` capped-list idiom |
 | [13-aggregate.mjs](13-aggregate.mjs) | `$group`, `$unwind`, `$project`, and `explain()` on which stages reach SQLite |
 | [14-transactions-and-joins.mjs](14-transactions-and-joins.mjs) | `withTransaction`, `bulkWrite`, `$lookup`, and the admin surface |
+| [15-raw-sql.mjs](15-raw-sql.mjs) | `db.sql` — window functions and CTEs, bound values, raw rows |
 | [deno.ts](deno.ts) | The same quickstart, run by Deno |
 
 ## Deno
