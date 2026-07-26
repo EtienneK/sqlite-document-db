@@ -181,20 +181,20 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [The stress test](#34-the-stress-test-complex-documents-every-feature) | M | Requested, and it is the only item that can find defects in work already shipped. `bench/` measures query shapes over simple documents; nothing measures what deeply nested ones do to the COMPILER, which is where every limit this project has hit actually lives. |
-| 2 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Item 26 asked whether SQLite could report changes; the answer is that this library already knows. `RETURNING` makes per-document events free, and `PRAGMA data_version` turns the one real limit into an `invalidate` event instead of a silence. |
-| 3 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | `$currentDate`, `$bit`, the regex/set/object expression families, `$stdDev*`, `$sortByCount`, `$unset`, `$replaceWith`. Individually dull, collectively the difference between "a subset" and "the subset people notice". |
-| 4 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | `partialFilterExpression` and `sparse` map onto SQLite partial indexes, which are measured to work over `json_extract`. The cheapest real capability on this list. |
-| 5 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 6 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. |
-| 7 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 8 | [Cursor + `find().explain()`](#33-the-collection-and-db-surface-the-manual-still-lists) | S | `hasNext()` is reached for constantly in ported code, and `find()` is the one place the index story is invisible. |
-| 9 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 10 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 11 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
-| 12 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`. Diminishing returns; do them when someone asks. |
-| 13 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S-M | `renameCollection`, validation, views, capped collections, stats. |
-| 14 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Change streams, reopened](#27-change-streams-reopened-2026-07-26) | M | Item 26 asked whether SQLite could report changes; the answer is that this library already knows. `RETURNING` makes per-document events free, and `PRAGMA data_version` turns the one real limit into an `invalidate` event instead of a silence. |
+| 2 | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | `$currentDate`, `$bit`, the regex/set/object expression families, `$stdDev*`, `$sortByCount`, `$unset`, `$replaceWith`. Individually dull, collectively the difference between "a subset" and "the subset people notice". |
+| 3 | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | `partialFilterExpression` and `sparse` map onto SQLite partial indexes, which are measured to work over `json_extract`. The cheapest real capability on this list. |
+| 4 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 5 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. |
+| 6 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 7 | [Cursor + `find().explain()`](#33-the-collection-and-db-surface-the-manual-still-lists) | S | `hasNext()` is reached for constantly in ported code, and `find()` is the one place the index story is invisible. |
+| 8 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 9 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 10 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 11 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`. Diminishing returns; do them when someone asks. |
+| 12 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S-M | `renameCollection`, validation, views, capped collections, stats. |
+| 13 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [The stress test](#34-the-stress-test-complex-documents-every-feature) | M | **DONE 2026-07-26.** Found a quadratic `$slice` in the documented capped-list idiom (9.4s -> 8ms at 6,000 elements) on its first run, plus an O(depth²) dotted path now pinned as a known curve. |
 | — | [`ClientSession`](#25-clientsession-for-the-shim) | S-M | **DONE 2026-07-26.** The shim's missing piece, and the last one: `session.withTransaction()` with `{ session }` on every operation now runs unchanged. Verified against a real replica set, since MongoDB refuses transactions on a standalone. |
 | — | [Vector similarity operators](#32-vector-similarity-without-an-extension) | S | Unscheduled but nearly free - `$similarityCosine` and friends are arithmetic, and they make brute-force kNN expressible with no extension and no dependency. |
 | — | [Change streams, the SQLite-level version](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26, and still the right answer to the question it asked.** Superseded the same day by [item 27](#27-change-streams-reopened-2026-07-26), which emits events from the WRITE PATH instead of trying to recover them from the engine. |
@@ -304,7 +304,7 @@ priority table above.
 | 31 | [Search under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | Open — FTS5 with a caller-chosen tokenizer; `$text`/`$search` stay refused |
 | 32 | [Vector similarity](#32-vector-similarity-without-an-extension) | S / L | Open — the `$similarity*` operators are arithmetic; indexed ANN needs an extension and is not scheduled |
 | 33 | [Collection/Db surface](#33-the-collection-and-db-surface-the-manual-still-lists) | S each | Open — cursor methods, `find().explain()`, `renameCollection`, validation, views, capped, stats |
-| 34 | [The stress test](#34-the-stress-test-complex-documents-every-feature) | M | Open — requested 2026-07-26; complex documents through every feature, asserting CEILINGS not timings |
+| 34 | ~~[The stress test](#34-the-stress-test-complex-documents-every-feature)~~ | M | **DONE 2026-07-26** — `npm run stress`; found a quadratic `$slice` (fixed, 1000x) and an O(depth²) dotted path (pinned) |
 | 26 | [Change streams](#26-change-streams-decided-against-2026-07-26) | — | **Decided against 2026-07-26**, with the measurement |
 
 Items 2, 3, 5b and 6 depend on **[DR-1](#dr-1-document-storage-format)** (storage
@@ -1356,12 +1356,20 @@ it differently.
   since item 14 landed. No thresholds, deliberately: shared runners are far too
   noisy to assert timings on, so it proves the suite still runs, not that it got
   no slower.
-  **Still open, and it matters: the bench suite only measures `:memory:`.** That
-  is why `insertMany` spent a release doing one implicit transaction — and
-  therefore one fsync — per document without anyone noticing: in memory there is
-  no fsync, so it clocked 243,000 inserts/s while a file-backed database managed
-  155/s. Any cost that is I/O-bound rather than CPU-bound is currently invisible
-  to `npm run bench`. Add at least one file-backed write benchmark.
+  ~~**Still open, and it matters: the bench suite only measures `:memory:`.**~~
+  **CLOSED 2026-07-26 — every benchmark now runs against a real file.** Not just
+  the writes: `:memory:` has no fsync, which is why `insertMany` spent a release
+  doing one implicit transaction (and therefore one fsync) per document without
+  anyone noticing — 243,000 inserts/s in memory against 155/s on a file. A file
+  is also simply what people run, so it is what the numbers should describe.
+
+  **The switch immediately corrected a headline that was close to backwards.**
+  On `:memory:` the summary read *"insertOne is 54x faster than insertMany, 100
+  docs"* — true per CALL and useless per DOCUMENT, making batching look worth
+  about 1.8x. On a file, `insertOne` (140/s) and `insertMany` of 100 (142/s)
+  cost the SAME per call, because each is one fsync: batching is worth ~100x per
+  document, and ~450x at 1000. The old suite understated the most important
+  optimisation in the library by a factor of fifty.
 - ~~**`_id` types.**~~ **DONE 2026-07-25** —
   [test/id-types.spec.ts](test/id-types.spec.ts) is the specification, and the
   README has an `_id` values section. Supported: string, number, boolean, Date,
@@ -1370,9 +1378,15 @@ it differently.
   `undefined` AND `null` both mean "generate one" — checked against the driver,
   which does the same, so `_id: null` does not store null.
 - ~~**Document size / depth limits.**~~ **DONE 2026-07-25.** Nesting is capped at
-  `MAX_DOCUMENT_DEPTH` (1000) in [src/ejson.ts](src/ejson.ts), mirroring
-  SQLite's `SQLITE_MAX_JSON_DEPTH`; without the guard the only symptom was
-  `json()` reporting a bare "malformed JSON". The number is MEASURED and
+  `MAX_DOCUMENT_DEPTH` in [src/ejson.ts](src/ejson.ts); without the guard the
+  only symptom was `json()` reporting a bare "malformed JSON". It was **1000**
+  for one day, mirroring SQLite's `SQLITE_MAX_JSON_DEPTH`, and CI caught that on
+  Windows / Node 22.13 with `RangeError: Maximum call stack size exceeded` —
+  `encode` recurses once per level, so the cap has to be reachable on the
+  smallest supported stack, not just on Linux. **It is 200**, which is also
+  slightly above MongoDB's own (~180 measured), deliberately: more permissive
+  means data still round-trips, stricter would refuse documents a real server
+  takes. The number is MEASURED and
   [test/ejson.spec.ts](test/ejson.spec.ts) pins BOTH edges, so it cannot drift
   in either direction. There is no size limit worth enforcing (40MB documents
   round-trip; SQLite's own is ~1GB) — **which is itself a divergence**: a
@@ -2445,7 +2459,90 @@ uses it if the driver has it.
 
 ## 34. The stress test: complex documents, every feature
 
-**Size: M.** Requested 2026-07-26. `bench/` measures QUERY SHAPES over 20k
+**Size: M — DONE 2026-07-26**, the day it was requested. `npm run stress` runs
+[stress/db.stress.ts](stress/db.stress.ts) over the corpus in
+[stress/corpus.ts](stress/corpus.ts): 1,080 documents of five hostile shapes
+(180 levels deep, 500 fields wide, three array levels, 5,000-element arrays,
+unicode traps), through every feature — 26 tests, ~25s, file-backed, no mongod.
+
+### What it found on its FIRST run
+
+**1. A negative `$slice` was quadratic, and it is the documented idiom.**
+`$push` + `$each` + `$sort` + `$slice` is what the README and
+[examples/12-array-updates.mjs](examples/12-array-updates.mjs) call the
+capped-list idiom. `$slice: -n` compiled to
+`WHERE json_each.key >= json_array_length(<the whole array expression>) - n`,
+so SQLite recomputed the array — including the `$sort` rebuild above it — once
+per ELEMENT. Measured, before and after:
+
+| array length | `$each`+`$slice` | with `$sort` |
+| --- | --- | --- |
+| 1,000 | 263ms → **2ms** | 1,062ms → **3ms** |
+| 6,000 | 9,398ms → **8ms** | 34,499ms → **14ms** |
+| 20,000 | (not attempted) → **23ms** | → **46ms** |
+
+Fixed the same day: take the last n with `ORDER BY key DESC LIMIT n` in a
+derived table and re-sort ascending, so the array is evaluated once. The guard
+is structural rather than temporal — the stress suite asserts the compiled
+UPDATE does not contain `json_array_length` — because a timing cannot be
+asserted on a shared runner. `$sort` alone was always linear; the whole cost
+was `$slice`.
+
+**2. A dotted path compiles to O(depth²) SQL.** Each segment contributes an
+`$elemMatch` arm on that prefix (the rule that makes `{ 'instock.qty': 5 }`
+match an array element), and each arm carries the rest of the path:
+
+```
+depth  5 ->  19 KB        depth 20 ->  250 KB
+depth 10 ->  62 KB        depth 180 ->  65 MB
+```
+
+65 MB of SQL for one `countDocuments` is not a crash, which is why nothing had
+noticed. **Not fixed** — capping the expansion would change which documents
+match, and that is a semantic decision, not a performance one. Pinned instead:
+the suite asserts the curve stays quadratic (doubling depth must not more than
+quadruple the SQL) and that a 20-segment path stays under 1 MB, so a change
+that made it cubic — or fixed it — shows up. Anyone reaching for a
+20-plus-segment path should know it costs a quarter-megabyte of SQL per query.
+
+**3. "Free on a local synchronous engine" has a size limit.** The driver-seam
+rule calls the pre-flight `findOneRow` before each single-document write free
+locally and a round trip remotely. Over ~10 MB of documents it is neither: 200
+mixed `bulkWrite` operations took 5.5s, and the breakdown says the reads
+dominate, not the commits.
+
+| variant | 200 operations |
+| --- | --- |
+| as written | 5,535ms |
+| inside one transaction (200 fsyncs → 1) | 4,548ms |
+| index on the filtered field | 3,599ms |
+| both | 3,078ms |
+
+Removing 199 fsyncs bought 18%. The rest is reading and decoding JSON once per
+operation — and indexing one conjunct of `{ shape, index }` does not remove the
+scan the other half causes. Worth remembering before adding another pre-flight
+SELECT.
+
+**4. Two of its own bugs, worth recording because they are documented
+behaviour biting.** A batch replayed twice failed with a duplicate `_id`,
+because `insertOne` assigns `_id` to the input document IN PLACE; and vitest
+hides console output from a PASSING run, so the report — the deliverable —
+was invisible until `disableConsoleIntercept` was set.
+
+### The design, for when it is extended
+
+- **Ceilings, never timings**: "it completed", "the SQL stayed under N bytes",
+  "peak RSS stayed under N MB". A shared runner cannot be held to a duration.
+- **File-backed**, like the benchmarks, for the same two reasons: fsync is
+  where the problems have been, and a file is what people run.
+- **`STRESS_DOCS=5000 npm run stress`** scales the corpus for a deliberately
+  larger run; the default is sized to be worth running on every change.
+- When it finds something, turn the CAUSE into a shape assertion, the way the
+  `$slice` guard and the plan-regression tests do.
+
+Original analysis follows.
+
+`bench/` measures QUERY SHAPES over 20k
 simple documents - it answers "does the index get used", and it says nothing
 about what happens to deeply nested, wide, awkward documents.
 

@@ -128,3 +128,9 @@ jobs:
       # This only proves the benchmark suite still runs, which is a real check:
       # it exercises 20k-document collections and every indexed query shape.
       - run: npm run bench
+
+      # The stress suite DOES assert, because everything it asserts is a
+      # ceiling rather than a timing: it completed, the compiled SQL stayed
+      # under N bytes, peak RSS stayed under N MB. It found a quadratic $slice
+      # on its first run (BACKLOG item 34), so it earns its place here.
+      - run: npm run stress

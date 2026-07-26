@@ -12,9 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A `MongoClient`-shaped entry point**, so a test suite can swap
   `from 'mongodb'` for `from 'sqlite-document-db'` and change nothing else. A
   `mongodb://` connection string is accepted and opens an in-memory database;
-  connection options are ignored, and `startSession`/`watch` throw with the
-  alternative named. `Db` gained `databaseName` and `createCollection()`, and
+  connection options are ignored, and `watch` throws with the alternative
+  named. `Db` gained `databaseName` and `createCollection()`, and
   `Db.openSync()` for the synchronous `client.db(name)` the driver has.
+- **Sessions**: `client.startSession()`, `client.withSession(work)`,
+  `session.withTransaction(work)`, the explicit
+  `startTransaction`/`commitTransaction`/`abortTransaction` trio,
+  `endSession()`, `hasEnded`, `inTransaction()` and `equals()`, plus
+  `{ session }` on every operation on `Collection` and `Db`. MongoDB
+  transaction code now runs unchanged, which is what the shim exists for. One
+  divergence, and `strict: true` rejects it: a SQLite transaction belongs to
+  the CONNECTION, so an operation inside one that was NOT given the session
+  still takes part in it, where MongoDB would run it outside and not roll it
+  back. Related refusals are loud — a transaction covers one database, and an
+  operation naming a different session while a transaction is open is an
+  error. Session options (`causalConsistency`, `readConcern`, …) are ignored,
+  as connection options are.
 - **`$position` inside `$push`**, which inserts at an index instead of
   appending (negative counts from the end), applied before `$sort`/`$slice`.
 - **The positional update operators** `$`, `$[]` and `$[<identifier>]`, with the
@@ -112,6 +125,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`$push` with a negative `$slice` was quadratic in the array's length**,
+  which made the documented capped-list idiom (`$each` + `$sort` + `$slice`)
+  the slowest operation in the library. It named the whole array expression a
+  second time inside its own `WHERE` to take a length, so SQLite recomputed it
+  — including the `$sort` rebuild — once per element. A 6,000-element capped
+  push went from **9.4s to 8ms** (34s to 14ms with `$sort`), and the cost is
+  now linear: 20,000 elements in 23ms. Found by the new stress suite, which
+  guards it by asserting the SHAPE of the compiled SQL rather than a timing.
 - **The same `$sort` could order strings two different ways.** Sorting that ran
   in SQLite (`find().sort()`, a `$sort` at the head of a pipeline) compared
   strings by UTF-8 byte, matching MongoDB. Sorting that ran in JavaScript (a
@@ -138,6 +159,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The benchmarks run against a real file rather than `:memory:`.** Nearly
+  every performance problem this library has had was an fsync problem, and
+  `:memory:` cannot have one — and a file is what people actually run. The
+  switch corrected a headline that was close to backwards: in memory the
+  summary read "insertOne is 54x faster than insertMany, 100 docs", true per
+  call and useless per document; on a file the two cost the same per call,
+  because each is one fsync, so batching is worth ~100x per document.
+- **A stress suite**, `npm run stress`: every feature over deliberately hostile
+  documents (180 levels deep, 500 fields wide, three array levels,
+  5,000-element arrays, unicode traps). It asserts ceilings rather than
+  timings, and found the `$slice` defect above on its first run.
 - The update-document compiler moved out of `src/index.ts` into `src/update.ts`,
   and BSON comparison order is now shared between SQL and JavaScript through
   `src/bson-order.ts`.

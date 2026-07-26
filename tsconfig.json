@@ -19,5 +19,8 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "bench/**/*.ts", "vitest.config.ts", "vitest.bench.config.ts", "vitest.types.config.ts"]
+  "include": [
+    "src/**/*.ts", "test/**/*.ts", "bench/**/*.ts", "stress/**/*.ts",
+    "vitest.config.ts", "vitest.bench.config.ts", "vitest.types.config.ts", "vitest.stress.config.ts"
+  ]
 }

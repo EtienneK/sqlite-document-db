@@ -859,9 +859,18 @@ npm test         # runs every assertion against BOTH this library and a real Mon
 npm run test:types  # type-level assertions, including cases that must NOT compile
 npm run examples # builds, then runs every example in examples/
 npm run bench    # benchmarks (indexed vs full-scan queries, writes) over 20k docs
+npm run stress   # every feature over deliberately hostile documents
 npm run lint
 npm run build
 ```
+
+Both `bench` and `stress` run against a real **file**, not `:memory:` — fsync is
+where the performance problems have been, and a file is what people run. The
+stress suite is the one that goes looking for *limits* rather than for slowness:
+documents 180 levels deep, 500 fields wide, three array levels, 5,000-element
+arrays, unicode traps, through every operator. It asserts ceilings ("this
+completed", "the compiled SQL stayed under N bytes") rather than timings, and it
+paid for itself on its first run by finding a quadratic `$slice`.
 
 The test suite is the interesting part, and the reason the compatibility claim
 at the top of this file is worth anything: each assertion runs twice, once

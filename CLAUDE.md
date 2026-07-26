@@ -18,7 +18,8 @@ records prior investigation (query plans, feasibility, sequencing) for most item
 | `npm run build` | Emits `dist/` from `src` only (`tsconfig.build.json`) |
 | `npm run test:types` | Type-level assertions (`vitest --typecheck`), own config |
 | `npm run examples` | Builds, then runs every example in `examples/` |
-| `npm run bench` | Benchmarks over 20k docs; no mongod, own vitest config |
+| `npm run bench` | Benchmarks over 20k docs, **file-backed**; no mongod, own vitest config |
+| `npm run stress` | The stress suite (~25s): every feature over deliberately hostile documents. Asserts ceilings, prints a report |
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck,
 test:types, build and test on {ubuntu, windows} × Node {22.13.0, 24, 26}.
@@ -282,6 +283,17 @@ against a missing field is a no-op in MongoDB, and `json_replace` only writes
 where the path already exists — which avoids a `CASE` duplicating the whole
 expression. `$pop` relies on the same idea: `json_remove` on `'$.a[0]'` or
 `'$.a[#-1]'` is a no-op for a missing field AND an empty array.
+
+**Non-obvious detail — a negative `$slice` must not name its array twice.**
+`$slice: -n` keeps the LAST n elements, and the obvious spelling —
+`WHERE json_each.key >= json_array_length(<the array>) - n` — makes SQLite
+recompute the whole array expression, including any `$sort` rebuild above it,
+ONCE PER ELEMENT. That made the documented capped-list idiom
+(`$push` + `$each` + `$sort` + `$slice`) quadratic: 9.4s for 6,000 elements,
+34s with `$sort`, against 8ms and 14ms after the fix. It is
+`ORDER BY key DESC LIMIT n` inside a derived table, re-sorted ascending, so the
+array is evaluated once. Found by `npm run stress`, which now pins the SHAPE of
+that SQL (it must not contain `json_array_length`) rather than a timing.
 
 **Non-obvious detail — `$position` orders its runs explicitly.** Inserting
 mid-array stitches together three runs (before the insert point, the new values,
@@ -699,6 +711,32 @@ Other things to know:
   collects the compiler's edge cases — empty arrays, scalars where arrays were
   expected, malformed operators. When a query "returns nothing" or dies with a
   raw SQLite error, that is the file to extend.
+
+### The stress suite (stress/)
+
+`npm run stress` is the third measurement axis, beside the specs (correctness,
+dual-engine) and `bench/` (query shapes over 20k SIMPLE documents). It runs
+every feature over deliberately hostile documents — 180 levels deep, 500 fields
+wide, three array levels, 5,000-element arrays, unicode traps — because **every
+performance-shaped failure this library has had was a LIMIT, not a slow query**:
+SQLite's parser recursion limit, the JavaScript stack, statement size, memory.
+
+- **It asserts CEILINGS, never timings** ("it completed", "the SQL stayed under
+  N bytes", "peak RSS stayed under N MB"), so a busy runner cannot fail it, and
+  it prints a report for a human to read. `disableConsoleIntercept` is on
+  because vitest hides console output from a PASSING run, which is the run whose
+  numbers someone wants.
+- **It is file-backed**, like `bench/`, for the same two reasons: fsync is where
+  the problems have been, and a file is what people run.
+- **The regression guards are structural, not temporal** — the negative-`$slice`
+  test asserts the compiled SQL does not contain `json_array_length`, which is
+  the same trick [test/query-plan.spec.ts](test/query-plan.spec.ts) uses for
+  index eligibility. That is the pattern to follow when this suite finds
+  something: turn the cause into a shape assertion.
+
+Two findings from its first run are recorded in BACKLOG item 34; one (`$slice`)
+was fixed on the spot, the other (dotted-path SQL is O(depth²), 65MB at 180
+segments) is pinned as a known curve.
 
 [test/types.test-d.ts](test/types.test-d.ts) is where the type layer is pinned.
 **The `@ts-expect-error` cases are the feature** — each asserts that a mistake

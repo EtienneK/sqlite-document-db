@@ -548,10 +548,25 @@ function applyEachModifiers (arrayExpr: string, spec: EachSpec): string {
   if (spec.slice !== undefined) {
     // A positive $slice keeps the FIRST n elements, a negative one the LAST n,
     // and 0 empties the array. `key` is json_each's element index.
+    //
+    // **The negative arm must not name `expr` twice.** It used to read
+    // `WHERE json_each.key >= json_array_length(${expr}) - n`, which made
+    // SQLite recompute the WHOLE array expression - including the `$sort`
+    // rebuild above, when there is one - once per ELEMENT: `$slice: -n` was
+    // quadratic in the array's length, and the documented capped-list idiom
+    // (`$each` + `$sort` + `$slice`) was the slowest thing in the library.
+    // Measured at 6,000 elements: 9.4s, or 34s with $sort, against 7ms for the
+    // same push without $slice. Taking the last n as "ORDER BY key DESC LIMIT
+    // n, then put them back in order" evaluates the array exactly once.
     const n = spec.slice
     expr = n >= 0
       ? groupArray(`SELECT json_each.value AS v, json_each.type AS t FROM json_each(${expr}) WHERE json_each.key < ${n}`)
-      : groupArray(`SELECT json_each.value AS v, json_each.type AS t FROM json_each(${expr}) WHERE json_each.key >= json_array_length(${expr}) - ${-n}`)
+      : groupArray(
+          'SELECT v, t FROM (' +
+          `SELECT json_each.value AS v, json_each.type AS t, json_each.key AS k FROM json_each(${expr}) ` +
+          `ORDER BY json_each.key DESC LIMIT ${-n}` +
+          ') ORDER BY k ASC'
+        )
   }
   return expr
 }
