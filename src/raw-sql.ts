@@ -78,7 +78,7 @@ export function sqlFragment (sql: string): SqlFragment {
 }
 
 /** What a value may be bound as. Mirrors what SQLite itself accepts. */
-type Bindable = string | number | null
+type Bindable = string | number | null | Uint8Array
 
 /** The `db.sql` namespace. */
 export interface RawSql {
@@ -176,6 +176,11 @@ function compileTemplate (
  * writes at `<field>.$date` - so `WHERE json_extract(data, '$.at.$date') >
  * ${cutoff}` compares the right things. Objects and arrays become their storage
  * JSON, ready for `json(?)`. Booleans become 1/0 because SQLite has no boolean.
+ * A `Uint8Array` binds as a BLOB (BACKLOG item 35 step 1): documents cannot
+ * hold bytes, so this is the one road to the one thing SQLite does that the
+ * document model cannot. Other ArrayBuffer views are refused BY NAME rather
+ * than falling through to the storage encoder's rejection, because the fix -
+ * wrap the underlying buffer - is not guessable from "cannot store".
  */
 function bindable (value: unknown, index: number): Bindable {
   if (value === null) return null
@@ -193,11 +198,19 @@ function bindable (value: unknown, index: number): Bindable {
     return value.toISOString()
   }
 
+  if (value instanceof Uint8Array) return value
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+    throw Error(
+      `cannot bind a ${value.constructor.name} (interpolation ${index + 1}): ` +
+      'SQLite blobs are bound as Uint8Array - wrap the buffer, e.g. new Uint8Array(view.buffer, view.byteOffset, view.byteLength)'
+    )
+  }
+
   if (typeof value === 'object') return stringifyDocument(value)
 
   throw Error(
     `cannot bind a value of type ${value === undefined ? 'undefined' : typeof value} ` +
-    `(interpolation ${index + 1}): bind a string, number, boolean, null, Date, object or array`
+    `(interpolation ${index + 1}): bind a string, number, boolean, null, Date, Uint8Array, object or array`
   )
 }
 

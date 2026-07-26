@@ -138,6 +138,17 @@ describe('driver seam', () => {
       expect((await db.sql.run`DELETE FROM ${db.table('items')} WHERE json_extract(data, '$.n') < ${10}`).changes)
         .toStrictEqual(10)
     })
+
+    it('should carry blobs, which DriverParams obliges every backend to bind', async () => {
+      // BACKLOG item 35 step 1: Uint8Array is part of the seam contract now,
+      // so the reduced driver has to move bytes in both directions too.
+      await db.sql.run`CREATE TABLE blobs (bytes BLOB)`
+      await db.sql.run`INSERT INTO blobs VALUES (${new Uint8Array([7, 0, 255])})`
+      const row = await db.sql.get<{ bytes: Uint8Array, type: string }>`
+        SELECT bytes, typeof(bytes) AS type FROM blobs`
+      expect(row?.type).toStrictEqual('blob')
+      expect(Array.from(row!.bytes)).toStrictEqual([7, 0, 255])
+    })
   })
 
   describe('a driver without user-defined functions', () => {

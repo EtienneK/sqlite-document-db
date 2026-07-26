@@ -1054,8 +1054,12 @@ Four things to know:
 - **Interpolations are bound, not spliced.** Every `${}` becomes a `?`
   parameter, so a value can never become SQL. Strings, numbers, booleans
   (as 1/0), `null`, `Date` (as its ISO string, which is what is stored at
-  `<field>.$date`) and objects/arrays (as their storage JSON, ready for
-  `json(?)`) are all bindable; anything else throws.
+  `<field>.$date`), `Uint8Array` (as a BLOB) and objects/arrays (as their
+  storage JSON, ready for `json(?)`) are all bindable; anything else throws.
+  Bytes are the reason `Uint8Array` is on that list: documents cannot hold
+  binary (storage is JSON), so binding one here — into a `BLOB` table of your
+  own, on this same connection and inside `withTransaction` — is how files sit
+  next to the documents that reference them.
 - **`db.table(name)` is the exception**, and the only one. A table name cannot
   be a parameter, and the physical name is not guessable — `Users` and `users`
   are two collections on an engine that compares identifiers

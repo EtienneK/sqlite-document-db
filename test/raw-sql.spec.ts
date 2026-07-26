@@ -137,6 +137,58 @@ describe('db.sql - the raw SQL escape hatch', () => {
       // here for the same reason it cannot be stored.
       await expect(db.sql.all`SELECT ${/x/} AS v`).rejects.toThrow(/RegExp/)
     })
+
+    // BACKLOG item 35 step 1: documents reject binary at write time (a DR-1
+    // consequence), so the escape hatch is the ONE road to SQLite's BLOB type.
+    it('binds a Uint8Array as a BLOB and reads it back byte for byte', async () => {
+      await db.sql.run`CREATE TABLE files (name TEXT, bytes BLOB)`
+      const bytes = new Uint8Array([0, 1, 2, 255, 254, 0, 127])
+      await db.sql.run`INSERT INTO files VALUES (${'report.bin'}, ${bytes})`
+
+      const row = await db.sql.get<{ bytes: Uint8Array, type: string, n: number }>`
+        SELECT bytes, typeof(bytes) AS type, length(bytes) AS n FROM files`
+      expect(row?.type).toStrictEqual('blob')
+      expect(row?.n).toStrictEqual(7)
+      expect(row?.bytes).toBeInstanceOf(Uint8Array)
+      expect(Array.from(row!.bytes)).toStrictEqual([0, 1, 2, 255, 254, 0, 127])
+    })
+
+    it('round-trips the blob edge cases: empty, NUL-ridden, and a Buffer', async () => {
+      await db.sql.run`CREATE TABLE blobs (bytes BLOB)`
+
+      // A zero-length blob is a blob, not NULL.
+      await db.sql.run`INSERT INTO blobs VALUES (${new Uint8Array(0)})`
+      const empty = await db.sql.get<{ type: string, n: number }>`
+        SELECT typeof(bytes) AS type, length(bytes) AS n FROM blobs`
+      expect(empty).toStrictEqual({ type: 'blob', n: 0 })
+
+      // Buffer is a Uint8Array subclass, so Node callers' natural type binds.
+      await db.sql.run`UPDATE blobs SET bytes = ${Buffer.from('a\0b\0', 'utf8')}`
+      const buffered = await db.sql.get<{ bytes: Uint8Array }>`SELECT bytes FROM blobs`
+      expect(Array.from(buffered!.bytes)).toStrictEqual([0x61, 0, 0x62, 0])
+    })
+
+    it('takes bytes in and out of a transaction with documents, on one connection', async () => {
+      // The use the backlog names: files in a BLOB table of your own, committed
+      // or rolled back WITH the documents that reference them.
+      await db.sql.run`CREATE TABLE attachments (doc_id TEXT, bytes BLOB)`
+      await expect(db.withTransaction(async () => {
+        await db.collection('places').insertOne({ _id: 'y', city: 'George' })
+        await db.sql.run`INSERT INTO attachments VALUES (${'y'}, ${new Uint8Array([1, 2])})`
+        throw Error('abandon')
+      })).rejects.toThrow('abandon')
+
+      expect(await db.collection('places').countDocuments({ _id: 'y' })).toStrictEqual(0)
+      expect((await db.sql.get<{ n: number }>`SELECT COUNT(*) AS n FROM attachments`)?.n).toStrictEqual(0)
+    })
+
+    it('refuses the other binary shapes BY NAME, with the wrap-it fix', async () => {
+      // Falling through to the storage encoder would say "cannot store", which
+      // does not tell anyone the fix is new Uint8Array(view.buffer, ...).
+      await expect(db.sql.all`SELECT ${new Float64Array([1])} AS v`).rejects.toThrow(/Float64Array.+Uint8Array/)
+      await expect(db.sql.all`SELECT ${new DataView(new ArrayBuffer(4))} AS v`).rejects.toThrow(/DataView/)
+      await expect(db.sql.all`SELECT ${new ArrayBuffer(4)} AS v`).rejects.toThrow(/ArrayBuffer/)
+    })
   })
 
   describe('writes', () => {

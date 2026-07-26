@@ -40,8 +40,15 @@
 /** One row, as the driver hands it back. */
 export type DriverRow = Record<string, unknown>
 
-/** Values a driver can bind: named (`:p0`) or positional. */
-export type DriverParams = Record<string, string | number | null> | unknown[]
+/**
+ * Values a driver can bind: named (`:p0`) or positional.
+ *
+ * `Uint8Array` is part of the contract (BACKLOG item 35 step 1): `db.sql` binds
+ * bytes so the escape hatch can reach SQLite's BLOB type, and every driver -
+ * including the reduced one in test/driver-seam.spec.ts - has to carry them.
+ * Additive for callers, a real obligation for backends.
+ */
+export type DriverParams = Record<string, string | number | null | Uint8Array> | unknown[]
 
 export interface DriverStatement {
   /** Runs a write, reporting how many rows changed. */

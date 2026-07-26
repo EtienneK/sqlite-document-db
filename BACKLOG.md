@@ -188,7 +188,7 @@ the closed items are listed after it for provenance.
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
 | 1 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 1= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 1= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | ~~S~~, then M+M | **Step 1 DONE 2026-07-26**: `db.sql` binds and returns `Uint8Array`, and `DriverParams` obliges every driver to carry blobs (seam spec included). Steps 2–3 remain: `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
 | 2 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
 | 3 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
 | 4 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
@@ -3199,7 +3199,17 @@ Each step is independently useful and none commits to the next.
 
 1. **Let `db.sql` bind and return `Uint8Array`** — widen `Bindable`,
    `DriverParams` and `bindable()`, add the `Uint8Array` case, extend the reduced
-   driver in the seam spec. **S.** This alone lets anyone keep files in a BLOB
+   driver in the seam spec. **S — DONE 2026-07-26**, exactly as listed: the
+   blocker table's second and third doors are open (`DriverParams` named form
+   carries `Uint8Array`; `bindable()` binds one as a BLOB), the seam spec's
+   reduced driver moves bytes both ways, and the ejson door stays shut on
+   purpose until step 2. Other `ArrayBuffer` views are refused BY NAME with the
+   wrap-it fix (`new Uint8Array(view.buffer, ...)`) rather than falling through
+   to the storage encoder's "cannot store". Verified in
+   [test/raw-sql.spec.ts](test/raw-sql.spec.ts) (round trip, zero-length blob,
+   `Buffer` as the subclass it is, bytes + documents in one rolled-back
+   transaction) and [test/driver-seam.spec.ts](test/driver-seam.spec.ts).
+   This alone lets anyone keep files in a BLOB
    table of their own on the same connection, transactionally, with no document
    format change and no parity claim. It is the honest answer today, and it fixes
    an escape-hatch gap that exists on its own merits.

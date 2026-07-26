@@ -850,7 +850,12 @@ parameter. A table name cannot be a parameter and `tableNameFor()` is not
 guessable, so `db.table(name)` returns the quoted physical name wrapped in a
 `SqlFragment` — the one interpolation spliced rather than bound, and the library
 produces it, not the caller. **Do not add a general "raw fragment" escape**; it
-would turn the escape hatch into an injection hatch.
+would turn the escape hatch into an injection hatch. A `Uint8Array` binds as a
+BLOB (item 35 step 1) — documents reject binary at write time, so `db.sql` is
+the one road to SQLite's blob type, and `DriverParams` carries `Uint8Array` so
+every future driver is obliged to move bytes too. Other `ArrayBuffer` views are
+refused by name with the wrap-it fix, not left to the storage encoder's
+"cannot store".
 
 **Rows come back RAW, and normalised.** A document is the `data` column's JSON
 text — `parseDocument`/`stringifyDocument` are exported for it. But the row
