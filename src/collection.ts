@@ -29,7 +29,10 @@ import type {
   FindOptions, IndexDescription, IndexDirection, IndexSpecification, InsertManyResult,
   InsertOneResult, ReplaceOptions, SortSpecification, UpdateOptions, UpdateResult, WithId, WithoutId
 } from './types.js'
-import { buildUpdateExpression, buildUpsertDocument, collectEqualities, type UpdateExpression } from './update.js'
+import {
+  buildUpdateExpression, buildUpsertDocument, collectEqualities,
+  type UpdateCompileOptions, type UpdateExpression
+} from './update.js'
 
 /** The driver's UpdateResult shape for a write that did not upsert. */
 function updateResult (matchedCount: number, modifiedCount: number): UpdateResult {
@@ -38,6 +41,18 @@ function updateResult (matchedCount: number, modifiedCount: number): UpdateResul
 
 /** Column alias for a projection probe's answer. See firstMatchingElementSql. */
 const PROBE_COLUMN = '_sdb_probe'
+
+/**
+ * What the update compiler needs from the call: the filter (which is where `$`
+ * finds the element it writes to) and `arrayFilters` (which is what
+ * `$[<identifier>]` selects with).
+ */
+function compileOptionsFor (filter: unknown, options: { arrayFilters?: Document[] }): UpdateCompileOptions {
+  return {
+    filter: (filter ?? {}) as Record<string, any>,
+    ...(options.arrayFilters === undefined ? {} : { arrayFilters: options.arrayFilters })
+  }
+}
 
 function assertLimit (count: number): void {
   if (typeof count !== 'number' || !Number.isFinite(count)) throw Error(`limit must be a finite number; but got: ${String(count)}`)
@@ -283,7 +298,11 @@ export class Collection<TSchema extends Document = Document> {
   private assertUpdateApplies (expr: UpdateExpression, scope: string, scopeParams: SqlParams): void {
     if (expr.guardSql === undefined) return
     const sql = `SELECT ${expr.guardSql} AS guard FROM ${this.table} WHERE (${scope}) AND ${expr.guardSql} IS NOT NULL LIMIT 1`
-    const row = this.prepare(sql).get(scopeParams) as { guard: number } | undefined
+    // The guards' own parameters go in: a positional guard carries the
+    // criterion it selects elements with, so guards are no longer parameterless
+    // SQL. They are a SEPARATE registry from the update expression's, because
+    // node:sqlite rejects a statement handed a parameter it does not use.
+    const row = this.prepare(sql).get({ ...expr.guardParams, ...scopeParams }) as { guard: number } | undefined
     if (row === undefined) return
     throw Error(expr.guards[row.guard]!.message)
   }
@@ -888,7 +907,7 @@ export class Collection<TSchema extends Document = Document> {
 
   /** Updates the first document matching `filter` with $set/$unset/$inc operators. */
   async updateOne (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
-    const expr = buildUpdateExpression(update)
+    const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
 
     const found = this.findOneRow(filter)
     if (found === null) {
@@ -901,7 +920,7 @@ export class Collection<TSchema extends Document = Document> {
 
   /** Updates every document matching `filter` with $set/$unset/$inc operators. */
   async updateMany (filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: UpdateOptions = {}): Promise<UpdateResult> {
-    const expr = buildUpdateExpression(update)
+    const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
 
     const matchedCount = await this.countDocuments(filter)
     // An upsert that matches nothing inserts exactly ONE document, as it does
@@ -935,7 +954,7 @@ export class Collection<TSchema extends Document = Document> {
   async findOneAndUpdate (
     filter: Filter<TSchema>, update: UpdateFilter<TSchema>, options: FindOneAndUpdateOptions = {}
   ): Promise<WithId<TSchema> | null> {
-    const expr = buildUpdateExpression(update)
+    const expr = buildUpdateExpression(update, compileOptionsFor(filter, options))
     const found = this.findOneRow(filter, options.sort)
 
     if (found === null) {

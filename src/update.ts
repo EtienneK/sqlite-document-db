@@ -27,7 +27,8 @@ import { compareBson, equalsBson } from './bson-order.js'
 import type { Document } from './types.js'
 import {
   bindJson, bindRaw, bsonRankSql, bsonValueSql, createBindings, elementCriterionSql,
-  toJson1PathString, type QueryFilterDocument, type SqlParams
+  firstMatchingElementSql, quoteIdentifier, toJson1PathString,
+  type QueryFilterDocument, type SqlBindings, type SqlParams
 } from './query.js'
 
 /** The loose shape the compiler works with; the public API narrows to `UpdateFilter`. */
@@ -59,11 +60,28 @@ export interface UpdateGuard {
   message: string
 }
 
+/** What compiling an update needs beyond the update document itself. */
+export interface UpdateCompileOptions {
+  /** The filter the update runs with. `$` writes to the element it matched. */
+  filter?: QueryFilterDocument
+  /** The `arrayFilters` option, naming the elements `$[<identifier>]` selects. */
+  arrayFilters?: Document[]
+}
+
 export interface UpdateExpression {
   /** SQL computing the row's new `data` value. */
   sql: string
   params: SqlParams
   guards: UpdateGuard[]
+  /**
+   * Parameters for `guardSql`, kept SEPARATE from `params`.
+   *
+   * A positional guard carries the criterion it selects elements with, so
+   * guards are no longer parameterless SQL - and `node:sqlite` rejects a
+   * statement given a named parameter it does not use, in either direction. One
+   * registry per statement is the only shape that binds exactly.
+   */
+  guardParams: SqlParams
   /**
    * SQL yielding the INDEX into `guards` of the first precondition this row
    * violates, or NULL when the update can apply. Callers must run it BEFORE
@@ -164,10 +182,23 @@ function ensureParents (expr: string, field: string): string {
   return expr
 }
 
-/** True for a row whose `field` exists but is not a number - $inc/$mul's error case. */
-function nonNumericAt (field: string): string {
-  const path = toJson1PathString([field])
-  return `(json_type(data, ${path}) IS NOT NULL AND json_type(data, ${path}) NOT IN ('integer','real'))`
+/**
+ * True where the value at `path` exists but is not a number - $inc/$mul's error
+ * case. Written over (source, path) rather than a field name so the same test
+ * serves a document column and one wrapped array element.
+ */
+function nonNumericAt (source: string, path: string): string {
+  return `(json_type(${source}, ${path}) IS NOT NULL AND json_type(${source}, ${path}) NOT IN ('integer','real'))`
+}
+
+/**
+ * The `.$date` sub-path of an already-quoted JSON path literal.
+ *
+ * Appending inside the literal rather than rebuilding it from the field name:
+ * a positional write's path is `'$.f.score'`, which no field name spells.
+ */
+function datePathOf (path: string): string {
+  return `${path.slice(0, -1)}.$date'`
 }
 
 /** True for a row whose `field` exists but is not an array - the array operators' error case. */
@@ -219,14 +250,184 @@ function groupArray (inner: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// The positional operators: $, $[] and $[<identifier>]
+// ---------------------------------------------------------------------------
+
+/** A path segment that selects array elements rather than naming a field. */
+const POSITIONAL_SEGMENT = /^\$(?:\[(.*)\])?$/
+const ARRAY_FILTER_IDENTIFIER = /^[a-zA-Z][a-zA-Z0-9]*$/
+
+/**
+ * A field path that reaches THROUGH an array, split at the positional segment.
+ *
+ * `'grades.$[e].score'` becomes `{ array: 'grades', identifier: 'e',
+ * suffix: 'score' }`. An empty suffix means the operator targets the element
+ * itself (`'tags.$'`).
+ */
+interface PositionalTarget {
+  array: string
+  /** `undefined` for `$` (the element the QUERY matched). */
+  identifier?: string
+  /** True for `$[]`, which selects every element. */
+  all: boolean
+  suffix: string
+}
+
+/** Field operators that can write through a positional segment. */
+const POSITIONAL_CAPABLE = new Set(['$set', '$unset', '$inc', '$mul', '$min', '$max'])
+
+function parsePositional (operator: string, field: string): PositionalTarget | undefined {
+  const segments = field.split('.')
+  const at = segments.findIndex(segment => POSITIONAL_SEGMENT.test(segment))
+  if (at === -1) return undefined
+
+  if (!POSITIONAL_CAPABLE.has(operator)) {
+    throw Error(
+      `the positional operators ($, $[] and $[<identifier>]) are not supported in ${operator} ` +
+      `(only in ${[...POSITIONAL_CAPABLE].join(', ')}): ${field}`
+    )
+  }
+  if (at === 0) throw Error(`a positional operator needs an array to index into: ${field}`)
+  const rest = segments.slice(at + 1)
+  if (rest.some(segment => POSITIONAL_SEGMENT.test(segment))) {
+    throw Error(`only one positional operator is supported per path: ${field}`)
+  }
+
+  const inside = POSITIONAL_SEGMENT.exec(segments[at]!)![1]
+  const target: PositionalTarget = {
+    array: segments.slice(0, at).join('.'),
+    all: inside === '',
+    suffix: rest.join('.')
+  }
+  if (inside !== undefined && inside !== '') {
+    if (!ARRAY_FILTER_IDENTIFIER.test(inside)) {
+      throw Error(`an arrayFilters identifier must be alphanumeric and start with a letter: $[${inside}]`)
+    }
+    target.identifier = inside
+  }
+  return target
+}
+
+/**
+ * The criterion an `arrayFilters` entry states about one identifier.
+ *
+ * `[{ 'e.score': { $lt: 50 } }]` for `$[e]` becomes `{ score: { $lt: 50 } }` -
+ * the same per-element shape `$elemMatch` takes, so it compiles through the
+ * same `elementCriterionSql` everything else does. An entry may also name the
+ * element itself (`{ e: { $gt: 3 } }`), for an array of scalars.
+ */
+function arrayFilterCriterion (identifier: string, arrayFilters: Document[], used: Set<number>): QueryFilterDocument {
+  const matches: number[] = []
+  arrayFilters.forEach((entry, index) => {
+    if (identifiersIn(entry).has(identifier)) matches.push(index)
+  })
+  if (matches.length === 0) {
+    throw Error(`No array filter found for identifier '${identifier}' in path`)
+  }
+  if (matches.length > 1) {
+    throw Error(`Found multiple array filters with the same top-level field name '${identifier}'`)
+  }
+  const index = matches[0]!
+  used.add(index)
+
+  const criterion: QueryFilterDocument = {}
+  // `$and` is flattened rather than kept: a criterion document already MEANS a
+  // conjunction, so `{ $and: [{ 'e.a': 1 }, { 'e.b': 2 }] }` and
+  // `{ 'e.a': 1, 'e.b': 2 }` are the same condition. `$or` and `$nor` have no
+  // such spelling and are refused rather than half-applied.
+  const collect = (entry: Document): void => {
+    for (const [key, value] of Object.entries(entry)) {
+      if (key === '$and' && Array.isArray(value)) {
+        for (const branch of value) collect(branch as Document)
+        continue
+      }
+      if (key.startsWith('$')) {
+        throw Error(`${key} is not supported inside arrayFilters (identifier '${identifier}')`)
+      }
+      const path = key === identifier ? '' : key.slice(identifier.length + 1)
+      const condition = path === '' ? (isCriterionDocument(value) ? value : { $eq: value }) : { [path]: value }
+      for (const [conditionKey, conditionValue] of Object.entries(condition)) {
+        if (conditionKey in criterion) {
+          throw Error(`arrayFilters for '${identifier}' constrain '${conditionKey}' more than once`)
+        }
+        criterion[conditionKey] = conditionValue
+      }
+    }
+  }
+  collect(arrayFilters[index]!)
+  return criterion
+}
+
+/** The identifiers an arrayFilters entry constrains, looking through `$and`. */
+function identifiersIn (entry: Document): Set<string> {
+  const found = new Set<string>()
+  const visit = (node: Document): void => {
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '$and' && Array.isArray(value)) for (const branch of value) visit(branch as Document)
+      else if (!key.startsWith('$')) found.add(key.split('.')[0]!)
+    }
+  }
+  visit(entry)
+  return found
+}
+
+function assertArrayFilters (arrayFilters: unknown): asserts arrayFilters is Document[] {
+  if (!Array.isArray(arrayFilters)) throw Error('arrayFilters must be an array of documents')
+  for (const entry of arrayFilters) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw Error('each arrayFilters entry must be a document')
+    }
+    const identifiers = identifiersIn(entry as Document)
+    if (identifiers.size !== 1) {
+      throw Error(
+        'each arrayFilters entry must constrain exactly one identifier; but got: ' +
+        JSON.stringify([...identifiers])
+      )
+    }
+  }
+}
+
+function isCriterionDocument (value: unknown): value is QueryFilterDocument {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date) &&
+    Object.keys(value).some(key => key.startsWith('$'))
+}
+
+/**
+ * The element stream a positional rebuild reads.
+ *
+ * Each element is carried three ways: its index (`ek`), its raw value and type
+ * (`ev`/`et`, for the elements left alone), and wrapped as `{ "f": <element> }`
+ * under `alias` - the same wrapper `$elemMatch` and `$pull` use, which is what
+ * lets an ordinary field path address the element itself (`$.f`) or a field
+ * inside it (`$.f.score`).
+ *
+ * It is a DERIVED table rather than a plain FROM, because the alias has to be
+ * referenceable from the SELECT list above it; SQLite resolves a result alias
+ * in WHERE, but not in a sibling result column.
+ */
+function elementSource (arrayField: string, alias: string): string {
+  return 'SELECT json_each.key AS ek, json_each.value AS ev, json_each.type AS et, ' +
+    `json_object('f', json_quote(json_each.value)) AS ${alias} FROM json_each(${arrayAt(arrayField)})`
+}
+
+/** The array at `arrayField`, rebuilt with `written` applied to the selected elements. */
+function rebuildElements (arrayField: string, alias: string, selected: string, written: string): string {
+  return `(SELECT json_group_array(${restoreJson('v', 't')}) FROM (` +
+    `SELECT CASE WHEN ${selected} THEN json_extract(${written}, '$.f') ELSE ev END AS v, ` +
+    `CASE WHEN ${selected} THEN json_type(${written}, '$.f') ELSE et END AS t ` +
+    `FROM (${elementSource(arrayField, alias)})))`
+}
+
+// ---------------------------------------------------------------------------
 // $push and its modifiers
 // ---------------------------------------------------------------------------
 
-/** The `$each`/`$slice`/`$sort` spec a `$push` or `$addToSet` operand may carry. */
+/** The `$each`/`$slice`/`$sort`/`$position` spec a `$push` or `$addToSet` operand may carry. */
 interface EachSpec {
   values: unknown[]
   slice?: number
   sort?: 1 | -1 | Record<string, number>
+  position?: number
 }
 
 /**
@@ -253,16 +454,17 @@ function eachSpec (operator: string, field: string, operand: unknown): EachSpec 
 
   const known = new Set(['$each', '$slice', '$sort', '$position'])
   for (const key of Object.keys(spec)) {
-    if (key === '$position') {
-      // Inserting mid-array needs a rebuild that renumbers around the insert
-      // point; nothing else here needs one, so it is rejected rather than
-      // half-implemented. See "Missing Features" in the README.
-      throw Error(`$position is not supported in ${operator} (only $each, $slice and $sort are)`)
-    }
     if (!known.has(key)) throw Error(`Unrecognized clause in ${operator}: ${key}`)
   }
 
   const result: EachSpec = { values }
+  if (spec.$position !== undefined) {
+    if (operator === '$addToSet') throw Error('$position is only supported in $push')
+    if (typeof spec.$position !== 'number' || !Number.isInteger(spec.$position)) {
+      throw Error(`The value for $position in ${operator} must be an integer: ${field}`)
+    }
+    result.position = spec.$position
+  }
   if (spec.$slice !== undefined) {
     if (typeof spec.$slice !== 'number' || !Number.isInteger(spec.$slice)) {
       throw Error(`The value for $slice in ${operator} must be an integer: ${field}`)
@@ -327,6 +529,16 @@ function elementSortTerms (sort: 1 | -1 | Record<string, number>): string {
   return terms.join(', ')
 }
 
+/**
+ * One of the three runs a `$position` insert stitches together, tagged with its
+ * group so the whole thing can be ordered explicitly - UNION ALL alone does not
+ * promise an order, and here the order IS the feature.
+ */
+function positionRun (source: string, group: number, where = ''): string {
+  return `SELECT json_each.value AS v, json_each.type AS t, ${group} AS g, json_each.key AS k ` +
+    `FROM json_each(${source})${where}`
+}
+
 /** Applies `$sort` then `$slice` to an array expression, in MongoDB's order. */
 function applyEachModifiers (arrayExpr: string, spec: EachSpec): string {
   let expr = arrayExpr
@@ -355,7 +567,134 @@ function applyEachModifiers (arrayExpr: string, spec: EachSpec): string {
  * Update parameters are prefixed 'u' so they merge with a filter's 'p'-prefixed
  * parameters in one statement without collisions.
  */
-export function buildUpdateExpression (update: AnyUpdate): UpdateExpression {
+/**
+ * How one field operator changes a value.
+ *
+ * `target` is the document being written into, `source` the one being read
+ * from, and `path` the JSON path within them. Splitting the two is what lets
+ * the SAME writer serve an ordinary field and a positional one: normally
+ * `target` is the expression built so far and `source` is `data` (rule 1 - an
+ * operator always reads the original column), while inside a positional rebuild
+ * both are one wrapped element and the path is the suffix under `$.f`.
+ */
+type FieldWriter = (target: string, source: string, path: string) => string
+
+/** What a positional write needs from the surrounding compilation. */
+interface PositionalContext {
+  bindings: SqlBindings
+  /** A registry of its own, because guards are a separate statement. */
+  guardBindings: SqlBindings
+  /** The filter the update ran with - `$` matches the element this selected. */
+  filter: QueryFilterDocument
+  arrayFilters: Document[]
+  usedArrayFilters: Set<number>
+  nextAlias: () => string
+  guards: UpdateGuard[]
+}
+
+/**
+ * Applies one field operator, through a positional segment when the path has
+ * one.
+ *
+ * Without a positional segment this is exactly what the operators did before:
+ * one `json_set`/`json_remove` at a literal path. With one, the array is
+ * rebuilt element by element and the writer is applied to those the segment
+ * selects - `$` to the single element the query matched (its index comes from
+ * `firstMatchingElementSql`, the same probe the `$` PROJECTION operator uses),
+ * `$[]` to all of them, `$[e]` to those matching an `arrayFilters` entry.
+ */
+function applyFieldWrite (
+  expr: string, operator: string, field: string, writer: FieldWriter, ctx: PositionalContext,
+  guard?: { test: (source: string, path: string) => string, message: string }
+): string {
+  const target = parsePositional(operator, field)
+
+  if (target === undefined) {
+    if (guard !== undefined) {
+      ctx.guards.push({ test: guard.test('data', toJson1PathString([field])), message: guard.message })
+    }
+    return writer(ensureParents(expr, field), 'data', toJson1PathString([field]))
+  }
+
+  const alias = ctx.nextAlias()
+  const wrapped = quoteIdentifier(alias)
+  // '$.f' addresses the element itself; '$.f.<suffix>' a field inside it.
+  const elementPath = toJson1PathString([target.suffix === '' ? 'f' : `f.${target.suffix}`])
+
+  // Built once per registry: the expression's parameters go to the UPDATE, the
+  // guards' to the SELECT that checks them.
+  const selectedWith = (into: SqlBindings): string => {
+    if (target.all) return '1'
+    if (target.identifier !== undefined) {
+      return elementCriterionSql(alias, arrayFilterCriterion(target.identifier, ctx.arrayFilters, ctx.usedArrayFilters), into)
+    }
+    const criterion = positionalCriterion(ctx.filter, target.array, field)
+    return `ek = (${firstMatchingElementSql('data', target.array, criterion, into)})`
+  }
+  const selected = selectedWith(ctx.bindings)
+
+  if (target.identifier === undefined && !target.all) {
+    // `$` writes to the element the QUERY matched. MongoDB fails an update
+    // whose query matched no element, and so does this.
+    const criterion = positionalCriterion(ctx.filter, target.array, field)
+    ctx.guards.push({
+      test: `(${firstMatchingElementSql('data', target.array, criterion, ctx.guardBindings)}) IS NULL`,
+      message: `The positional operator did not find the match needed from the query (path '${field}')`
+    })
+  }
+
+  if (guard !== undefined) {
+    // Only the SELECTED elements have to satisfy it - guarding the whole array
+    // would refuse updates whose targets are perfectly fine.
+    ctx.guards.push({
+      test: `EXISTS (SELECT 1 FROM (${elementSource(target.array, alias)}) WHERE (${selectedWith(ctx.guardBindings)}) AND ` +
+        `(${guard.test(wrapped, elementPath)}))`,
+      message: guard.message
+    })
+  }
+
+  return `json_replace(${expr}, ${toJson1PathString([target.array])}, ` +
+    `${rebuildElements(target.array, alias, selected, writer(wrapped, wrapped, elementPath))})`
+}
+
+/**
+ * The condition the filter places on the array a `$` write targets.
+ *
+ * Same rule as the `$` PROJECTION operator (src/projection.ts): `$and` is
+ * traversed because it is a conjunction, `$or` is not because no single branch
+ * is the one that matched.
+ */
+function positionalCriterion (filter: QueryFilterDocument, array: string, field: string): QueryFilterDocument {
+  const criterion: QueryFilterDocument = {}
+  let found = false
+
+  const visit = (node: QueryFilterDocument): void => {
+    for (const [key, value] of Object.entries(node ?? {})) {
+      if (key === '$and' && Array.isArray(value)) {
+        for (const branch of value) visit(branch as QueryFilterDocument)
+      } else if (key === array) {
+        found = true
+        if (value instanceof RegExp) criterion.$regex = value
+        else if (isCriterionDocument(value)) Object.assign(criterion, value.$elemMatch ?? value)
+        else criterion.$eq = value
+      } else if (key.startsWith(`${array}.`)) {
+        found = true
+        criterion[key.slice(array.length + 1)] = value
+      }
+    }
+  }
+  visit(filter)
+
+  if (!found) {
+    throw Error(
+      `The positional operator did not find the match needed from the query: '${field}' - ` +
+      `the filter says nothing about '${array}'`
+    )
+  }
+  return criterion
+}
+
+export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompileOptions = {}): UpdateExpression {
   const keys = Object.keys(update)
   if (keys.length === 0) throw Error('update document must contain atomic operators (e.g. { $set: { ... } })')
   for (const key of keys) {
@@ -369,15 +708,30 @@ export function buildUpdateExpression (update: AnyUpdate): UpdateExpression {
   assertNoConflictingPaths(update)
 
   const bindings = createBindings('u')
+  const guardBindings = createBindings('g')
   const guards: UpdateGuard[] = []
   let expr = 'data'
   let pullAlias = 0
+  let elementAlias = 0
+
+  const arrayFilters = options.arrayFilters ?? []
+  assertArrayFilters(arrayFilters)
+  const positional: PositionalContext = {
+    bindings,
+    guardBindings,
+    filter: options.filter ?? {},
+    arrayFilters,
+    usedArrayFilters: new Set<number>(),
+    nextAlias: () => `elemJson${elementAlias++}`,
+    guards
+  }
 
   const operand = (operator: string): Array<[string, unknown]> =>
     update[operator] == null ? [] : updateOperand(operator, update[operator], operator === '$setOnInsert')
 
   // --- $rename ------------------------------------------------------------
   for (const [field, to] of operand('$rename')) {
+    parsePositional('$rename', field) // rejects a positional path with a clear message
     const target = renameTarget(field, to)
     const from = toJson1PathString([field])
     // A rename whose SOURCE is missing is a no-op in MongoDB - and has to be
@@ -394,44 +748,68 @@ export function buildUpdateExpression (update: AnyUpdate): UpdateExpression {
       if (typeof amount !== 'number' || !Number.isFinite(amount)) {
         throw Error(`${operator} requires a finite number for field ${field}; but got: ${String(amount)}`)
       }
-      const path = toJson1PathString([field])
-      // A missing field starts from 0 in both cases: MongoDB counts $inc up
-      // from zero, and creates a $mul target as zero (which then stays zero).
-      const current = `COALESCE(json_extract(data, ${path}), 0)`
-      expr = `json_set(${ensureParents(expr, field)}, ${path}, ${current} ${arithmetic} ${bindRaw(bindings, amount)})`
-      // A present-but-non-numeric field is an error in MongoDB, and was silent
-      // data loss here (SQLite reads 'hello' + 1 as 1).
-      guards.push({ test: nonNumericAt(field), message: `Cannot apply ${operator} to a value of non-numeric type (field ${field})` })
+      const bound = bindRaw(bindings, amount)
+      expr = applyFieldWrite(expr, operator, field, (target, source, path) =>
+        // A missing field starts from 0 in both cases: MongoDB counts $inc up
+        // from zero, and creates a $mul target as zero (which then stays zero).
+        `json_set(${target}, ${path}, COALESCE(json_extract(${source}, ${path}), 0) ${arithmetic} ${bound})`
+      , positional, {
+        // A present-but-non-numeric field is an error in MongoDB, and was
+        // silent data loss here (SQLite reads 'hello' + 1 as 1).
+        test: nonNumericAt,
+        message: `Cannot apply ${operator} to a value of non-numeric type (field ${field})`
+      })
     }
   }
 
   // --- $min / $max --------------------------------------------------------
   for (const [operator, takeWhen] of [['$min', '>'], ['$max', '<']] as const) {
     for (const [field, value] of operand(operator)) {
-      const path = toJson1PathString([field])
-      const datePath = toJson1PathString([`${field}.$date`])
-      const typeExpr = `json_type(data, ${path})`
-      const dateExpr = `json_extract(data, ${datePath})`
-      const rank = bsonRankSql(typeExpr, dateExpr)
-      const current = bsonValueSql(typeExpr, `json_extract(data, ${path})`, dateExpr)
       const [candidateRank, candidateValue] = comparableValue(value)
       const replacement = bindJson(bindings, value)
-      // Row values let the (rank, value) pair compare in one shot, which is
-      // what makes this follow BSON order rather than SQLite's.
-      expr = `json_set(${ensureParents(expr, field)}, ${path}, CASE ` +
-        `WHEN ${typeExpr} IS NULL THEN ${replacement} ` +
-        `WHEN (${rank}, ${current}) ${takeWhen} (${bindRaw(bindings, candidateRank)}, ${bindRaw(bindings, candidateValue)}) THEN ${replacement} ` +
-        `ELSE json_quote(json_extract(data, ${path})) END)`
+      const boundRank = bindRaw(bindings, candidateRank)
+      const boundValue = bindRaw(bindings, candidateValue)
+      expr = applyFieldWrite(expr, operator, field, (target, source, path) => {
+        const datePath = datePathOf(path)
+        const typeExpr = `json_type(${source}, ${path})`
+        const dateExpr = `json_extract(${source}, ${datePath})`
+        const rank = bsonRankSql(typeExpr, dateExpr)
+        const current = bsonValueSql(typeExpr, `json_extract(${source}, ${path})`, dateExpr)
+        // Row values let the (rank, value) pair compare in one shot, which is
+        // what makes this follow BSON order rather than SQLite's.
+        return `json_set(${target}, ${path}, CASE ` +
+          `WHEN ${typeExpr} IS NULL THEN ${replacement} ` +
+          `WHEN (${rank}, ${current}) ${takeWhen} (${boundRank}, ${boundValue}) THEN ${replacement} ` +
+          `ELSE json_quote(json_extract(${source}, ${path})) END)`
+      }, positional)
     }
   }
 
   // --- $unset -------------------------------------------------------------
-  const unsetPaths = operand('$unset').map(([field]) => toJson1PathString([field]))
+  // The plain paths are removed in ONE json_remove, as they always were; a
+  // positional $unset has to go through the rebuild instead.
+  const unsetPaths = operand('$unset')
+    .filter(([field]) => parsePositional('$unset', field) === undefined)
+    .map(([field]) => toJson1PathString([field]))
   if (unsetPaths.length > 0) expr = `json_remove(${expr}, ${unsetPaths.join(', ')})`
+  for (const [field] of operand('$unset')) {
+    const unsetTarget = parsePositional('$unset', field)
+    if (unsetTarget === undefined) continue
+    // MongoDB leaves a NULL behind when $unset targets an array element rather
+    // than shortening the array. Decided from the parsed target, not from the
+    // shape of the path: a field genuinely named 'f' spells the same path.
+    const elementItself = unsetTarget.suffix === ''
+    expr = applyFieldWrite(expr, '$unset', field, (target, _source, path) =>
+      elementItself ? `json_set(${target}, ${path}, json('null'))` : `json_remove(${target}, ${path})`
+    , positional)
+  }
 
   // --- $set ---------------------------------------------------------------
   for (const [field, value] of operand('$set')) {
-    expr = `json_set(${ensureParents(expr, field)}, ${toJson1PathString([field])}, ${bindJson(bindings, value)})`
+    const bound = bindJson(bindings, value)
+    expr = applyFieldWrite(expr, '$set', field, (target, _source, path) =>
+      `json_set(${target}, ${path}, ${bound})`
+    , positional)
   }
 
   // $setOnInsert contributes no SQL - it only shapes the document an upsert
@@ -439,16 +817,36 @@ export function buildUpdateExpression (update: AnyUpdate): UpdateExpression {
 
   // --- $push --------------------------------------------------------------
   for (const [field, pushed] of operand('$push')) {
+    parsePositional('$push', field) // rejects a positional path with a clear message
     const spec = eachSpec('$push', field, pushed)
     // The whole $each list is bound as ONE json array and appended with a
     // UNION ALL, rather than as a json_insert per value. The obvious chain
     // nests one call per element, and SQLite's parser gives up at a few
     // hundred: `$push: { a: { $each: [...900 items] } }` failed with
     // "Recursion limit". This form is flat however long the list is.
-    const appended = `SELECT json_each.value AS v, json_each.type AS t FROM json_each(${bindJson(bindings, spec.values)})`
-    const array = groupArray(
-      `SELECT json_each.value AS v, json_each.type AS t FROM json_each(${arrayAt(field)}) UNION ALL ${appended}`
-    )
+    const values = bindJson(bindings, spec.values)
+    const existing = `SELECT json_each.value AS v, json_each.type AS t FROM json_each(${arrayAt(field)})`
+    const appended = `SELECT json_each.value AS v, json_each.type AS t FROM json_each(${values})`
+
+    let array: string
+    if (spec.position === undefined) {
+      array = groupArray(`${existing} UNION ALL ${appended}`)
+    } else {
+      // $position inserts mid-array, so the three runs (elements before the
+      // insert point, the new values, elements after it) are ordered
+      // explicitly. UNION ALL alone does not promise an order, and here the
+      // order IS the feature.
+      const at = spec.position >= 0
+        ? bindRaw(bindings, spec.position)
+        // A negative position counts back from the end, clamped at the start.
+        : `MAX(json_array_length(${arrayAt(field)}) + ${bindRaw(bindings, spec.position)}, 0)`
+      array = groupArray(
+        `SELECT v, t FROM (${positionRun(arrayAt(field), 0, ` WHERE json_each.key < ${at}`)} UNION ALL ` +
+        `${positionRun(values, 1)} UNION ALL ` +
+        `${positionRun(arrayAt(field), 2, ` WHERE json_each.key >= ${at}`)}) ORDER BY g, k`
+      )
+    }
+
     expr = `json_set(${ensureParents(expr, field)}, ${toJson1PathString([field])}, ${applyEachModifiers(array, spec)})`
     guards.push({ test: nonArrayAt(field), message: `Cannot apply $push to a non-array value (field ${field})` })
   }
@@ -514,11 +912,28 @@ export function buildUpdateExpression (update: AnyUpdate): UpdateExpression {
     }
   }
 
+  // MongoDB rejects an arrayFilters entry no path uses - it is nearly always a
+  // typo in one identifier or the other, and silently ignoring it would leave
+  // the update doing something other than what was asked.
+  const unused = arrayFilters.findIndex((_entry, index) => !positional.usedArrayFilters.has(index))
+  if (unused !== -1) {
+    throw Error(
+      `The array filter for identifier '${[...identifiersIn(arrayFilters[unused]!)][0] ?? ''}' ` +
+      'was not used in the update document'
+    )
+  }
+
   const guardSql = guards.length === 0
     ? undefined
     : `CASE ${guards.map((guard, index) => `WHEN ${guard.test} THEN ${index}`).join(' ')} END`
 
-  return { sql: expr, params: bindings.values, guards, ...(guardSql === undefined ? {} : { guardSql }) }
+  return {
+    sql: expr,
+    params: bindings.values,
+    guards,
+    guardParams: guardBindings.values,
+    ...(guardSql === undefined ? {} : { guardSql })
+  }
 }
 
 /**

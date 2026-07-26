@@ -170,10 +170,21 @@ describe('UpdateFilter<TSchema>', () => {
     await col.updateOne({ item: 'x' }, { $addToSet: { tags: { $each: [1] } } })
     // @ts-expect-error - $pop takes 1 or -1
     await col.updateOne({ item: 'x' }, { $pop: { tags: 2 } })
-    // @ts-expect-error - $position is a runtime error, so it must not compile
-    await col.updateOne({ item: 'x' }, { $push: { tags: { $each: ['a'], $position: 0 } } })
     // @ts-expect-error - $mul on a string field is a runtime error
     await col.updateOne({ item: 'x' }, { $mul: { item: 2 } })
+  })
+
+  it('accepts $position and the positional operators', async () => {
+    await col.updateOne({ item: 'x' }, { $push: { tags: { $each: ['a'], $position: 0 } } })
+    await col.updateOne({ tags: 'a' }, { $set: { 'tags.$': 'b' } })
+    await col.updateOne({ item: 'x' }, { $set: { 'tags.$[]': 'b' } })
+    await col.updateOne({ item: 'x' }, { $set: { 'instock.$[w].qty': 1 } }, { arrayFilters: [{ 'w.qty': 0 }] })
+    await col.updateOne({ item: 'x' }, { $inc: { 'instock.$[].qty': 1 } })
+    await col.updateMany({ 'instock.qty': 0 }, { $unset: { 'instock.$.qty': '' } })
+    // @ts-expect-error - 'nope' is not an array path, so it has no elements
+    await col.updateOne({ item: 'x' }, { $set: { 'nope.$': 1 } })
+    // @ts-expect-error - the positional operators are not filter syntax
+    await col.find({ 'tags.$': 'a' }).toArray()
   })
 
   it('leaves an untyped collection permissive', async () => {

@@ -272,9 +272,49 @@ where the path already exists — which avoids a `CASE` duplicating the whole
 expression. `$pop` relies on the same idea: `json_remove` on `'$.a[0]'` or
 `'$.a[#-1]'` is a no-op for a missing field AND an empty array.
 
-`$position` inside `$push` is deliberately **rejected**, not implemented: it
-needs a rebuild that renumbers around the insert point, and a clear error beats
-a half-implementation.
+**Non-obvious detail — `$position` orders its runs explicitly.** Inserting
+mid-array stitches together three runs (before the insert point, the new values,
+after it) and `ORDER BY`s them by a group tag. `UNION ALL` does not promise an
+order, and here the order IS the feature — the plain `$push` append gets away
+with it, this cannot.
+
+### The positional update operators (`$`, `$[]`, `$[<identifier>]`)
+
+All three write THROUGH an array, which no single `json_set` can do: one
+addresses a computed index, one every element, one the elements matching a
+criterion. They share one mechanism — rebuild the array, applying the operator
+to the selected elements.
+
+**`FieldWriter` is why there is one mechanism and not six.** Each field operator
+(`$set`, `$unset`, `$inc`, `$mul`, `$min`, `$max`) is a
+`(target, source, path) => sql` function. Normally `target` is the expression
+built so far, `source` is `data` (rule 1) and `path` is the field's literal
+path; inside a positional rebuild both are ONE WRAPPED ELEMENT and the path is
+the suffix under `$.f`. The wrapper is `json_object('f', json_quote(value))` —
+the same one `$elemMatch` and `$pull` use, which is what lets an ordinary field
+path address either the element itself (`$.f`) or a field inside it.
+
+**Non-obvious detail — the element stream is a DERIVED table.** SQLite resolves
+a result alias in `WHERE` but not in a sibling result column, and the rebuild
+needs the wrapped element in its `SELECT` list. `elementSource` therefore
+computes it one level down.
+
+**Non-obvious detail — guards have their OWN parameter registry** (`g`, beside
+the expression's `u`). A positional guard carries the criterion it selects
+elements with, so guards stopped being parameterless SQL — and `node:sqlite`
+rejects a statement handed a parameter it does not use, in *either* direction.
+One registry per statement is the only shape that binds exactly. An unbound
+named parameter is silently NULL rather than an error, which is how this first
+showed up: every `$` update failed its own "did not find the match" guard.
+
+**Non-obvious detail — `$unset` through `$` leaves a null**, it does not shorten
+the array. Decided from the parsed target's empty suffix, NOT by looking at the
+path string: a field genuinely named `f` spells the same path.
+
+`$` reads its element from the FILTER, via the same `firstMatchingElementSql`
+probe the `$` projection operator uses — one implementation of "which element
+matched" for both sides. The positional operators are rejected by name in the
+array operators and `$rename`.
 
 ### How aggregation is split (src/aggregate.ts)
 

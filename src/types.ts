@@ -132,6 +132,11 @@ export interface CollectionInfo {
 export interface UpdateOptions {
   /** Insert a document built from the filter and the update when nothing matches. */
   upsert?: boolean
+  /**
+   * Which array elements `$[<identifier>]` writes to, one document per
+   * identifier: `[{ 'e.score': { $lt: 50 } }]` for a path of `'grades.$[e].score'`.
+   */
+  arrayFilters?: Document[]
 }
 
 export interface ReplaceOptions {
@@ -145,6 +150,8 @@ export interface FindOneAndUpdateOptions {
   upsert?: boolean
   sort?: SortSpecification
   projection?: ProjectionSpec
+  /** Which array elements `$[<identifier>]` writes to. See `UpdateOptions`. */
+  arrayFilters?: Document[]
 }
 
 export interface FindOneAndReplaceOptions extends FindOneAndUpdateOptions {}

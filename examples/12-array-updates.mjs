@@ -62,6 +62,38 @@ await stock.updateOne({ _id: 's1' }, { $max: { seen: new Date('2022-06-01') } })
 await stock.updateOne({ _id: 's1' }, { $rename: { label: 'grade' } })
 console.log('after $mul/$max/... ', await stock.findOne({ _id: 's1' }))
 
+// ---------------------------------------------------------------------------
+// Changing elements INSIDE an array, without rewriting the whole field.
+const students = db.collection('students')
+await students.insertMany([
+  { _id: 1, name: 'ada', grades: [{ subject: 'maths', score: 90 }, { subject: 'art', score: 45 }] },
+  { _id: 2, name: 'bob', grades: [{ subject: 'art', score: 30 }] }
+])
+const grades = async id => JSON.stringify((await students.findOne({ _id: id })).grades)
+
+// $ writes to the element the QUERY matched - so the query has to say
+// something about that array.
+await students.updateOne({ 'grades.score': { $lt: 50 } }, { $set: { 'grades.$.score': 50 } })
+console.log('\n$ (first match)   ', await grades(1))
+
+// $[] writes to every element.
+await students.updateMany({}, { $inc: { 'grades.$[].score': 5 } })
+console.log('$[] (all)         ', await grades(1))
+
+// $[<id>] writes to the elements arrayFilters names.
+await students.updateMany(
+  {},
+  { $set: { 'grades.$[weak].retake': true } },
+  { arrayFilters: [{ 'weak.score': { $lt: 50 } }] }
+)
+console.log('$[weak] (filtered)', await grades(2))
+
+// $position inserts mid-array instead of appending.
+await students.updateOne({ _id: 2 }, {
+  $push: { grades: { $each: [{ subject: 'first', score: 0 }], $position: 0 } }
+})
+console.log('$position 0       ', await grades(2))
+
 // Every check runs BEFORE anything is written, so a rejected update leaves the
 // collection exactly as it was.
 try {

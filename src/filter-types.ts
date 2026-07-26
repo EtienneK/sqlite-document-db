@@ -166,7 +166,10 @@ export type NumericPaths<TSchema> =
 /** `{ path: value }` for `$set`/`$setOnInsert`, each value typed to its path. */
 export type MatchKeysAndValues<TSchema> =
   IsAny<TSchema> extends true ? Record<string, any>
-    : { [P in Paths<TSchema>]?: PathValue<TSchema, P> }
+    : { [P in Paths<TSchema>]?: PathValue<TSchema, P> } &
+    // A positional path writes into an array element, whose own schema is not
+    // tracked through the segment - see PositionalPaths.
+    { [P in PositionalPaths<TSchema>]?: any }
 
 /** Paths of `TSchema` whose value is an array - what the array operators accept. */
 export type ArrayPaths<TSchema> =
@@ -182,8 +185,7 @@ type ElementOf<TSchema, P> =
 
 /**
  * A `$push` operand: one element, or `$each` with the modifiers this library
- * implements. `$position` is deliberately absent - it is a runtime error here,
- * so it must not typecheck (see rule 1 at the top of this file).
+ * implements.
  */
 export type PushOperand<T> = T | {
   $each: readonly T[]
@@ -191,7 +193,32 @@ export type PushOperand<T> = T | {
   $slice?: number
   /** 1/-1 sorts the elements themselves; a document sorts by a field of each. */
   $sort?: 1 | -1 | Record<string, 1 | -1>
+  /** Insert at this index instead of appending; negative counts from the end. */
+  $position?: number
 }
+
+/**
+ * The positional forms an UPDATE may write through: `$` (the element the query
+ * matched), `$[]` (every element) and `$[<identifier>]` (those an
+ * `arrayFilters` entry names).
+ *
+ * Deliberately confined to the update side. In a FILTER these are not operators
+ * at all, so admitting them to `Paths` would make a query that throws compile -
+ * which rule 1 at the top of this file forbids.
+ */
+type PositionalSegment = '$' | '$[]' | `$[${string}]`
+
+/**
+ * Positional paths of `TSchema`: an array path, the segment, and optionally a
+ * path inside the element. The tail is `string` because the element's own
+ * schema is not tracked through the segment - a wrong field there is a runtime
+ * error rather than a compile one, which is the honest limit of this.
+ */
+export type PositionalPaths<TSchema> =
+  IsAny<TSchema> extends true ? never
+    : ArrayPaths<TSchema> extends infer A
+      ? A extends string ? `${A}.${PositionalSegment}` | `${A}.${PositionalSegment}.${string}` : never
+      : never
 
 /** An `$addToSet` operand: one element, or `$each` with several. */
 export type AddToSetOperand<T> = T | { $each: readonly T[] }
@@ -213,9 +240,9 @@ export type UpdateFilter<TSchema = Document> =
     : {
       $set?: MatchKeysAndValues<Omit<TSchema, '_id'>>
       $setOnInsert?: MatchKeysAndValues<TSchema>
-      $unset?: { [P in Paths<Omit<TSchema, '_id'>>]?: '' | true | 1 }
-      $inc?: { [P in NumericPaths<Omit<TSchema, '_id'>>]?: number }
-      $mul?: { [P in NumericPaths<Omit<TSchema, '_id'>>]?: number }
+      $unset?: { [P in Paths<Omit<TSchema, '_id'>> | PositionalPaths<Omit<TSchema, '_id'>>]?: '' | true | 1 }
+      $inc?: { [P in NumericPaths<Omit<TSchema, '_id'>> | PositionalPaths<Omit<TSchema, '_id'>>]?: number }
+      $mul?: { [P in NumericPaths<Omit<TSchema, '_id'>> | PositionalPaths<Omit<TSchema, '_id'>>]?: number }
       $min?: MatchKeysAndValues<Omit<TSchema, '_id'>>
       $max?: MatchKeysAndValues<Omit<TSchema, '_id'>>
       $rename?: { [P in Paths<Omit<TSchema, '_id'>>]?: string }

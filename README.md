@@ -434,9 +434,57 @@ against each element the way `$elemMatch` matches one:
 await db.collection('orders').updateOne({ _id: id }, { $pull: { items: { qty: { $lt: 1 } } } })
 ```
 
+`$position` inserts mid-array instead of appending, and is applied before
+`$sort`/`$slice`:
+
+```javascript
+await tasks.updateOne({ _id: id }, { $push: { tags: { $each: ['first'], $position: 0 } } })
+```
+
 `$addToSet` compares by value, not identity, so pushing an equal document twice
 adds it once. Pushing onto a field that exists and is not an array is an error,
 as it is on the server; onto a missing field it creates the array.
+
+### Update elements inside an array
+
+The three positional operators write *through* an array rather than to a whole
+field:
+
+```javascript
+// $ — the element the QUERY matched
+await tasks.updateOne({ tags: 'urgent' }, { $set: { 'tags.$': 'critical' } })
+await db.collection('students').updateOne(
+  { 'grades.score': { $lt: 50 } },
+  { $set: { 'grades.$.score': 50 } }
+)
+
+// $[] — every element
+await db.collection('students').updateMany({}, { $inc: { 'grades.$[].score': 5 } })
+
+// $[<identifier>] — the elements arrayFilters names
+await db.collection('students').updateMany(
+  {},
+  { $set: { 'grades.$[low].flagged': true } },
+  { arrayFilters: [{ 'low.score': { $lt: 50 } }] }
+)
+```
+
+They work with `$set`, `$unset`, `$inc`, `$mul`, `$min` and `$max`. Things worth
+knowing:
+
+- **`$` needs the query to constrain that array** — that is where the matched
+  element comes from. Without a condition it is an error, and so is a query that
+  matched the document but no element.
+- **`$unset` through `$` leaves a `null`** in the array rather than shortening
+  it, matching the server.
+- Each matched document uses its *own* first match, so `updateMany` with `$` is
+  well defined.
+- Every `arrayFilters` entry must be used by an identifier in the update, and
+  every identifier must have one — a mismatch is an error rather than a silent
+  no-op. `$or`/`$nor` inside an `arrayFilters` entry is not supported (`$and`
+  is, and a criterion document already means a conjunction).
+- The positional operators are **not** supported in `$push`, `$addToSet`,
+  `$pop`, `$pull`, `$pullAll` or `$rename`, and say so.
 
 ### Bulk writes
 
@@ -763,9 +811,10 @@ Query operators: `$eq` `$gt` `$gte` `$lt` `$lte` `$ne` `$in` `$nin` `$and` `$or`
 `$bitsAnyClear`.
 
 Update operators: `$set` `$unset` `$inc` `$mul` `$min` `$max` `$rename`
-`$setOnInsert` `$push` (with `$each`, `$slice`, `$sort`) `$addToSet` (with
-`$each`) `$pop` `$pull` `$pullAll`, plus the `upsert` option on
-`updateOne`/`updateMany`/`replaceOne`.
+`$setOnInsert` `$push` (with `$each`, `$slice`, `$sort`, `$position`)
+`$addToSet` (with `$each`) `$pop` `$pull` `$pullAll`, the positional operators
+`$` / `$[]` / `$[<identifier>]` (with `arrayFilters`), plus the `upsert` option
+on `updateOne`/`updateMany`/`replaceOne`.
 
 Accumulators: `$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
 `$count`.
@@ -887,7 +936,6 @@ how each piece would be implemented. The headlines:
 
 **Updating**
 
-- `$position` inside `$push`, and the positional operators `$` / `$[]` / `$[<id>]`
 
 **Collection / Db API**
 

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`$position` inside `$push`**, which inserts at an index instead of
+  appending (negative counts from the end), applied before `$sort`/`$slice`.
+- **The positional update operators** `$`, `$[]` and `$[<identifier>]`, with the
+  `arrayFilters` option — the way to change one element of an array without
+  rewriting the whole field. Supported in `$set`, `$unset`, `$inc`, `$mul`,
+  `$min` and `$max`; rejected by name elsewhere. `$` takes its element from the
+  query, and fails when the query constrains no array or matched no element,
+  as the server does.
 - **The projection `$`-operators**: `$slice` (a window over an array, in either
   the `n` or the `[skip, limit]` form), `$elemMatch` (the first element matching
   a criterion) and `$` positional (the element that matched the query). Which

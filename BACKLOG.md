@@ -181,13 +181,12 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 2 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. The subset is now wide enough that the promise is not embarrassing. |
-| 3 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 4 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 5 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 6 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 7 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. The subset is now wide enough that the promise is not embarrassing - the CRUD surface has no unimplemented families left. |
+| 2 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 3 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 4 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 5 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 6 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
 | — | [`$text`](#text-decided-2026-07-26--not-implemented-and-it-says-why) | — | **Decided against 2026-07-26.** FTS5's stemmer does not agree with MongoDB's, so it could not be oracle-verified. `db.sql` makes a caller-owned FTS5 table possible instead. |
 | — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
@@ -234,7 +233,7 @@ priority table above.
 | 1 | ~~[Rework the cursor](#1-rework-the-cursor-off-rowid-pagination)~~ | S | **DONE 2026-07-22** — cursors stream via `iterate()`; plan-regression test added |
 | 2 | ~~[`createIndex()` and friends](#2-createindex-and-friends)~~ | M | **DONE 2026-07-22** — expression indexes + `.$date` companions, closed-loop plan tests |
 | 3 | ~~[Implicit array element matching](#3-implicit-array-element-matching)~~ | M | **DONE 2026-07-22** — indexable rowid-union form; type bracketing added |
-| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — core 2026-07-22; upsert + findOneAnd* 2026-07-25; array/field operators 2026-07-25. `$position`/positional still open |
+| 4 | ~~[`updateOne` / `updateMany`](#4-updateone--updatemany-with-update-operators)~~ | M | **DONE** — core 2026-07-22; upsert + findOneAnd* 2026-07-25; array/field operators 2026-07-25; `$position` and the positional operators 2026-07-26 |
 | 5 | ~~[TypeScript typing](#5-typescript-typing)~~ | S then M | 5a **DONE 2026-07-22**; 5b **DONE 2026-07-25**, extended for the array operators and `aggregate<T>()` |
 | 6 | ~~[Cursor `sort` / `limit` / `skip`](#6-cursor-sort-limit-and-skip)~~ | M | **DONE 2026-07-22** — BSON type-order sorting, chainable + options forms |
 | 7 | ~~[Projection](#7-projection)~~ | M | **DONE** — include/exclude/nested/into-arrays 2026-07-22; `$slice`/`$elemMatch`/`$` positional 2026-07-26 |
@@ -604,9 +603,40 @@ Three things there are worth knowing before touching it:
   missing field is a no-op — `json_replace` only writes where the path exists,
   which avoids a `CASE` that would duplicate the whole expression.
 
-**Still open:** `$position` inside `$push` (it needs a rebuild that renumbers
-around the insert point, and is rejected with a clear error rather than
-half-implemented), and the positional operators `$`/`$[]`/`$[<id>]`.
+**`$position` and the positional operators landed 2026-07-26**, dual-engine in
+[test/operators/positional-update.spec.ts](test/operators/positional-update.spec.ts).
+`$position` stitches three runs together with an explicit ORDER BY, because
+UNION ALL does not promise an order and here the order is the point.
+
+`$`, `$[]` and `$[<identifier>]` (with `arrayFilters`) all write THROUGH an
+array, which no single `json_set` can do. They share one mechanism - rebuild the
+array, apply the operator to the selected elements - and the reason there is one
+rather than six is `FieldWriter`: each field operator became a
+`(target, source, path)` function, so the SAME code serves an ordinary field
+(target = the expression so far, source = `data`, path = the field) and a
+positional one (both = one wrapped element, path = the suffix under `$.f`). The
+wrapper is the one `$elemMatch` and `$pull` already use, and `$` finds its
+element with the same `firstMatchingElementSql` probe the `$` PROJECTION
+operator uses - one implementation of "which element matched" for both sides.
+
+Two things that cost time and would cost it again:
+
+- **Guards needed their own parameter registry.** A positional guard carries the
+  criterion it selects elements with, so guards stopped being parameterless SQL,
+  and `node:sqlite` rejects a statement handed a parameter it does not use in
+  EITHER direction. An unbound named parameter is silently NULL rather than an
+  error, so the first symptom was every `$` update failing its own "did not find
+  the match" guard.
+- **The element stream has to be a derived table**: SQLite resolves a result
+  alias in WHERE but not in a sibling result column, and the rebuild needs the
+  wrapped element in its SELECT list.
+
+Supported in `$set`, `$unset`, `$inc`, `$mul`, `$min` and `$max`; rejected by
+name in the array operators and `$rename`. `$or`/`$nor` inside an `arrayFilters`
+entry is refused (`$and` is flattened - a criterion document already means a
+conjunction).
+
+**Still open:** nothing in this item.
 Known divergences: `$unset` of an array element removes it instead of nulling it;
 `$set`/`$inc` through a SCALAR parent (`$set: { 'qty.x': 1 }` where `qty` is a
 number) silently no-ops where MongoDB errors. (`$inc` on a non-numeric field used
