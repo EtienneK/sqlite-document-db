@@ -187,18 +187,18 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 2 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. **One new consumer:** `updatedPaths` (src/update.ts) derives a change event's `updateDescription` from the update spec, and a pipeline update has no spec of that shape - decide what it reports. |
-| 3 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
-| 4 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 5 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 5= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
-| 6 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
-| 7 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
-| 8 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
-| 9 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
-| 10 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
-| 11 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 1 | [Pipeline updates](#28-the-operator-gap-sweep) | M | `updateOne(filter, [{ $set: … }])`. Both halves exist; the design question (compile to SQL, or evaluate in JS like `$expr`) has a precedent to follow. **One new consumer:** `updatedPaths` (src/update.ts) derives a change event's `updateDescription` from the update spec, and a pipeline update has no spec of that shape - decide what it reports. |
+| 2 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Now unblocked: the expression language it evaluates per input document exists. |
+| 3 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 4 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 4= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 5 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 6 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
+| 7 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
+| 8 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
+| 9 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
+| 10 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 11 | [Optimistic concurrency](#21-optimistic-concurrency) | S | **DECIDED, and deliberately last.** Was position 1 as a gating decision; the decision is made (no `_version`), so what is left is a README section for a pattern that already works. It is documentation of DRIVER usage, not parity, and everything above it is parity. Do it when the list above is shorter. |
 | — | [Change streams](#27-change-streams-reopened-2026-07-26) | M | **DONE 2026-07-26.** Events from the WRITE PATH, `RETURNING` for the post-images (so a watched `updateMany` is still one statement), buffered per transaction and flushed on commit. Every event shape is dual-engine against the replica set; the two blind spots - another connection, and `db.sql` - are DETECTED and end the stream with an `invalidate`. `resumeAfter` is refused, with the reason. |
 | — | [The operator gap sweep](#28-the-operator-gap-sweep) | S each | **DONE 2026-07-26** apart from pipeline updates and date arithmetic, both M and both listed above. `$currentDate`, `$bit`, `$comment`, `$sampleRate`, the regex/set/object/array/byte-string/trigonometry/`$convert` expression families, eleven accumulators, `$unset` and `$sortByCount`. |
 | — | [Index properties](#29-index-properties-partial-sparse-ttl-and-hint) | S-M | **DONE 2026-07-26** for `sparse`, `partialFilterExpression`, `hint`, `createIndexes()`, `dropIndexes()` and `indexExists()`. The measurement that shaped it: SQLite forbids SUBQUERIES in a partial index, and every comparison this compiler emits has one. |
@@ -317,7 +317,7 @@ priority table above.
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
 | 19 | ~~[Unicode round-trips](#19-unicode-and-special-character-round-trips)~~ | S | **DONE 2026-07-26** — [test/unicode.spec.ts](test/unicode.spec.ts); found and fixed a real string-ordering bug |
 | 20 | ~~[Raw SQL escape hatch](#20-a-raw-sql-escape-hatch)~~ | S-M | **DONE 2026-07-26** — `db.sql.all/get/run` + `db.table()`; raw rows, writable |
-| 21 | [Optimistic concurrency](#21-optimistic-concurrency) | L | Open — **decide first**; option 2 (document the pure-MongoDB pattern) is likely |
+| 21 | [Optimistic concurrency](#21-optimistic-concurrency) | ~~L~~ S | **DECIDED 2026-07-26 — option 2**, no `_version`: the driver has nowhere to put an expected version and nowhere to report one, so there is no shape to conform to. A README section remains, and it is LAST on the list — it documents driver usage, not parity |
 | 22 | ~~[`MongoClient` shim](#22-a-mongoclient-shaped-shim)~~ | M | **DONE 2026-07-26** — tested through the real driver AND the shim, at one type |
 | 23 | ~~[Lead with oracle verification](#23-lead-with-oracle-verification)~~ | XS | **DONE 2026-07-26** — first bullet, with the mechanics and the count |
 | 24 | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | Open — libSQL local is M, remote (Turso/D1) is L; `$regex` needs a JS post-filter |
@@ -1644,7 +1644,130 @@ is a much smaller promise and covers most of the need.
 
 ## 21. Optimistic concurrency
 
-**Size: L, and a DECISION comes first.**
+**Status: DECIDED 2026-07-26 — option 2, and DEPRIORITISED to the bottom of the
+list.** No `_version`. The pattern is expressible in the driver's own vocabulary
+and works today; what remains is a README section, which is documentation of
+driver usage rather than parity work — and parity is what the rest of the list
+is for. Re-sized L → S, because the L was the build that is not happening.
+
+### What settled it
+
+The framing below asked whether to accept a divergence. The answer is narrower
+than that: **there is no MongoDB shape to diverge FROM.** Read off the driver
+already installed here (`node_modules/mongodb`, 9,076 lines of published types):
+
+- `UpdateOptions` is exactly `arrayFilters`, `bypassDocumentValidation`,
+  `collation`, `hint`, `upsert`, `let`. **There is nowhere to put an expected
+  version.**
+- `UpdateResult` is exactly `acknowledged`, `matchedCount`, `modifiedCount`,
+  `upsertedCount`, `upsertedId`. **There is nowhere to report one back.**
+- Every occurrence of "version" in that surface is a SERVER version, wire
+  version, API version, index `version`, or a deprecation note. The single hit
+  that reads like a match — "throw an error if their expected version number and
+  the one provided do not match" — is the OIDC auth callback's API version.
+
+So building it means inventing both the option and the result field, and the
+only prior art at this layer is Pongo's. That is how a library ends up shipping
+`nextExpectedVersion` on a result shape that currently matches the driver's
+field for field.
+
+**MongoDB's own page for the pattern has been DELETED**, which is why it is hard
+to find rather than merely absent: `manual/tutorial/update-if-current/` 301s to
+the generic CRUD landing page, in the current manual and in the archived v4.4
+and v3.6 ones. Nothing was lost with it — the page documented a pattern
+assembled from `updateOne` and `matchedCount`, not a feature. The atomicity it
+relied on is still documented, at `manual/core/write-operations-atomicity/`.
+
+### What Pongo does, since it is the only prior art at this layer
+
+Read at `main`, 2026-07-26. `_version` is a real INTEGER column in an
+eight-column table (`_id`, `data`, `metadata`, `_version`, `_partition`,
+`_archived`, `_created`, `_updated`), against our one `data JSON`. The CHECK
+itself is cheap, and is the part worth respecting — `versionCheckClause` appends
+`AND _version = ?` to the UPDATE's own WHERE, so there is no read-before-write:
+
+```sql
+UPDATE users SET
+  data = json_patch(<update>, json_object('_id', _id, '_version', cast(_version + 1 as TEXT))),
+  _version = _version + 1
+WHERE _id = (SELECT _id FROM users <filter> LIMIT 1) AND _version = ?
+RETURNING _id, cast(_version as TEXT) as version, 1 as matched, 1 as modified;
+```
+
+Three consequences, and the third decides it here:
+
+1. **The version lives in two places.** Every write mirrors it into the document
+   body, `cast` to TEXT because JSON has no bigint — DR-1's problem, solved by
+   stringifying.
+2. **The filter compiler grows a special case.** Theirs carries an explicit
+   "`_id` and `_version` are native columns, not JSON fields" branch. Every path
+   here goes through `json_extract`.
+3. **No document can come out MongoDB-shaped.** `findOne` returns
+   `{ ...row.data, _id: row._id, _version: row._version }`, and their own e2e
+   asserts `deepStrictEqual(doc, { ...user, _version: 1n })`. The whole suite
+   here is `deepStrictEqual` against a real mongod, so a `_version` on every
+   read breaks every one of those assertions. The repairs are to strip it from
+   every read path (at which point `find()` lies about what is stored, and
+   `db.sql` still sees it) or to fork the expectations per engine — which is
+   trading away the oracle, the one thing
+   [item 23](#23-lead-with-oracle-verification) says to defend. Pongo pays
+   neither cost because it has no oracle to break.
+
+Also not copied: a conflict there is `{ successful: false }` rather than an
+exception, thrown only via `assertSuccessful()` or a client-wide
+`throwOnOperationFailures`. `matchedCount: 0` is already that signal without a
+new result field.
+
+### The trap this leaves behind
+
+**The type harness would NOT catch option 3 if someone built it later.**
+`session.transaction` was caught because the driver's types LACKED something
+this library would have built; `nextExpectedVersion` is ADDITIVE, and extra
+properties stay assignable, so [test/mongo-client.spec.ts](test/mongo-client.spec.ts)
+and [test/types.test-d.ts](test/types.test-d.ts) would both stay green. **This
+record is the guardrail, because the compiler is not one here.**
+
+### What is left, and the correctness caveat found while deciding
+
+One README section under `### Concurrency`, which already covers the in-process
+and cross-process cases and stops exactly where this starts. It must name the
+pattern **"Update if Current"** (MongoDB's page for it is gone, so the name is
+otherwise unfindable), show
+`updateOne({ _id, version: 3 }, { $inc: { version: 1 }, … })`, say that
+`createIndex({ version: 1 })` keeps the predicate index-served, and say plainly
+that **a conflict looks like a no-op** rather than an error — the part callers
+get wrong.
+
+**And it must not claim more than `updateOne` delivers.** Measured while writing
+this up: `updateOne` is `findOneRow(filter)` then
+`UPDATE … WHERE rowid = :rowid AND data != <expr>`
+([src/collection.ts:1559](src/collection.ts#L1559),
+[src/collection.ts:1443](src/collection.ts#L1443)) — **the filter, and therefore
+the version predicate, is NOT re-evaluated by the UPDATE.** In one process that
+is safe for the same reason `insertUpserted` documents at
+[src/collection.ts:1411](src/collection.ts#L1411): `node:sqlite` is synchronous
+and there is no `await` between the two statements, so nothing interleaves.
+Across processes on a file-backed database there is a window — two writers can
+both pass the version check and the second silently wins, which is the exact
+lost update the pattern exists to prevent. `findOneAndUpdate` has the same shape
+([src/collection.ts:1628](src/collection.ts#L1628)).
+
+`updateMany` does NOT have the window: it puts the compiled filter in the
+UPDATE's own WHERE ([src/collection.ts:1597](src/collection.ts#L1597)), which is
+the same single-statement compare-and-set Pongo's `AND _version = ?` is. Since
+`_id` is unique, `updateMany({ _id, version: n }, …)` touches at most one
+document, and its `modifiedCount` is the honest conflict signal (its
+`matchedCount` comes from a separate earlier `countDocuments`).
+
+So the section has a real decision in it rather than being a transcription, and
+that decision is worth taking deliberately: recommend `updateMany` for the
+cross-process case, or wrap `updateOne` in `db.withTransaction()` (a plain
+deferred `BEGIN`, [src/db.ts:531](src/db.ts#L531) — **verify with a genuine
+two-process test** that the write-upgrade fails rather than silently losing the
+update before recommending it), or narrow the claim to one process. Not settled
+here, because the section is not being written yet.
+
+The original analysis follows.
 
 Pongo gives every document a `_version`, accepts `expectedVersion` on writes,
 returns `nextExpectedVersion`, and fails the write when the versions disagree.
