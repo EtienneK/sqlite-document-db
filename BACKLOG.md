@@ -181,20 +181,19 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Unicode round-trips](#19-unicode-and-special-character-round-trips) | S | **A real hole, found by looking at a competitor's tests.** There is no non-ASCII anywhere in this suite, in a library that stores JSON as SQLite text. Cheapest item here and it covers where a silent corruption would actually live. |
-| 2 | [Lead with oracle verification](#23-lead-with-oracle-verification) | XS | A README edit. The one property no competitor has cheaply reproduced is currently the third bullet in a list. |
-| 3 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | "You are on SQLite" is the pitch, and there is no way to use SQLite. The moment a caller needs a CTE or a window function their only option is a second connection to the same file. |
-| 4 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
-| 5 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
-| 6 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
-| 7 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
-| 8 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 4-5 first, or the promise is embarrassing. |
-| 9 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
-| 10 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 4 first, since its point is running an expression per input document. |
-| 11 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 12 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
-| 13 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
-| — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is decided against. |
+| 1 | [Lead with oracle verification](#23-lead-with-oracle-verification) | XS | A README edit. The one property no competitor has cheaply reproduced is currently the third bullet in a list. |
+| 2 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | "You are on SQLite" is the pitch, and there is no way to use SQLite. The moment a caller needs a CTE or a window function their only option is a second connection to the same file. |
+| 3 | [Aggregation expression operators](#16-aggregation-pipeline) | M | `$add`/`$concat`/`$cond`/`$dateToString`. Only field paths, literals and `$literal` exist, so this is the pipeline's ceiling now `$lookup` has landed. |
+| 4 | [`$expr`, `$text`, `$bits*`](#8-remaining-query-operators) | M | The remaining query operators. `$expr` also closes the last two TODOs in the operator spec. `$where` is deliberately never. |
+| 5 | [Projection `$`-operators](#7-projection) | M | `$slice`, `$elemMatch`, `$` positional. |
+| 6 | [`$position` and the positional update operators](#4-updateone--updatemany-with-update-operators) | M | `$position` inside `$push`, and `$` / `$[]` / `$[<id>]`. Rejected loudly today, so nobody is silently wrong. |
+| 7 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Makes the test-double use case a one-line swap. Worth having only because the oracle harness can evidence the promise - so it wants items 3-4 first, or the promise is embarrassing. |
+| 8 | [Optimistic concurrency](#21-optimistic-concurrency) | L | **Decide before building.** The one substantive feature Pongo has and this does not - but `_version` has no MongoDB counterpart, so option 2 in that item (document the pure-MongoDB pattern) is probably the right answer and costs a README section. |
+| 9 | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | The correlated-subquery join. Wants item 3 first, since its point is running an expression per input document. |
+| 10 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
+| 11 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`, `$out`, `$merge`, `$sample`, `$graphLookup`. Diminishing returns; do them when someone asks. |
+| 12 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| — | [Other SQLite engines](#24-other-sqlite-engines-libsql-turso-d1) | M / L | **Unscheduled, accepted in principle** ([DR-3](#dr-3-which-databases-should-this-run-on)). Do the driver seam first and prove it with `node:sqlite` on both sides; only then pick an engine. PostgreSQL is still undecided - deferred, not rejected, and the dialect seam is what keeps it possible. |
 
 Items 19-23 come from the [competitive review of Pongo](#competitive-review-2026-07-26-pongo).
 The review's own conclusion is worth keeping in view: this library leads on
@@ -254,7 +253,7 @@ priority table above.
 | 16 | [Aggregation pipeline](#16-aggregation-pipeline) | L | **Common shapes + `$lookup` DONE 2026-07-26** — expression operators and the exotic stages still open |
 | 17 | [Smaller items](#17-smaller-items-and-nice-to-haves) | S each | Benchmarks, `_id` types, depth limits, concurrency docs **DONE**; statement cache and TypeDoc open |
 | 18 | ~~[Strict mode](#18-strict-mode)~~ | S | **DONE 2026-07-25** — known divergences raise instead of answering differently |
-| 19 | [Unicode round-trips](#19-unicode-and-special-character-round-trips) | S | Open — no non-ASCII coverage anywhere in the suite |
+| 19 | ~~[Unicode round-trips](#19-unicode-and-special-character-round-trips)~~ | S | **DONE 2026-07-26** — [test/unicode.spec.ts](test/unicode.spec.ts); found and fixed a real string-ordering bug |
 | 20 | [Raw SQL escape hatch](#20-a-raw-sql-escape-hatch) | S-M | Open — decide decoded vs raw rows, and read-only vs writable |
 | 21 | [Optimistic concurrency](#21-optimistic-concurrency) | L | Open — **decide first**; option 2 (document the pure-MongoDB pattern) is likely |
 | 22 | [`MongoClient` shim](#22-a-mongoclient-shaped-shim) | M | Open — wants a wider subset first |
@@ -1291,7 +1290,37 @@ not have.
 
 ## 19. Unicode and special-character round-trips
 
-**Size: S.** The clearest gap the Pongo review found, and it is in TESTING
+**Size: S — DONE 2026-07-26.** [test/unicode.spec.ts](test/unicode.spec.ts)
+runs 27 values — nine scripts, both Unicode normalisation forms of `café`,
+astral characters and ZWJ sequences, BOM and bidi marks, an embedded NUL, and
+the JSON/SQL-structural characters — through `insertOne`, `insertMany`,
+`updateOne`, `updateMany`, `$push` and `replaceOne`, then finds each again by
+equality, `$in`, `$ne`, `$all`, array-element matching, `$regex`, `distinct`,
+`$group._id` and both sort paths. Unicode FIELD names get the same treatment
+through queries, dotted paths, `$set`, projection, `distinct` and `createIndex`.
+Dual-engine throughout, so MongoDB decides what "unchanged" means.
+
+**Storage and matching turned out to be clean** — every value round-tripped byte
+for byte, including the NUL and the surrogate pairs, and every field-name path
+literal escaped correctly. **Ordering did not.**
+[src/bson-order.ts](src/bson-order.ts) compared strings with JavaScript's `<`,
+under a comment asserting that this "is what SQLite's BINARY collation does
+too". It is not. JavaScript compares UTF-16 code UNITS; SQLite's BINARY
+collation and MongoDB's default collation both compare UTF-8 BYTES, which is
+code-POINT order. The two disagree for every character outside the BMP, because
+a high surrogate (U+D800..U+DBFF) sorts below U+E000..U+FFFF as a code unit
+while the code point it introduces sorts above them.
+
+The visible effect was that **the same `$sort` gave two different answers
+depending on where it ran**: `find().sort()` and a leading pipeline `$sort` go
+to SQLite and were right, while a `$sort` after a `$group`, `distinct()`'s
+ordering and `$min`/`$max` run through `compareBson` and put `🚀` before
+`�`. Exactly the twin-must-agree failure the file's own header warns about.
+Fixed by ranking a high surrogate at the code point it begins.
+
+### Original analysis
+
+The clearest gap the Pongo review found, and it is in TESTING
 rather than features.
 
 [test/injection.spec.ts](test/injection.spec.ts) covers adversarial ASCII —

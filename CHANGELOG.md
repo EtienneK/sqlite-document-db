@@ -59,6 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The same `$sort` could order strings two different ways.** Sorting that ran
+  in SQLite (`find().sort()`, a `$sort` at the head of a pipeline) compared
+  strings by UTF-8 byte, matching MongoDB. Sorting that ran in JavaScript (a
+  `$sort` after a `$group`, `distinct()`'s ordering, `$min`/`$max`) compared
+  UTF-16 code units, which disagrees for every character outside the Basic
+  Multilingual Plane — so `🚀` sorted before `�` in one place and after it
+  in the other. JavaScript-side comparison is by code point now.
 - **`insertMany` was one implicit transaction per document.** With
   `journal_mode=WAL` and SQLite's default `synchronous=FULL` that is an fsync
   per document, which made inserting a large batch into a file-backed database

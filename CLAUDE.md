@@ -61,6 +61,14 @@ belongs in types.ts.**
   decision about which stages run in SQL and which in JS.
 - [src/bson-order.ts](src/bson-order.ts) — MongoDB's BSON comparison order in JS;
   the twin of `bsonRankSql`/`bsonValueSql` in query.ts, which it must agree with.
+  **Strings compare by code POINT there, not with JavaScript's `<`.** SQLite's
+  BINARY collation and MongoDB's default collation both compare UTF-8 bytes,
+  which is code-point order; JS compares UTF-16 code units, and the two disagree
+  for every astral character (a high surrogate sorts below U+E000..U+FFFF, the
+  code point it begins sorts above). Reverting `compareStrings` to `x < y` makes
+  a `$sort` after a `$group` order `🚀` and `�` differently from the same
+  `$sort` at the head of a pipeline. Pinned by
+  [test/unicode.spec.ts](test/unicode.spec.ts).
 - [src/ejson.ts](src/ejson.ts) — storage serialization (see the EJSON gotcha below).
 - [src/projection.ts](src/projection.ts) — MongoDB projection semantics, applied in JS.
 - [src/errors.ts](src/errors.ts) — `MongoServerError` / `DUPLICATE_KEY_ERROR` (11000).
@@ -371,7 +379,11 @@ expression index whose indexed expression is textually identical, so a bound
 `quoteIdentifier()`; collection names are additionally validated. Booleans bind as 1/0
 (SQLite cannot bind a bool); update values always go through `json(:u)` with
 the storage encoder so `$set: { x: true }` stores `true`, not `1`.
-Adversarial-value coverage: [test/injection.spec.ts](test/injection.spec.ts).
+Adversarial-value coverage: [test/injection.spec.ts](test/injection.spec.ts) for
+ASCII, [test/unicode.spec.ts](test/unicode.spec.ts) for the rest of Unicode —
+nine scripts, both normalisation forms of `café`, astral characters, an embedded
+NUL, and the same values as FIELD names, which take the path-literal route
+rather than the bound-value one.
 
 **Prototype safety.** Anywhere a user-supplied key is used to index an object,
 that object is built with `Object.create(null)` — the projection path tree
