@@ -258,6 +258,13 @@ finalises it. The MongoDB driver has already buffered a batch client-side and
 keeps draining it, so `next()` there can still return a document. If you close
 a cursor early, do not rely on either behaviour.
 
+Prepared statements are **cached per connection**, keyed by their SQL — every
+value is bound as a parameter, so the same operation is the same SQL text, and
+repeating it skips the prepare (measured on a file-backed database: `findOne`
+by id 3.4× faster, `updateOne` inside a transaction 4.3×). A statement a live
+cursor is streaming from is never shared: a concurrent identical query gets its
+own transient statement.
+
 ### See what a query does
 
 `find().explain()` reports the SQL a cursor runs and the plan SQLite chose for

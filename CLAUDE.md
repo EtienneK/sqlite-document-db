@@ -116,6 +116,9 @@ belongs in types.ts.**
   and the dot-notation path algebra behind them. Types only; no runtime code.
 - [src/object-id.ts](src/object-id.ts) — generates MongoDB-compatible ObjectId hex strings.
 - [src/raw-sql.ts](src/raw-sql.ts) — the `db.sql` escape hatch (see below).
+- [src/statement-cache.ts](src/statement-cache.ts) — a `Driver` wrapping another
+  `Driver`, reusing prepared statements keyed by SQL. `Db.open` wraps EVERY
+  driver with it (see the driver seam notes below).
 
 ### Storage model
 
@@ -902,6 +905,26 @@ and it is cheap to keep and expensive to rebuild. Four rules keep it usable:
    laziness for CORRECTNESS — only for memory. And `createFunction` may be
    absent (`supportsFunctions`), which is why `$regex` needs a JavaScript
    post-filter fallback before either engine can be supported.
+
+**Statements are CACHED at the seam** (BACKLOG item 17):
+[src/statement-cache.ts](src/statement-cache.ts) is a `Driver` wrapping another
+`Driver`, and `Db.open` wraps whatever it is handed — so every engine gets the
+cache and no call site knows it exists. Measured on a file-backed database:
+`findOne` by id 3.4× faster, `updateOne` inside a transaction 4.3×. The design
+problem was a LIFETIME, not a lookup (`find()` hands its statement to
+`iterate()` and the cursor owns it until exhausted or closed), and three rules
+keep it safe: the statement is resolved per CALL, not per `prepare()`, so two
+handles over one SQL never pin one statement; `iterate()` marks the entry BUSY
+until the iterator ends (exhausted, returned, or failed); and a busy hit gets a
+fresh TRANSIENT statement instead of waiting or sharing. Eviction is LRU
+skipping busy entries; there is no DDL invalidation because SQLite re-prepares
+transparently and a dropped table fails exactly as a fresh `prepare()` would.
+One consequence to keep in mind: `prepare()` is now LAZY, so invalid SQL
+surfaces at the first `run`/`get`/`all`/`iterate` rather than at `prepare()` —
+nothing depended on the eager error, and new code must not either. Pinned in
+[test/statement-cache.spec.ts](test/statement-cache.spec.ts) against a
+counting driver, because "it actually caches" is invisible from behaviour
+alone.
 
 **The dialect seam is NOT built.** SQL emission is still SQLite-specific: 169
 JSON1 call sites, 148 of them in [src/query.ts](src/query.ts) and

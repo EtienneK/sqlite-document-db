@@ -187,16 +187,16 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | Re-sized from S: a cached statement is owned by a live cursor until exhausted, so it is a lifetime problem, not a lookup one. |
-| 2 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
-| 2= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
-| 3 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
-| 4 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
-| 5 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
-| 6 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
-| 7 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
-| 8 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
-| 9 | [Optimistic concurrency](#21-optimistic-concurrency) | S | **DECIDED, and deliberately last.** Was position 1 as a gating decision; the decision is made (no `_version`), so what is left is a README section for a pattern that already works. It is documentation of DRIVER usage, not parity, and everything above it is parity. Do it when the list above is shorter. |
+| 1 | [Search, under our own name](#31-search-search-cannot-be-the-api-but-search-can-be-the-feature) | M | FTS5 is compiled in. `$text` and `$search` stay refused; a caller-tokenized search API promises only what it can keep. |
+| 1= | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | S, then M+M | Three steps, each useful alone. **Do step 1 regardless:** `db.sql` cannot bind a `Uint8Array`, so the escape hatch cannot reach the one thing SQLite does that documents cannot. `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 2 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
+| 3 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
+| 4 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
+| 5 | [TTL indexes](#29-index-properties-partial-sparse-ttl-and-hint) | M | The one index property with no SQLite counterpart. Decide the shape (purge on access, or an opt-in timer) before building; either is a divergence to enumerate rather than hide. |
+| 6 | [Remaining stages](#16-aggregation-pipeline) | L | `$facet`, `$bucket`, `$replaceRoot`/`$replaceWith`, `$out`, `$merge`, `$sample`, `$graphLookup`, `$unionWith`, `$documents`. Diminishing returns; do them when someone asks. |
+| 7 | [TypeDoc to GitHub Pages](#17-smaller-items-and-nice-to-haves) | M | The last nice-to-have. Needs a dependency and a workflow. |
+| 8 | [Optimistic concurrency](#21-optimistic-concurrency) | S | **DECIDED, and deliberately last.** Was position 1 as a gating decision; the decision is made (no `_version`), so what is left is a README section for a pattern that already works. It is documentation of DRIVER usage, not parity, and everything above it is parity. Do it when the list above is shorter. |
+| — | [Statement cache](#17-smaller-items-and-nice-to-haves) | M | **DONE 2026-07-26.** A `Driver` wrapping another `Driver` (src/statement-cache.ts), applied by `Db.open` to every engine. The lifetime problem the re-size predicted was real and had three answers: resolve the statement per CALL (never per prepare), mark it BUSY across `iterate()`, hand a busy hit a transient statement. Measured file-backed: `findOne` by id 3.4x, `updateOne` in a transaction 4.3x, indexed `find` 2.1x. |
 | — | [`$lookup`'s `let`+`pipeline` form](#16-aggregation-pipeline) | M | **DONE 2026-07-26.** Substitute, then delegate: per input document the `let` variables are evaluated and every `$$var` in the sub-pipeline becomes a `$literal` (scope-aware - inner bindings shadow), and the result runs as an ORDINARY aggregate() on the foreign collection - so the `$match` pushdown, `mdb_expr` and nested `$lookup`s came free. Executions memoize on the variable VALUES: an uncorrelated pipeline is one query total. The classic form now reads through the same hook as `[{ $match: { field: { $in: keys } } }]`. Combining localField/foreignField WITH a pipeline (4.4+) is refused as unimplemented. |
 | — | [Pipeline updates](#28-the-operator-gap-sweep) | M | **DONE 2026-07-26.** `updateOne(filter, [{ $set: … }])` on the three update methods and `bulkWrite`. Evaluates in JS through the SAME stages `aggregate()` runs (the `$expr` precedent, followed); `updateMany` reads the matched rows and writes every result back in ONE `json_each` statement. The change event's `updateDescription` is DIFFED from the images - which is what the server does for a pipeline write, granularly - and the one divergence (MongoDB's oplog size heuristic flips small-document events to `replace`) is refused under strict, like the positional one. The oracle also caught `$set`-to-missing keeping the old value in `aggregate()` - it must REMOVE the field. |
 | — | [Change streams](#27-change-streams-reopened-2026-07-26) | M | **DONE 2026-07-26.** Events from the WRITE PATH, `RETURNING` for the post-images (so a watched `updateMany` is still one statement), buffered per transaction and flushed on commit. Every event shape is dual-engine against the replica set; the two blind spots - another connection, and `db.sql` - are DETECTED and end the stream with an `invalidate`. `resumeAfter` is refused, with the reason. |
@@ -1427,12 +1427,26 @@ it differently.
   document over MongoDB's 16MB cap is accepted here and would be refused by a
   real server. Documented in the README rather than enforced, because enforcing
   it would reject documents this library can genuinely store.
-- **Statement cache.** Once item 9 lands, cache prepared statements per collection.
-  **Not the S it looks like:** `find()` hands its statement to `iterate()` and
-  the cursor owns it until it is exhausted or closed, so a naive cache would let
-  two live cursors share one statement and interleave their rows. Any cache has
-  to key on "not currently iterating", which is a lifetime problem, not a lookup
-  problem. Size it M and do it after item 12.
+- ~~**Statement cache.**~~ **DONE 2026-07-26** - and the re-size to M was
+  right about why: the problem was the LIFETIME, not the lookup.
+  [src/statement-cache.ts](src/statement-cache.ts) is a `Driver` wrapping
+  another `Driver`, keyed by SQL text (every value binds as a named parameter,
+  so the same operation IS the same SQL); `Db.open` wraps whatever engine it is
+  handed, so no call site knows the cache exists and every future driver gets
+  it. The predicted hazard - two live cursors sharing one statement and
+  interleaving rows - is held off by three rules: the statement is resolved per
+  CALL rather than per `prepare()` (a handle is a lazy name, so it can never
+  pin a statement), `iterate()` marks the entry BUSY until the iterator is
+  exhausted/returned/failed, and a busy hit gets a fresh TRANSIENT statement.
+  Eviction is LRU past 256 entries, skipping busy ones; DDL needs no
+  invalidation (SQLite re-prepares transparently, and a dropped table fails
+  like a fresh prepare). One visible consequence: `prepare()` is lazy now, so
+  bad SQL surfaces at first use. Measured on a file-backed database:
+  `findOne` by id 31.7k -> 106.5k ops/s (3.4x), `updateOne` inside a
+  transaction 16.9k -> 72.1k (4.3x), indexed `find().toArray()` 24.0k -> 51.4k
+  (2.1x), `countDocuments` 4.1k -> 4.9k (1.2x - scan-dominated, as expected).
+  Pinned in [test/statement-cache.spec.ts](test/statement-cache.spec.ts)
+  against a COUNTING driver, because caching is invisible from behaviour alone.
 - **API documentation.** TypeDoc from the source, published to GitHub Pages.
 - ~~**Remove `backup/`.**~~ **DONE** — the directory is gone; the last stale
   references to it (in `.oxlintrc.json` and `CLAUDE.md`) were removed 2026-07-25.

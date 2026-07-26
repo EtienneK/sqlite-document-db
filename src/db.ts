@@ -19,6 +19,7 @@ import { parse as parseDocument } from './ejson.js'
 import { evaluateExpression, isTruthy } from './expression.js'
 import { quoteIdentifier } from './query.js'
 import { createRawSql, sqlFragment, type RawSql, type SqlFragment } from './raw-sql.js'
+import { cachingDriver } from './statement-cache.js'
 import type {
   ChangeStreamOptions, CollectionInfo, CreateCollectionOptions, DbOptions, DbStats, DbStatsOptions,
   Document, DropDatabaseOptions, ListCollectionsOptions, RenameOptions, SessionHost, TransactionFrame
@@ -132,7 +133,13 @@ export class Db {
   }
 
   /** The body of `fromDriver`, which does no awaiting. See `openSync`. */
-  private static open (db: Driver, options: Partial<DbOptions> = {}): Db {
+  private static open (raw: Driver, options: Partial<DbOptions> = {}): Db {
+    // Every statement this library compiles binds its values as named
+    // parameters, so the same operation is the same SQL text - wrapping the
+    // driver HERE (whatever engine it is) means every call site below reuses
+    // prepared statements without knowing a cache exists. See
+    // src/statement-cache.ts for the cursor-lifetime rules that make it safe.
+    const db = cachingDriver(raw)
     const dbOptions: DbOptions = {
       debug: false,
       strict: false,
