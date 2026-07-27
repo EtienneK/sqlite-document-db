@@ -1097,9 +1097,10 @@ Four things to know:
   (as 1/0), `null`, `Date` (as its ISO string, which is what is stored at
   `<field>.$date`), `Uint8Array` (as a BLOB) and objects/arrays (as their
   storage JSON, ready for `json(?)`) are all bindable; anything else throws.
-  Bytes are the reason `Uint8Array` is on that list: documents cannot hold
-  binary (storage is JSON), so binding one here — into a `BLOB` table of your
-  own, on this same connection and inside `withTransaction` — is how files sit
+  Documents hold bytes too (inline, as base64 — see
+  [Supported value types](#supported-value-types)), but a real BLOB is smaller
+  and faster: binding a `Uint8Array` here — into a `BLOB` table of your own, on
+  this same connection and inside `withTransaction` — is how large files sit
   next to the documents that reference them.
 - **`db.table(name)` is the exception**, and the only one. A table name cannot
   be a parameter, and the physical name is not guessable — `Users` and `users`
@@ -1221,7 +1222,7 @@ accumulator arguments:
 | Set | `$setUnion` `$setIntersection` `$setDifference` `$setEquals` `$setIsSubset` `$allElementsTrue` `$anyElementTrue` |
 | Object | `$mergeObjects` `$objectToArray` `$arrayToObject` `$getField` `$setField` `$unsetField` |
 | Date | `$year` `$month` `$dayOfMonth` `$hour` `$minute` `$second` `$millisecond` `$dayOfWeek` `$dayOfYear` `$dateToString` |
-| Type | `$type` `$isNumber` `$toString` `$toBool` `$toInt` `$toDouble` `$toDate` `$convert` |
+| Type | `$type` `$isNumber` `$toString` `$toBool` `$toInt` `$toDouble` `$toDate` `$convert` `$binarySize` |
 | Vector | `$similarityCosine` `$similarityDotProduct` `$similarityEuclidean` |
 | Other | `$literal` `$let` `$rand`, and the variables `$$ROOT` `$$CURRENT` `$$REMOVE` |
 
@@ -1267,26 +1268,47 @@ Result objects match the official driver's shapes (`acknowledged`,
 
 ### Supported value types
 
-Supported: object, array, string, number, boolean, null — and **`Date`**, which is
+Supported: object, array, string, number, boolean, null — and two more, each
 stored in MongoDB's [Extended JSON](https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/)
-format (`{"$date": "..."}`), round-trips as a real `Date`, and works in equality and
-range queries:
+format:
 
-```javascript
-await db.collection('events').insertOne({ name: 'launch', at: new Date('2020-06-15') })
-await db.collection('events').find({ at: { $gte: new Date('2020-01-01') } }).toArray()
-```
+- **`Date`**, stored as `{"$date": "..."}`. Round-trips as a real `Date`, and
+  works in equality and range queries:
 
-Anything else JSON cannot represent (`RegExp`, `Uint8Array`/`Buffer`, `Map`, `Set`,
-`bigint`, functions, `NaN`/`Infinity`) is **rejected at write time** with an error
-naming the offending path, rather than silently corrupted the way `JSON.stringify`
-would. (`RegExp` still works fine as a *query* value via `$regex` — it just cannot
-be stored in documents.) Design notes in
+  ```javascript
+  await db.collection('events').insertOne({ name: 'launch', at: new Date('2020-06-15') })
+  await db.collection('events').find({ at: { $gte: new Date('2020-01-01') } }).toArray()
+  ```
+
+- **`Uint8Array`** (and `Buffer`, its subclass), stored as
+  `{"$binary": {"base64": "...", "subType": "00"}}` and revived as a plain
+  `Uint8Array`. Equality, `$in`/`$nin`, implicit array-element matching,
+  `$type: 'binData'`, `$binarySize` and update operators all work:
+
+  ```javascript
+  await db.collection('files').insertOne({ name: 'logo.png', bytes: new Uint8Array([137, 80, 78, 71]) })
+  await db.collection('files').findOne({ bytes: new Uint8Array([137, 80, 78, 71]) })
+  ```
+
+  Two deliberate edges: **range operators (`$gt`/`$lt`/…) refuse binary
+  values** — MongoDB orders binary by length, then bytes, which SQL over the
+  stored base64 cannot reproduce — and **sorting by a field that holds binary
+  orders by the stored text**, a documented divergence that
+  [strict mode](#strict-mode) rejects, exactly like sorting arrays. Bytes are
+  stored inline as base64 (+33% on disk); for files of any size, use
+  [GridFS-style chunking or a raw BLOB table](#raw-sql) — see BACKLOG item 35.
+
+Anything else JSON cannot represent (`RegExp`, other typed arrays/`DataView`,
+`Map`, `Set`, `bigint`, functions, `NaN`/`Infinity`) is **rejected at write
+time** with an error naming the offending path, rather than silently corrupted
+the way `JSON.stringify` would. (`RegExp` still works fine as a *query* value
+via `$regex` — it just cannot be stored in documents.) Design notes in
 [DR-1 in the backlog](BACKLOG.md#dr-1-document-storage-format).
 
-One field shape is reserved by that format: an object that is exactly
-`{ "$date": "<string>" }` is indistinguishable from a stored `Date`, so it is
-rejected on write too. Objects that merely *contain* a `$date` key
+Two field shapes are reserved by that format: an object that is exactly
+`{ "$date": "<string>" }` (or exactly the `$binary` wrapper) is
+indistinguishable from a stored `Date` (or byte array), so it is rejected on
+write too. Objects that merely *contain* a `$date` or `$binary` key
 (`{ $date: '…', tz: 'UTC' }`) store normally.
 
 ### `_id` values
@@ -1396,17 +1418,12 @@ have the measurements behind both halves.
   [Transactions](#transactions) and
   [Sessions](#sessions-and-the-one-thing-they-cannot-do).)
 
-**Binary data in documents, and GridFS** — not implemented yet. Every non-JSON
-type except `Date` is rejected at write time, `Uint8Array` included, so a
-document field cannot hold bytes. What *does* exist is the escape hatch:
-[`db.sql`](#raw-sql) binds and returns `Uint8Array`, so files can live in a
-`BLOB` table of your own on the same connection, transactionally, next to the
-documents that reference them.
-
-GridFS itself needs nothing from a server — it is a convention over two ordinary
-collections — so it is a plausible feature rather than a refused one, gated on
-`$binary` document support landing first. Note that the problem it solves is not
-one this library has: there is **no 16MB document cap** here (see
+**GridFS** — not implemented yet, but no longer blocked: document fields hold
+bytes now (see [Supported value types](#supported-value-types)), and
+[`db.sql`](#raw-sql) reaches SQLite's real BLOB type for files that should not
+live inline. GridFS itself needs nothing from a server — it is a convention
+over two ordinary collections — and the problem it solves is not one this
+library has: there is **no 16MB document cap** here (see
 [Document limits](#document-limits) above), so its value would be compatibility
 for code already written against `GridFSBucket`. BACKLOG.md item 35 has the
 measurements and the build order.

@@ -37,11 +37,13 @@ still not (niche; revisit with item 3). Full EJSON (option B) remains open —
 the wire format is identical. Gates items [2](#2-createindex-and-friends), [3](#3-implicit-array-element-matching),
 [5b](#5-typescript-typing) and [6](#6-cursor-sort-limit-and-skip), and caps DR-2.
 
-**The `Binary` half of option B has a caller now** (2026-07-26): it is what gates
-GridFS, and rejecting `Uint8Array` also means `db.sql` cannot reach SQLite's BLOB
-type at all. See [item 35](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong)
-for the measurements and the build order — `$binary` inline as base64 is the next
-option-B step, and it is worth taking on its own merits.
+**The `Binary` half of option B landed 2026-07-27** (step 2 of
+[item 35](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong)):
+`Uint8Array` stores as `{"$binary": {"base64": …, "subType": "00"}}` and
+round-trips, with the query/update/sort consequences recorded on that item.
+`db.sql` had gained BLOB binding the day before (step 1). What remains of full
+option B is the exotica (`ObjectId` as a distinct type, `Decimal128`, `Long`,
+regex), none of which has a caller.
 
 ### Context
 
@@ -187,7 +189,7 @@ the closed items are listed after it for provenance.
 
 | Order | Item | Size | Why this position |
 | --- | --- | --- | --- |
-| 1 | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | ~~S~~, then M+M | **Step 1 DONE 2026-07-26**: `db.sql` binds and returns `Uint8Array`, and `DriverParams` obliges every driver to carry blobs (seam spec included). Steps 2–3 remain: `$binary` in ejson is DR-1's remaining option-B step; GridFS on top is compat-only and oracle-verifiable, unlike `$text`. |
+| 1 | [Bytes, then GridFS](#35-gridfs-and-binary-data-the-needs-a-server-line-was-wrong) | ~~S~~, ~~M~~, then M | **Steps 1–2 DONE** (`db.sql` blobs 2026-07-26; `$binary` in documents 2026-07-27, dual-engine against the driver's `Binary`). Step 3 remains: GridFS on top, compat-only and oracle-verifiable, unlike `$text`. |
 | 2 | [Geospatial](#30-geospatial-queries) | M | The largest unimplemented block of the query language, and SQLite has R-Tree and geopoly. Spherical-vs-planar is what makes it real work. |
 | 3 | [Date arithmetic](#28-the-operator-gap-sweep) | M | `$dateAdd`, `$dateDiff`, `$dateTrunc`, `$dateFromString`, `$dateFromParts` - the one expression family the sweep left, because `timezone` has to stay refused and the parsing rules are not guessable. |
 | 4 | [Validation, views, capped collections](#33-the-collection-and-db-surface-the-manual-still-lists) | M each | What is left of the Collection/Db surface. `createCollection` currently rejects every option but `session`, so a validator would be the first it accepts. |
@@ -3247,7 +3249,22 @@ Each step is independently useful and none commits to the next.
    Unblocks `$type: 'binData'`, `$binarySize`/`$bsonSize` (both listed in
    [item 28](#28-the-operator-gap-sweep) as needing BSON types), and removes one
    more row from `UNSTORABLE_TYPE_ALIASES`. Dual-engine verifiable against the
-   driver's `Binary`, which is what makes it worth doing properly. **M.**
+   driver's `Binary`, which is what makes it worth doing properly. **M — DONE
+   2026-07-27**, dual-engine in [test/binary.spec.ts](test/binary.spec.ts).
+   What the build settled, for posterity: equality/`$in`/`$pull`/`$addToSet`
+   needed no new SQL — the encoded wrapper compares as object text through the
+   machinery objects already had (`$pull` needed one line: a Uint8Array is an
+   equality, not a criterion document). binData got its own BSON rank (between
+   array and boolean; the JS and SQL twins renumbered together), and WITHIN the
+   rank values compare as wrapper text — which is (base64, subType) order, NOT
+   MongoDB's (length, subtype, bytes). That is the array-sort divergence again,
+   so it took the same two answers: `strict` refuses a sort over a field
+   holding binary, and the RANGE operators (`$gt` et al.) refuse Uint8Array
+   arguments outright rather than answering in an order the server would not.
+   `$binarySize` landed (strings + bytes); `$bsonSize` did NOT — it needs BSON
+   document sizing (type bytes, cstring names, int32 lengths), which is its own
+   piece of work, not a binary one. Base64 via node:buffer, which Deno also
+   implements; revival is a plain `Uint8Array`, never `Buffer`.
 3. **GridFS on top, for compatibility only** — `GridFSBucket` with
    `openUploadStream`/`openDownloadStream`/`find`/`delete`/`drop`, `fs.files` and
    `fs.chunks` as ordinary collections, 255KB chunks kept (the measurement above

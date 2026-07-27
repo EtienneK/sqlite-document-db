@@ -32,14 +32,40 @@ describe('EJSON storage encoding (DR-1)', () => {
       expect(stringify({ a: undefined, b: 1, list: [undefined, 2] }))
         .toStrictEqual('{"b":1,"list":[null,2]}')
     })
+
+    it('should encode Uint8Array as {"$binary": ...} and revive it', () => {
+      const bytes = new Uint8Array([0, 1, 254, 255])
+      const text = stringify({ bytes, nested: { deep: bytes }, list: [bytes, 'x'] })
+      expect(text).toContain('{"$binary":{"base64":"AAH+/w==","subType":"00"}}')
+      expect(parse(text)).toStrictEqual({ bytes, nested: { deep: bytes }, list: [bytes, 'x'] })
+    })
+
+    it('should store a Buffer (a Uint8Array subclass) and revive a plain Uint8Array', () => {
+      const revived = parse(stringify({ bytes: Buffer.from([1, 2, 3]) })).bytes
+      expect(revived).toBeInstanceOf(Uint8Array)
+      expect(Buffer.isBuffer(revived)).toStrictEqual(false)
+      expect([...revived]).toStrictEqual([1, 2, 3])
+    })
+
+    it('should store exactly the window of a Uint8Array view, not its whole buffer', () => {
+      const backing = new Uint8Array([9, 9, 5, 6, 9]).buffer
+      const view = new Uint8Array(backing, 2, 2)
+      expect([...parse(stringify({ bytes: view })).bytes]).toStrictEqual([5, 6])
+    })
+
+    it('should round-trip a zero-length Uint8Array', () => {
+      const revived = parse(stringify({ bytes: new Uint8Array(0) })).bytes
+      expect(revived).toBeInstanceOf(Uint8Array)
+      expect(revived.byteLength).toStrictEqual(0)
+    })
   })
 
   describe('rejection of unstorable values', () => {
     const cases: Array<[string, unknown]> = [
       ['RegExp', /x/i],
-      ['Uint8Array', new Uint8Array([1])],
-      ['Buffer', Buffer.from([1])],
       ['ArrayBuffer', new ArrayBuffer(1)],
+      ['DataView', new DataView(new ArrayBuffer(1))],
+      ['Int16Array', new Int16Array(1)],
       ['Map', new Map()],
       ['Set', new Set()],
       ['bigint', 10n],
@@ -69,6 +95,23 @@ describe('EJSON storage encoding (DR-1)', () => {
       // Only the exact one-key wrapper shape is ambiguous.
       const doc = { a: { $date: '2020-01-02T03:04:05.000Z', tz: 'UTC' }, b: { $date: 5 } }
       expect(parse(stringify(doc))).toStrictEqual(doc)
+    })
+
+    // The $binary wrapper reserves its shape for the same reason the $date one
+    // does: a plain object of exactly that shape would come back as bytes.
+    it('should reject an object shaped like the stored binary wrapper', () => {
+      expect(() => stringify({ outer: { bad: { $binary: { base64: 'AAE=', subType: '00' } } } }))
+        .toThrow(/at \$\.outer\.bad/)
+    })
+
+    it('should store objects that merely contain a $binary key', () => {
+      const doc = { a: { $binary: 5 }, b: { $binary: { base64: 'AAE=' } }, c: { $binary: { base64: 'AAE=', subType: '00', extra: 1 } } }
+      expect(parse(stringify(doc))).toStrictEqual(doc)
+    })
+
+    it('should refuse other ArrayBuffer views by name, with the wrap-it fix', () => {
+      expect(() => stringify({ f: new Float64Array([1]) }))
+        .toThrow(/Float64Array.*new Uint8Array\(view\.buffer/)
     })
 
     it('should store a field literally named __proto__ instead of losing it', () => {

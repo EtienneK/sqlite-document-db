@@ -567,13 +567,21 @@ export function compileStages (
           // so a $group that produced a single row slipped straight past it.
           if (strict) {
             for (const [field] of spec) {
-              if (!docs.some(doc => Array.isArray(pathValue(doc, field, strict)))) continue
-              // The same divergence Collection.assertSortable rejects for a
-              // sort that runs in SQL - a $group can put an array here too.
-              throw Error(
-                `strict: cannot sort by '${field}' - some documents hold an ARRAY there, and MongoDB would ` +
-                'order those by their smallest (ascending) or largest (descending) element, which this library does not'
-              )
+              // The same divergences Collection.assertSortable rejects for a
+              // sort that runs in SQL - a $group can put an array (or a
+              // binary value, which orders by base64 text here) here too.
+              if (docs.some(doc => Array.isArray(pathValue(doc, field, strict)))) {
+                throw Error(
+                  `strict: cannot sort by '${field}' - some documents hold an ARRAY there, and MongoDB would ` +
+                  'order those by their smallest (ascending) or largest (descending) element, which this library does not'
+                )
+              }
+              if (docs.some(doc => pathValue(doc, field, strict) instanceof Uint8Array)) {
+                throw Error(
+                  `strict: cannot sort by '${field}' - some documents hold BINARY there, and MongoDB would ` +
+                  'order those by length then bytes, where this library orders by the stored base64 text'
+                )
+              }
             }
           }
           docs.sort((a, b) => {

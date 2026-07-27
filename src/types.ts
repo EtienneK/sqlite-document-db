@@ -575,6 +575,8 @@ export interface DbOptions {
    *   to "matches nothing" rather than to a fact about the data;
    * - a sort whose key holds an ARRAY in some document, which MongoDB orders
    *   by the array's smallest/largest element and this library orders as text;
+   * - a sort whose key holds BINARY in some document, which MongoDB orders by
+   *   length then bytes and this library by the stored base64 text;
    * - an aggregation field path that runs through an array, which MongoDB maps
    *   over and this library reads as missing.
    *

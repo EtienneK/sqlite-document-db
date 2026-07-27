@@ -300,6 +300,7 @@ export function typeName (value: unknown): string {
   if (value === null) return 'null'
   if (Array.isArray(value)) return 'array'
   if (value instanceof Date) return 'date'
+  if (value instanceof Uint8Array) return 'binData'
   switch (typeof value) {
     case 'string': return 'string'
     case 'boolean': return 'bool'
@@ -545,6 +546,18 @@ const OPERATORS: Record<string, Operator> = {
   $substrBytes: (raw, ctx) => substrBytes('$substrBytes', raw, ctx),
 
   $strLenBytes: (raw, ctx) => utf8('$strLenBytes', args('$strLenBytes', raw, ctx, 1)[0]).length,
+
+  /**
+   * The size in bytes of a string (UTF-8) or a binary value (BACKLOG item 35
+   * step 2 unblocked it). Null and missing answer null, like the server.
+   */
+  $binarySize: (raw, ctx) => {
+    const [value] = args('$binarySize', raw, ctx, 1)
+    if (isNullish(value)) return null
+    if (value instanceof Uint8Array) return value.byteLength
+    if (typeof value === 'string') return utf8('$binarySize', value).length
+    throw Error(`$binarySize requires a string or binary argument, but got ${typeName(value)}`)
+  },
 
   $indexOfBytes: (raw, ctx) => {
     const [value, search, start, end] = args('$indexOfBytes', raw, ctx, 2, 4)

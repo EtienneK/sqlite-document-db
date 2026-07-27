@@ -1224,15 +1224,30 @@ Mongodb variant flaky for reasons that are nobody's bug.
   [test/ejson.spec.ts](test/ejson.spec.ts) pins both edges. There is no document
   SIZE limit, which means a document a real MongoDB would refuse (>16MB) is
   accepted here.
-- **Storage is EJSON-for-Dates, not plain JSON** ([src/ejson.ts](src/ejson.ts), per
-  DR-1). Dates are stored as `{"$date": "<ISO>"}` and revived on read; every other
+- **Storage is EJSON-for-Dates-and-bytes, not plain JSON** ([src/ejson.ts](src/ejson.ts), per
+  DR-1). Dates are stored as `{"$date": "<ISO>"}`, `Uint8Array` as
+  `{"$binary": {"base64": …, "subType": "00"}}` (revived as a plain
+  `Uint8Array`, never `Buffer`); every other
   non-JSON type is rejected at write time with the offending path — **including a
-  plain object of exactly that wrapper shape**, which would otherwise be revived as
-  a Date (an *Invalid* Date, serialising to `null`, when the string is not one).
-  Consequences:
+  plain object of exactly either wrapper shape**, which would otherwise be revived as
+  a Date (an *Invalid* Date, serialising to `null`, when the string is not one) or
+  as someone else's bytes. Other `ArrayBuffer` views are refused BY NAME with the
+  wrap-it fix, matching `db.sql`. Consequences:
   documents must go through `stringifyDocument`/`parseDocument`, never raw
   `JSON.stringify`/`parse`; date comparisons in [src/query.ts](src/query.ts)
   target the `field.$date` sub-path (ISO strings order lexicographically, which is what
   makes `$gt`/`$lt` work); `$in`/`$nin` with a Date rewrite to `$or`/`$nor` of
   equalities; and any future index over a date field must target the same `.$date`
   sub-path or it won't match.
+- **Binary needed no new comparison SQL, and one refusal.** A stored
+  `Uint8Array` compares as its encoded wrapper TEXT through the machinery
+  objects already had, so `$eq`/`$in`/`$pull`/`$addToSet` came free (one line:
+  `pullCriterion` counts a Uint8Array as an equality, not a criterion
+  document). binData has its own BSON rank — between array and boolean, in
+  `bsonRank` (JS) and `bsonRankSql` (SQL), renumbered TOGETHER; the twins must
+  agree — but WITHIN the rank, wrapper-text order is (base64, subType), not
+  MongoDB's (length, subtype, bytes). Hence two edges: `$gt`/`$gte`/`$lt`/`$lte`
+  REFUSE Uint8Array arguments, and sorting a field holding binary is a
+  documented divergence that `strict` rejects (`assertSortable`, and the
+  `$sort`-after-`$group` check in aggregate.ts). Do not "fix" either by
+  comparing base64 text and calling it order.

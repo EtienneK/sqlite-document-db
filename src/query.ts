@@ -264,27 +264,28 @@ const TYPE_ALIAS_BY_CODE: Record<number, string> = {
 
 // Valid aliases for types the storage layer cannot hold (rejected at write
 // time, see src/ejson.ts) - $type accepts them but they can never match.
-const UNSTORABLE_TYPE_ALIASES = new Set(['binData', 'undefined', 'objectId', 'regex', 'dbPointer', 'javascript', 'symbol', 'javascriptWithScope', 'timestamp', 'long', 'decimal', 'minKey', 'maxKey'])
+const UNSTORABLE_TYPE_ALIASES = new Set(['undefined', 'objectId', 'regex', 'dbPointer', 'javascript', 'symbol', 'javascriptWithScope', 'timestamp', 'long', 'decimal', 'minKey', 'maxKey'])
 
 /**
  * One $type alias as a predicate over SQLite's JSON type system.
  *
- * `typeExpr`/`valueExpr`/`dateExpr` are SQL expressions for json_type of the
- * value, the value itself, and its `.$date` sub-path (NULL when not a date
- * wrapper). Number aliases follow the driver's serialization rule - an
- * integral JS number becomes int32 when it fits, double otherwise - so 'int'
- * is bracketed to the int32 range and out-of-range integers count as doubles.
- * 'long' can never match: the driver only produces it for BigInt/Long, which
- * the storage layer rejects.
+ * `typeExpr`/`valueExpr`/`dateExpr`/`binExpr` are SQL expressions for
+ * json_type of the value, the value itself, and its `.$date` / `.$binary`
+ * sub-paths (NULL when it is not the matching wrapper). Number aliases follow
+ * the driver's serialization rule - an integral JS number becomes int32 when
+ * it fits, double otherwise - so 'int' is bracketed to the int32 range and
+ * out-of-range integers count as doubles. 'long' can never match: the driver
+ * only produces it for BigInt/Long, which the storage layer rejects.
  */
-function typePredicate (typeExpr: string, valueExpr: string, dateExpr: string, alias: string): string {
+function typePredicate (typeExpr: string, valueExpr: string, dateExpr: string, binExpr: string, alias: string): string {
   switch (alias) {
     case 'double': return `(${typeExpr} = 'real' OR (${typeExpr} = 'integer' AND (${valueExpr} < ${INT32_MIN} OR ${valueExpr} > ${INT32_MAX})))`
     case 'string': return `${typeExpr} = 'text'`
-    case 'object': return `(${typeExpr} = 'object' AND ${dateExpr} IS NULL)`
+    case 'object': return `(${typeExpr} = 'object' AND ${dateExpr} IS NULL AND ${binExpr} IS NULL)`
     case 'array': return `${typeExpr} = 'array'`
     case 'bool': return `${typeExpr} IN ('true','false')`
     case 'date': return `${dateExpr} IS NOT NULL`
+    case 'binData': return `${binExpr} IS NOT NULL`
     case 'null': return `${typeExpr} = 'null'`
     case 'int': return `(${typeExpr} = 'integer' AND ${valueExpr} >= ${INT32_MIN} AND ${valueExpr} <= ${INT32_MAX})`
     case 'number': return `${typeExpr} IN ('integer','real')`
@@ -599,6 +600,16 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'object' && typeof value !== 'boolean') {
         throw Error(`${op} expects value to be of type: number | string | boolean | object | null; but got: ${typeof value}`)
       }
+      // Binary equality works - the encoded {"$binary": ...} wrappers compare
+      // as text, like any object - but MongoDB ORDERS binary by length, then
+      // subtype, then bytes, and no comparison over the stored base64 text
+      // reproduces that. Range operators refuse rather than answer differently.
+      if (value instanceof Uint8Array && op !== '$eq' && op !== '$ne') {
+        throw Error(
+          `${op} does not support Uint8Array values: MongoDB orders binary by length, then bytes, ` +
+          'which this library cannot reproduce over the stored base64 - use $eq/$ne/$in'
+        )
+      }
       // MongoDB's $ne is the exact complement of the whole $eq match: it
       // excludes documents whose field equals the value AND documents whose
       // array field contains it, keeping everything else including missing
@@ -766,9 +777,11 @@ function convertOp (ctx: SqlContext, field: string, op: string, value: any): str
       // so the element side must CASE-guard on the element being an object
       // (CASE evaluates strictly in order; AND terms may be reordered).
       const dateExpr = toJson1Extract(ctx.col, [`${field}.$date`])
+      const binExpr = toJson1Extract(ctx.col, [`${field}.$binary`])
       const elemDateExpr = "CASE WHEN json_each.type = 'object' THEN json_extract(json_each.value, '$.$date') END"
-      const scalarPred = `(${aliases.map(alias => typePredicate(typeExpr, valueExpr, dateExpr, alias)).join(' OR ')})`
-      const elemPred = `(${aliases.map(alias => typePredicate('json_each.type', 'json_each.value', elemDateExpr, alias)).join(' OR ')})`
+      const elemBinExpr = "CASE WHEN json_each.type = 'object' THEN json_extract(json_each.value, '$.$binary') END"
+      const scalarPred = `(${aliases.map(alias => typePredicate(typeExpr, valueExpr, dateExpr, binExpr, alias)).join(' OR ')})`
+      const elemPred = `(${aliases.map(alias => typePredicate('json_each.type', 'json_each.value', elemDateExpr, elemBinExpr, alias)).join(' OR ')})`
       return withElementMatch(ctx, scalarPred, elementMatch(ctx, field, elemPred))
     }
     case '$exists': {
@@ -980,25 +993,29 @@ export function toSql (
 /**
  * MongoDB's BSON type ordering, as a SQL rank:
  *
- *   null/missing < numbers < strings < objects < arrays < booleans < dates
+ *   null/missing < numbers < strings < objects < arrays < binData < booleans < dates
  *
  * SQLite's own ordering (NULL < numbers < text, booleans as 0/1 integers, our
  * wrapped dates as object text) disagrees with all of the exotic cases, so
  * every ordered comparison ranks by type first and compares values second.
  *
- * `typeExpr` is a json_type expression and `dateExpr` extracts the value's
- * `.$date` sub-path (NULL when it is not a stored Date). Kept in one place
- * because sorting, `$push: { $sort }` and `$min`/`$max` must all agree - and
- * src/bson-order.ts is the JS twin, which must agree with them too.
+ * `typeExpr` is a json_type expression; `dateExpr`/`binExpr` extract the
+ * value's `.$date` / `.$binary` sub-paths (NULL when it is not that wrapper).
+ * Kept in one place because sorting, `$push: { $sort }` and `$min`/`$max` must
+ * all agree - and src/bson-order.ts is the JS twin, which must agree with them
+ * too. Within the binData rank values compare as their wrapper TEXT (the ELSE
+ * arm of bsonValueSql), which is base64 order - the same known divergence
+ * arrays have, and policed by `strict` the same way.
  */
-export function bsonRankSql (typeExpr: string, dateExpr: string): string {
+export function bsonRankSql (typeExpr: string, dateExpr: string, binExpr: string): string {
   return `CASE WHEN ${typeExpr} IS NULL OR ${typeExpr} = 'null' THEN 0 ` +
     `WHEN ${typeExpr} IN ('integer','real') THEN 1 ` +
     `WHEN ${typeExpr} = 'text' THEN 2 ` +
-    `WHEN ${typeExpr} = 'object' AND ${dateExpr} IS NOT NULL THEN 6 ` +
+    `WHEN ${typeExpr} = 'object' AND ${dateExpr} IS NOT NULL THEN 7 ` +
+    `WHEN ${typeExpr} = 'object' AND ${binExpr} IS NOT NULL THEN 5 ` +
     `WHEN ${typeExpr} = 'object' THEN 3 ` +
     `WHEN ${typeExpr} = 'array' THEN 4 ` +
-    'ELSE 5 END' // 'true'/'false'
+    'ELSE 6 END' // 'true'/'false'
 }
 
 /** The value half of a BSON-ordered comparison: a Date compares by its ISO string. */
@@ -1028,9 +1045,10 @@ export function toSortSql (columnName: string, sort: Record<string, number>): st
     const column = quoteIdentifier(columnName)
     const type = `json_type(${column}, ${toJson1PathString([field])})`
     const dateValue = `json_extract(${column}, ${toJson1PathString([`${field}.$date`])})`
+    const binValue = `json_extract(${column}, ${toJson1PathString([`${field}.$binary`])})`
     const value = `json_extract(${column}, ${toJson1PathString([field])})`
     const dir = direction === 1 ? 'ASC' : 'DESC'
-    terms.push(`${bsonRankSql(type, dateValue)} ${dir}`, `${bsonValueSql(type, value, dateValue)} ${dir}`)
+    terms.push(`${bsonRankSql(type, dateValue, binValue)} ${dir}`, `${bsonValueSql(type, value, dateValue)} ${dir}`)
   }
   return terms.join(', ')
 }

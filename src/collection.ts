@@ -590,27 +590,37 @@ export class Collection<TSchema extends Document = Document> {
    * untouched on refusal, where an in-statement guard aborts mid-write.
    */
   /**
-   * Under `strict`, rejects a sort whose key holds an ARRAY in any document.
+   * Under `strict`, rejects a sort whose key holds an ARRAY - or a BINARY
+   * value - in any document.
    *
-   * MongoDB sorts such a field by its smallest element ascending and its
+   * MongoDB sorts an array field by its smallest element ascending and its
    * largest descending; `toSortSql` ranks arrays as a group and compares them
    * as text, so the two disagree on the ORDER of a result set both consider
    * correct - the kind of difference a test suite discovers on the day it
-   * moves to a real server. Statically undetectable, so this asks the data.
+   * moves to a real server. Binary is the same shape of divergence: MongoDB
+   * orders it by length, then bytes, and this library by the stored base64
+   * text. Statically undetectable, so this asks the data - one statement per
+   * sort key, covering both cases.
    */
   private assertSortable (sort: Record<string, number>): void {
     if (this.dbOptions.strict !== true) return
     for (const field of Object.keys(sort)) {
       const path = toJson1PathString([field])
+      const binPath = toJson1PathString([`${field}.$binary`])
       const found = this.prepare(
-        `SELECT 1 AS found FROM ${this.table} WHERE json_type(data, ${path}) = 'array' LIMIT 1`
-      ).get()
-      if (found !== undefined) {
-        throw Error(
+        `SELECT CASE WHEN json_type(data, ${path}) = 'array' THEN 'array' ELSE 'binary' END AS kind ` +
+        `FROM ${this.table} WHERE json_type(data, ${path}) = 'array' OR json_type(data, ${binPath}) IS NOT NULL LIMIT 1`
+      ).get() as { kind: string } | undefined
+      if (found === undefined) continue
+      throw found.kind === 'array'
+        ? Error(
           `strict: cannot sort by '${field}' - some documents hold an ARRAY there, and MongoDB would ` +
           'order those by their smallest (ascending) or largest (descending) element, which this library does not'
         )
-      }
+        : Error(
+          `strict: cannot sort by '${field}' - some documents hold BINARY there, and MongoDB would ` +
+          'order those by length then bytes, where this library orders by the stored base64 text'
+        )
     }
   }
 

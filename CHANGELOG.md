@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Binary values in documents.** `Uint8Array` (and `Buffer`) fields store as
+  EJSON `{"$binary": {"base64": …, "subType": "00"}}` and revive as plain
+  `Uint8Array` — where they used to be rejected at write time. Equality,
+  `$in`/`$nin`, implicit array-element matching, nested paths,
+  `$type: 'binData'`, the `$binarySize` expression operator, `distinct()`, and
+  the update operators (`$addToSet` deduplicates by content, `$pull` removes by
+  content) are all oracle-verified against the real driver's `Binary`. Binary
+  ranks in its own BSON slot (after arrays, before booleans). Two deliberate
+  edges: range operators refuse binary values (MongoDB orders binary by length
+  then bytes, which SQL over the stored base64 cannot reproduce), and sorting a
+  field that holds binary orders by the stored text — a documented divergence
+  `strict` now rejects, exactly like sorting arrays. Other typed arrays and
+  `DataView` are refused by name with the wrap-it fix. This is DR-1's remaining
+  option-B step (BACKLOG item 35 step 2), and what unblocks GridFS.
 - **Full-text search, under this library's own name**: `createSearchIndex`,
   `searchText`, `dropSearchIndex` and `listSearchIndexes`. An FTS5 table
   shadows the collection and SQLite triggers keep it in step — including

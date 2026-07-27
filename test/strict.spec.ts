@@ -17,6 +17,13 @@ const seedArrayValued = async (db: Db): Promise<void> => {
   await db.collection('t').insertMany([{ _id: 1, v: [5, 1] }, { _id: 2, v: 3 }])
 }
 
+const seedBinaryValued = async (db: Db): Promise<void> => {
+  await db.collection('t').insertMany([
+    { _id: 1, v: new Uint8Array([0]) },
+    { _id: 2, v: new Uint8Array([255, 0]) }
+  ])
+}
+
 const seedGrades = async (db: Db): Promise<void> => {
   await db.collection('t').insertOne({ _id: 1, grades: [{ score: 40 }, { score: 90 }] })
 }
@@ -86,16 +93,54 @@ describe('strict mode', () => {
     it('should reject it under strict', async () => {
       const db = await open(true)
       await db.collection('t').insertOne({ a: 1 })
-      await expect(db.collection('t').countDocuments({ a: { $type: 'binData' } })).rejects.toThrow(/strict.*never match/)
+      await expect(db.collection('t').countDocuments({ a: { $type: 'objectId' } })).rejects.toThrow(/strict.*never match/)
       await expect(db.collection('t').countDocuments({ a: { $type: ['int', 'decimal'] } })).rejects.toThrow(/strict/)
       await db.close()
     })
 
     it('should still allow the types it can store', async () => {
       const db = await open(true)
-      await db.collection('t').insertOne({ a: 1, b: 'x', c: new Date(), d: [1], e: null })
+      await db.collection('t').insertOne({ a: 1, b: 'x', c: new Date(), d: [1], e: null, f: new Uint8Array([1]) })
       expect(await db.collection('t').countDocuments({ a: { $type: 'number' } })).toStrictEqual(1)
       expect(await db.collection('t').countDocuments({ c: { $type: 'date' } })).toStrictEqual(1)
+      // binData left the unstorable list with item 35 step 2.
+      expect(await db.collection('t').countDocuments({ f: { $type: 'binData' } })).toStrictEqual(1)
+      await db.close()
+    })
+  })
+
+  describe('sorting a field that holds binary', () => {
+    it('should sort by the stored base64 text by default', async () => {
+      const db = await open(false)
+      await seedBinaryValued(db)
+      // [255,0] is '/wA=' and [0] is 'AA==', and '/' < 'A' as text - so the
+      // TWO-byte value sorts first here, where MongoDB orders by LENGTH first
+      // and would answer [1, 2]. This is the divergence strict rejects below.
+      expect((await db.collection('t').find().sort({ v: 1 }).toArray()).map(d => d._id)).toStrictEqual([2, 1])
+      await db.close()
+    })
+
+    it('should reject the sort under strict', async () => {
+      const db = await open(true)
+      await seedBinaryValued(db)
+      await expect(db.collection('t').find().sort({ v: 1 }).toArray()).rejects.toThrow(/strict.*BINARY/)
+      await db.close()
+    })
+
+    it('should reject an aggregation $sort over binary after a $group', async () => {
+      const db = await open(true)
+      await db.collection('t').insertMany([{ g: 'a', v: new Uint8Array([1]) }])
+      await expect(
+        db.collection('t').aggregate([{ $group: { _id: '$g', v: { $first: '$v' } } }, { $sort: { v: 1 } }]).toArray()
+      ).rejects.toThrow(/strict.*BINARY/)
+      await db.close()
+    })
+
+    it('should refuse range operators over binary values everywhere, not only under strict', async () => {
+      const db = await open(false)
+      await seedBinaryValued(db)
+      await expect(db.collection('t').countDocuments({ v: { $gt: new Uint8Array([1]) } }))
+        .rejects.toThrow(/\$gt does not support Uint8Array/)
       await db.close()
     })
   })

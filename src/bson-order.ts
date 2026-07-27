@@ -7,12 +7,15 @@
  * order identically, or the same pipeline gives different answers depending on
  * a detail the caller cannot see.
  *
- *   null/missing < numbers < strings < objects < arrays < booleans < dates
+ *   null/missing < numbers < strings < objects < arrays < binData < booleans < dates
  *
  * Known divergence, shared with the SQL side: MongoDB compares two ARRAYS
  * element by element (and sorts an array FIELD by its smallest or largest
  * element, depending on direction); here arrays rank as a group and compare by
- * their JSON text. `strict: true` rejects the sorts where that shows.
+ * their JSON text. Binary values are the same story: MongoDB orders them by
+ * length, then subtype, then bytes, while here they compare by their encoded
+ * wrapper text - which is base64 order, not byte order. `strict: true` rejects
+ * the sorts where either shows.
  */
 
 import { encodeValue } from './ejson.js'
@@ -22,9 +25,10 @@ export function bsonRank (value: unknown): number {
   if (value === null || value === undefined) return 0
   if (typeof value === 'number') return 1
   if (typeof value === 'string') return 2
-  if (value instanceof Date) return 6
+  if (value instanceof Date) return 7
+  if (value instanceof Uint8Array) return 5
   if (Array.isArray(value)) return 4
-  if (typeof value === 'boolean') return 5
+  if (typeof value === 'boolean') return 6
   return 3 // object
 }
 
@@ -42,15 +46,16 @@ export function compareBson (a: unknown, b: unknown): number {
       return x === y ? 0 : (x < y ? -1 : 1)
     }
     case 2: return compareStrings(a as string, b as string)
-    case 5: return Number(a) - Number(b)
-    case 6: {
+    case 6: return Number(a) - Number(b)
+    case 7: {
       const x = (a as Date).getTime()
       const y = (b as Date).getTime()
       return x === y ? 0 : (x < y ? -1 : 1)
     }
     default: {
-      // Objects and arrays: JSON text, matching what the SQL side compares.
-      // Encoded FIRST so a nested Date serialises as its {"$date":...} wrapper -
+      // Objects, arrays and binary: JSON text, matching what the SQL side
+      // compares. Encoded FIRST so a nested Date serialises as its
+      // {"$date":...} wrapper (and a Uint8Array as its {"$binary":...} one) -
       // the exact text the storage layer and bsonValueSql compare against.
       // Plain JSON.stringify would call Date.prototype.toJSON and render a bare
       // ISO string, which made a JS $sort disagree with the SQL one and let

@@ -27,6 +27,7 @@
  */
 
 import { compareBson, equalsBson } from './bson-order.js'
+import { encodeValue } from './ejson.js'
 import { ownField, setField } from './safe-object.js'
 import type { Document } from './types.js'
 import {
@@ -676,8 +677,9 @@ function objectGuard (expr: string): string {
 function elementSortTerms (sort: 1 | -1 | Record<string, number>): string {
   if (sort === 1 || sort === -1) {
     const dateExpr = "CASE WHEN json_each.type = 'object' THEN json_extract(json_each.value, '$.$date') END"
+    const binExpr = "CASE WHEN json_each.type = 'object' THEN json_extract(json_each.value, '$.$binary') END"
     const dir = sort === 1 ? 'ASC' : 'DESC'
-    return `${bsonRankSql('json_each.type', dateExpr)} ${dir}, ` +
+    return `${bsonRankSql('json_each.type', dateExpr, binExpr)} ${dir}, ` +
       `${bsonValueSql('json_each.type', 'json_each.value', dateExpr)} ${dir}`
   }
 
@@ -686,8 +688,9 @@ function elementSortTerms (sort: 1 | -1 | Record<string, number>): string {
     const typeExpr = objectGuard(`json_type(json_each.value, ${toJson1PathString([field])})`)
     const valueExpr = objectGuard(`json_extract(json_each.value, ${toJson1PathString([field])})`)
     const dateExpr = objectGuard(`json_extract(json_each.value, ${toJson1PathString([`${field}.$date`])})`)
+    const binExpr = objectGuard(`json_extract(json_each.value, ${toJson1PathString([`${field}.$binary`])})`)
     const dir = direction === 1 ? 'ASC' : 'DESC'
-    terms.push(`${bsonRankSql(typeExpr, dateExpr)} ${dir}`, `${bsonValueSql(typeExpr, valueExpr, dateExpr)} ${dir}`)
+    terms.push(`${bsonRankSql(typeExpr, dateExpr, binExpr)} ${dir}`, `${bsonValueSql(typeExpr, valueExpr, dateExpr)} ${dir}`)
   }
   return terms.join(', ')
 }
@@ -1003,7 +1006,8 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
         const datePath = datePathOf(path)
         const typeExpr = `json_type(${source}, ${path})`
         const dateExpr = `json_extract(${source}, ${datePath})`
-        const rank = bsonRankSql(typeExpr, dateExpr)
+        const binExpr = `json_extract(${source}, ${path.slice(0, -1)}.$binary')`
+        const rank = bsonRankSql(typeExpr, dateExpr, binExpr)
         const current = bsonValueSql(typeExpr, `json_extract(${source}, ${path})`, dateExpr)
         // Row values let the (rank, value) pair compare in one shot, which is
         // what makes this follow BSON order rather than SQLite's.
@@ -1191,7 +1195,8 @@ export function buildUpdateExpression (update: AnyUpdate, options: UpdateCompile
  */
 function pullCriterion (value: unknown): QueryFilterDocument {
   if (value instanceof RegExp) return { $regex: value }
-  if (value === null || typeof value !== 'object' || Array.isArray(value) || value instanceof Date) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+    value instanceof Date || value instanceof Uint8Array) {
     return { $eq: value }
   }
   return value as QueryFilterDocument
@@ -1206,9 +1211,12 @@ function comparableValue (value: unknown): [number, string | number | null] {
   if (value === null || value === undefined) return [0, null]
   if (typeof value === 'number') return [1, value]
   if (typeof value === 'string') return [2, value]
-  if (value instanceof Date) return [6, value.toISOString()]
+  if (value instanceof Date) return [7, value.toISOString()]
+  // Encoded first, so the wrapper text is what compares - the same text
+  // bsonValueSql's ELSE arm reads back out of a stored one.
+  if (value instanceof Uint8Array) return [5, JSON.stringify(encodeValue(value))]
   if (Array.isArray(value)) return [4, JSON.stringify(value)]
-  if (typeof value === 'boolean') return [5, value ? 1 : 0]
+  if (typeof value === 'boolean') return [6, value ? 1 : 0]
   return [3, JSON.stringify(value)]
 }
 

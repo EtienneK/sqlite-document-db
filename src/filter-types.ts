@@ -38,7 +38,7 @@ type Prev = [never, 0, 1, 2, 3, 4]
 type Depth = 0 | 1 | 2 | 3 | 4
 
 /** Values that are the end of a path rather than something to descend into. */
-type Leaf = string | number | boolean | bigint | symbol | Date | null | undefined
+type Leaf = string | number | boolean | bigint | symbol | Date | Uint8Array | null | undefined
 
 /**
  * Every dot-notation path into `T`: `'size'`, `'size.uom'`, `'tags.0'`.
